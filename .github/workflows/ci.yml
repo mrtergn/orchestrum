@@ -16,12 +16,12 @@ jobs:
       - name: Install
         run: npm install
       - name: Core typecheck
-        run: npm run -w @orchestrum/core typecheck
+        run: npm run --prefix packages/core typecheck
       - name: Core tests
-        run: npm run -w @orchestrum/core test
+        run: npm run --prefix packages/core test
       - name: Service build
-        run: npm run -w @orchestrum/service build
+        run: npm run --prefix packages/service build
       - name: UI lint
-        run: npm run -w @orchestrum/ui lint
+        run: npm run --prefix apps/ui lint
       - name: UI build
-        run: npm run -w @orchestrum/ui build
+        run: npm run --prefix apps/ui build

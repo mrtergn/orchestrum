@@ -3,8 +3,8 @@
 <br/>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mrtergn/orcherstrum/main/apps/ui/public/favicon.svg">
-  <img alt="Orchestrum" src="https://raw.githubusercontent.com/mrtergn/orcherstrum/main/apps/ui/public/favicon.svg" width="80">
+  <source media="(prefers-color-scheme: dark)" srcset="apps/ui/public/favicon.svg">
+  <img alt="Orchestrum" src="apps/ui/public/favicon.svg" width="80">
 </picture>
 
 # Orchestrum
@@ -38,22 +38,18 @@
 <div align="center">
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│   ╭──────────╮     ╭──────────╮     ╭──────────╮     ╭──────────╮  │
-│   │  📋 PM   │────▶│  ⚙ Dev  │────▶│  🔍 Audit│────▶│  ✅ Done │  │
-│   │  Agent   │     │  Agent   │     │  Agent   │     │          │  │
-│   ╰──────────╯     ╰──────────╯     ╰──────────╯     ╰──────────╯  │
-│        │                │                │                          │
-│        ▼                ▼                ▼                          │
-│   ┌─────────┐     ┌─────────┐     ┌─────────┐                     │
-│   │  Spec   │     │  Code   │     │  Review  │     📊 Metrics     │
-│   │  .md    │     │  .diff  │     │  .md     │     📈 Analytics   │
-│   └─────────┘     └─────────┘     └─────────┘     🔒 Audit Trail  │
-│                                                                     │
-│                    ◈ All data stays on YOUR machine                 │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+ ┌───────────────────────────────────────────────────────────────┐
+ │                                                               │
+ │   [ PM Agent ] ──> [ Dev Agent ] ──> [ Audit ] ──> [ Done ]  │
+ │       |                |                |                     │
+ │       v                v                v                     │
+ │    Spec.md          Code.diff       Review.md     Metrics     │
+ │                                                   Analytics   │
+ │                                                   Audit Trail │
+ │                                                               │
+ │              * All data stays on YOUR machine *               │
+ │                                                               │
+ └───────────────────────────────────────────────────────────────┘
 ```
 
 </div>
@@ -66,7 +62,7 @@
 
 <table>
 <tr>
-<td width="50%">
+<td width="50%" valign="top">
 
 ### 🤖 Agent Management
 - Create unlimited AI agents (PM, Dev, Audit, QA, …)
@@ -76,7 +72,7 @@
 - Onboarding wizard for instant setup
 
 </td>
-<td width="50%">
+<td width="50%" valign="top">
 
 ### 🏗️ Org Chart
 - Visual hierarchy builder with drag & drop
@@ -87,7 +83,7 @@
 </td>
 </tr>
 <tr>
-<td>
+<td width="50%" valign="top">
 
 ### ⚡ Task Queue & Execution
 - Assign tasks to agents from the UI
@@ -97,7 +93,7 @@
 - Approval gates for high-risk actions
 
 </td>
-<td>
+<td width="50%" valign="top">
 
 ### 🎯 Mission Control
 - Live dashboard with SSE event stream
@@ -108,7 +104,7 @@
 </td>
 </tr>
 <tr>
-<td>
+<td width="50%" valign="top">
 
 ### 🔬 Multi-Model Arbitration
 - Run multiple LLMs in parallel per step
@@ -117,7 +113,7 @@
 - Full audit trail of all candidate outputs
 
 </td>
-<td>
+<td width="50%" valign="top">
 
 ### 🐳 Sandboxed Execution
 - Docker container isolation for agent actions
@@ -128,7 +124,7 @@
 </td>
 </tr>
 <tr>
-<td>
+<td width="50%" valign="top">
 
 ### 📊 Analytics & Metrics
 - Cost trends, success rates, loop frequency
@@ -137,7 +133,7 @@
 - KPI dashboard with spark charts
 
 </td>
-<td>
+<td width="50%" valign="top">
 
 ### 🔌 Plugin System
 - Local plugin installation (`~/.orchestrum/plugins/`)
@@ -230,10 +226,10 @@ npm run dist:desktop
 ```
   1. Open Orchestrum UI
   2. Complete the onboarding wizard:
-     ├─ 🔑  Save your provider API key
-     ├─ 🤖  Create PM / Dev / Audit agents
-     ├─ 📊  Auto-generate org chart
-     └─ 📋  Enqueue a demo task
+     ├─ Save your provider API key
+     ├─ Create PM / Dev / Audit agents
+     ├─ Auto-generate org chart
+     └─ Enqueue a demo task
   3. Use Tasks page to assign real work
   4. Watch live execution on Mission Control
 ```
