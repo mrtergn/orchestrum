@@ -2,10 +2,7 @@
 
 <br/>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="apps/ui/public/favicon.svg">
-  <img alt="Orchestrum" src="apps/ui/public/favicon.svg" width="80">
-</picture>
+<img alt="Orchestrum" src="apps/ui/public/favicon.svg" width="80">
 
 # Orchestrum
 

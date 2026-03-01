@@ -14,7 +14,11 @@ jobs:
           node-version: 20
           cache: npm
       - name: Install
-        run: npm install
+        run: |
+          npm install
+          npm install --prefix packages/core
+          npm install --prefix packages/service
+          npm install --prefix apps/ui
       - name: Core typecheck
         run: npm run --prefix packages/core typecheck
       - name: Core tests
