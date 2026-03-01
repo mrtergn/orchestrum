@@ -1,0 +1,29 @@
+{
+  "name": "@orchestrum/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "local.orchestrum.desktop",
+    "productName": "Orchestrum",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "../ui/.next/**/*",
+      "../service/dist/**/*"
+    ],
+    "asar": true
+  }
+}

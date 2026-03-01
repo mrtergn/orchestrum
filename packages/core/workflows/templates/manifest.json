@@ -1,0 +1,24 @@
+{
+  "templates": [
+    {
+      "name": "feature-dev.yaml",
+      "title": "Feature Dev Loop",
+      "description": "PM spec -> DEV implement -> AUDIT -> FIX loop"
+    },
+    {
+      "name": "refactor-loop.yaml",
+      "title": "Refactor Loop",
+      "description": "Focus on refactoring and quality improvements"
+    },
+    {
+      "name": "test-hardening.yaml",
+      "title": "Test Hardening",
+      "description": "Generate tests, run suites, tighten failures"
+    },
+    {
+      "name": "security-audit.yaml",
+      "title": "Security Audit",
+      "description": "Audit-focused workflow with red team phase"
+    }
+  ]
+}

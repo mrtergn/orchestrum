@@ -1,0 +1,3 @@
+@echo off
+REM Orchestrum CLI wrapper for Windows
+node "C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js" exec --no-workspaces -- orchestrum %*

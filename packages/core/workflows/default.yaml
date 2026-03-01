@@ -1,0 +1,64 @@
+name: Default Orchestrum
+agents:
+  pm:
+    provider: openai
+    model: gpt-5
+  dev:
+    providers:
+      - openai:codex
+      - openai:gpt-5
+  audit:
+    provider: openai
+    model: gpt-5
+arbitration:
+  mode: score
+  min_models: 2
+concurrency:
+  max_agents: 3
+loop:
+  max_rounds: 3
+  max_loop_per_step: 2
+  audit_step_id: audit
+  fix_step_id: fix
+steps:
+  - id: spec
+    agent: pm
+    phase: plan
+    prompt: ../prompts/spec.md
+    inputs:
+      - user_goal
+      - repo_context
+    outputs:
+      - output.md
+  - id: implement
+    agent: dev
+    phase: build
+    prompt: ../prompts/implement.md
+    inputs:
+      - spec.md
+      - repo_context
+    outputs:
+      - output.md
+    apply_patch: true
+  - id: audit
+    agent: audit
+    phase: verify
+    prompt: ../prompts/audit.md
+    inputs:
+      - spec.md
+      - git.diff
+      - commands.log
+    outputs:
+      - output.json
+  - id: fix
+    agent: dev
+    phase: repair
+    prompt: ../prompts/fix.md
+    inputs:
+      - spec.md
+      - audit.json
+      - git.diff
+      - commands.log
+    outputs:
+      - output.md
+    apply_patch: true

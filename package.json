@@ -1,0 +1,25 @@
+{
+  "name": "orchestrum-root",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "orchestrum": "packages/cli/bin/orchestrum.js",
+    "orch": "packages/cli/bin/orchestrum.js"
+  },
+  "scripts": {
+    "dev": "npm --prefix apps/ui run dev",
+    "build": "npm --prefix apps/ui run build",
+    "lint": "npm --prefix apps/ui run lint",
+    "ui": "node --import tsx packages/core/src/cli.ts ui",
+    "service": "node --import tsx packages/service/src/server.ts",
+    "changelog": "node scripts/changelog.mjs",
+    "build:desktop": "npm --prefix apps/ui run build && npm --prefix packages/service run build && npm --prefix apps/desktop run build",
+    "dist:desktop": "npm --prefix apps/desktop run dist"
+  },
+  "dependencies": {
+    "body-parser": "^2.2.2",
+    "iconv-lite": "^0.7.2",
+    "raw-body": "^3.0.2"
+  }
+}

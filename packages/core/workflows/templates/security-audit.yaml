@@ -1,0 +1,71 @@
+name: Security Audit
+agents:
+  pm:
+    provider: openai
+    model: gpt-5
+  dev:
+    provider: openai
+    model: codex
+  audit:
+    provider: openai
+    model: gpt-5
+  security:
+    provider: openai
+    model: gpt-5
+security:
+  threshold: 0.7
+loop:
+  max_rounds: 2
+  max_loop_per_step: 2
+  audit_step_id: audit
+  fix_step_id: fix
+steps:
+  - id: spec
+    agent: pm
+    phase: plan
+    prompt: ../prompts/spec.md
+    inputs:
+      - user_goal
+      - repo_context
+    outputs:
+      - output.md
+  - id: implement
+    agent: dev
+    phase: build
+    prompt: ../prompts/implement.md
+    inputs:
+      - spec.md
+      - repo_context
+    outputs:
+      - output.md
+    apply_patch: true
+  - id: audit
+    agent: audit
+    phase: verify
+    prompt: ../prompts/audit.md
+    inputs:
+      - spec.md
+      - git.diff
+    outputs:
+      - output.json
+  - id: red_team
+    agent: security
+    phase: verify
+    type: red_team
+    prompt: ../prompts/audit.md
+    inputs:
+      - spec.md
+      - git.diff
+    outputs:
+      - output.json
+  - id: fix
+    agent: dev
+    phase: repair
+    prompt: ../prompts/fix.md
+    inputs:
+      - spec.md
+      - audit.json
+      - git.diff
+    outputs:
+      - output.md
+    apply_patch: true

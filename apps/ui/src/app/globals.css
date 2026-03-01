@@ -1,0 +1,268 @@
+﻿@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: #0f172a;
+  --surface-2: #111827;
+  --surface-3: #1f2937;
+  --accent: #f59e0b;
+  --accent-2: #38bdf8;
+  --ink: #e2e8f0;
+  --muted: #94a3b8;
+}
+
+body {
+  color: var(--ink);
+  background: radial-gradient(circle at top, #1f2937 0%, #0f172a 45%, #0b1120 100%);
+  min-height: 100vh;
+  font-family: "Space Grotesk", sans-serif;
+}
+
+/* ── Animations ── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in-scale {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-in {
+  animation: fade-in-scale 0.2s ease-out;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out both;
+}
+
+.animate-slide-down {
+  animation: slide-down 0.25s ease-out both;
+}
+
+/* Stagger children for page load feel */
+main > section,
+main > div,
+main > article {
+  animation: fade-in 0.35s ease-out both;
+}
+main > *:nth-child(1) { animation-delay: 0ms; }
+main > *:nth-child(2) { animation-delay: 40ms; }
+main > *:nth-child(3) { animation-delay: 80ms; }
+main > *:nth-child(4) { animation-delay: 120ms; }
+main > *:nth-child(5) { animation-delay: 160ms; }
+main > *:nth-child(6) { animation-delay: 200ms; }
+main > *:nth-child(7) { animation-delay: 240ms; }
+main > *:nth-child(8) { animation-delay: 280ms; }
+
+/* ── Smooth transitions on interactive elements ── */
+button, a, select, input, textarea {
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+/* ── Focus ring ── */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(245, 158, 11, 0.4);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── Scrollbar styling ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.3);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.15) transparent;
+}
+
+/* ── Org Tree: CSS hierarchy connectors ── */
+.org-tree {
+  --tree-line: #334155;
+  --tree-w: 2px;
+  --tree-gap: 28px;
+}
+.org-tree ul {
+  display: flex;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.org-tree li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  padding: 0 14px;
+  list-style: none;
+}
+/* nested child lists: space for horizontal bar + vertical drop from parent */
+.org-tree ul ul {
+  padding-top: var(--tree-gap);
+  position: relative;
+}
+/* vertical line from parent card down to horizontal bar */
+.org-tree ul ul::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: var(--tree-w);
+  height: var(--tree-gap);
+  background: var(--tree-line);
+}
+/* each non-root child: space above card for connector */
+.org-tree ul ul > li {
+  padding-top: var(--tree-gap);
+}
+/* vertical line from horizontal bar down to child card */
+.org-tree ul ul > li::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: var(--tree-w);
+  height: var(--tree-gap);
+  background: var(--tree-line);
+}
+/* horizontal connector segment (each child contributes its share) */
+.org-tree ul ul > li::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--tree-w);
+  background: var(--tree-line);
+}
+.org-tree ul ul > li:first-child::after { left: 50%; }
+.org-tree ul ul > li:last-child::after  { right: 50%; left: 0; }
+.org-tree ul ul > li:only-child::after  { display: none; }
+.org-tree ul ul > li:only-child::before { background: var(--tree-line); }
+/* light theme override */
+.theme-light .org-tree { --tree-line: #94a3b8; }
+
+/* ── Light theme ── */
+.theme-light body {
+  color: #0f172a;
+  background: radial-gradient(circle at top, #f8fafc 0%, #e2e8f0 60%, #e2e8f0 100%);
+}
+
+.theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-900\/40,
+.theme-light .bg-slate-900\/60,
+.theme-light .bg-slate-950\/80,
+.theme-light .bg-slate-950\/95 {
+  background-color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.theme-light .bg-slate-900\/30,
+.theme-light .bg-slate-900\/20,
+.theme-light .bg-slate-950\/70 {
+  background-color: rgba(255, 255, 255, 0.6) !important;
+}
+
+.theme-light .text-white {
+  color: #0f172a !important;
+}
+
+.theme-light .text-slate-200,
+.theme-light .text-slate-300 {
+  color: #1e293b !important;
+}
+
+.theme-light .text-slate-400 {
+  color: #475569 !important;
+}
+
+.theme-light .text-slate-500 {
+  color: #64748b !important;
+}
+
+.theme-light .text-slate-600 {
+  color: #94a3b8 !important;
+}
+
+.theme-light .border-slate-800 {
+  border-color: rgba(15, 23, 42, 0.1) !important;
+}
+
+.theme-light .border-slate-800\/60,
+.theme-light .border-slate-700 {
+  border-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+.theme-light .border-dashed.border-slate-700 {
+  border-color: rgba(15, 23, 42, 0.15) !important;
+}
+
+.theme-light .bg-slate-950 {
+  background-color: #f1f5f9 !important;
+}
+
+.theme-light .bg-slate-800 {
+  background-color: #e2e8f0 !important;
+}
+
+.theme-light aside {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  border-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+.theme-light ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.theme-light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.2);
+}
+
+.theme-light ::selection {
+  background: rgba(245, 158, 11, 0.25);
+}
+
+/* ── Code & mono ── */
+code, pre, .font-mono {
+  font-family: "JetBrains Mono", monospace;
+}
+
+::selection {
+  background: rgba(245, 158, 11, 0.4);
+}

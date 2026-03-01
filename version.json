@@ -1,0 +1,6 @@
+{
+  "version": "0.4.0",
+  "channel": "stable",
+  "buildDate": "2026-02-28",
+  "notes": "Productization release with licensing, updates, plugins, profiles, telemetry, and desktop polish."
+}

@@ -1,0 +1,38 @@
+name: CI Auto-Heal
+agents:
+  audit:
+    provider: openai
+    model: gpt-5
+  dev:
+    provider: openai
+    model: codex
+concurrency:
+  max_agents: 2
+loop:
+  max_rounds: 2
+  max_loop_per_step: 1
+  audit_step_id: audit
+  fix_step_id: fix
+steps:
+  - id: audit
+    agent: audit
+    phase: verify
+    prompt: ../prompts/audit.md
+    inputs:
+      - repo_context
+      - git.diff
+      - commands.log
+    outputs:
+      - output.json
+  - id: fix
+    agent: dev
+    phase: repair
+    prompt: ../prompts/fix.md
+    inputs:
+      - audit.json
+      - git.diff
+    outputs:
+      - output.md
+    apply_patch: true
+    run:
+      - npm test
