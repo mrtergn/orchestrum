@@ -9,7 +9,10 @@
   "scripts": {
     "dev": "electron .",
     "build": "electron-builder --dir",
-    "dist": "electron-builder"
+    "dist": "electron-builder --publish never",
+    "dist:mac": "electron-builder --mac dmg zip --publish never",
+    "dist:linux": "electron-builder --linux AppImage tar.gz --publish never",
+    "dist:win": "electron-builder --win nsis zip --publish never"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -18,7 +21,7 @@
   "build": {
     "appId": "local.orchestrum.desktop",
     "productName": "Orchestrum",
-    "artifactName": "orchestrum-${os}-${arch}.${ext}",
+    "artifactName": "orchestrum-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist"
     },
@@ -77,18 +80,24 @@
     ],
     "asar": false,
     "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false
     },
     "linux": {
       "target": [
-        "dir"
+        "AppImage",
+        "tar.gz"
       ]
     },
     "win": {
       "target": [
-        "dir"
+        "nsis",
+        "zip"
       ]
     }
   }

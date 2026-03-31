@@ -1,0 +1,392 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag. Defaults to v<version.json>.
+        required: false
+        type: string
+      release_name:
+        description: Release title. Defaults to Orchestrum <tag>.
+        required: false
+        type: string
+      notes:
+        description: Optional manual release notes. When empty, GitHub auto-generates notes.
+        required: false
+        type: string
+      draft:
+        description: Create the GitHub release as a draft.
+        required: true
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark the GitHub release as a prerelease.
+        required: true
+        default: false
+        type: boolean
+      build_macos:
+        description: Build macOS artifacts.
+        required: true
+        default: true
+        type: boolean
+      build_linux:
+        description: Build Linux artifacts.
+        required: true
+        default: true
+        type: boolean
+      build_windows:
+        description: Build Windows artifacts.
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 20
+
+jobs:
+  prepare:
+    # Requires at least one self-hosted runner. Use this variable to pin it if needed:
+    # ORCHESTRUM_RELEASE_PREP_RUNNER_LABELS_JSON='["self-hosted","orchestrum"]'
+    runs-on: ${{ fromJSON(vars.ORCHESTRUM_RELEASE_PREP_RUNNER_LABELS_JSON || '["self-hosted"]') }}
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      notes: ${{ steps.meta.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Resolve release metadata
+        id: meta
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const inputs = context.payload.inputs || {};
+            const selectedPlatforms = [
+              inputs.build_macos === "true" ? "macOS" : null,
+              inputs.build_linux === "true" ? "Linux" : null,
+              inputs.build_windows === "true" ? "Windows" : null
+            ].filter(Boolean);
+
+            if (selectedPlatforms.length === 0) {
+              core.setFailed("Select at least one target platform.");
+              return;
+            }
+
+            const versionPath = path.join(process.env.GITHUB_WORKSPACE, "version.json");
+            const versionMeta = JSON.parse(fs.readFileSync(versionPath, "utf8"));
+            const tag = (inputs.tag || "").trim() || `v${versionMeta.version}`;
+            const releaseName = (inputs.release_name || "").trim() || `Orchestrum ${tag}`;
+            const notes = (inputs.notes || "").trim();
+
+            core.setOutput("tag", tag);
+            core.setOutput("release_name", releaseName);
+            core.setOutput("notes", notes);
+
+            await core.summary
+              .addHeading("Desktop release")
+              .addList([
+                `Tag: ${tag}`,
+                `Release name: ${releaseName}`,
+                `Targets: ${selectedPlatforms.join(", ")}`
+              ])
+              .write();
+
+  build_macos:
+    if: ${{ inputs.build_macos }}
+    needs: prepare
+    # Native macOS artifacts require a macOS self-hosted runner.
+    # Optional pin: ORCHESTRUM_RELEASE_RUNNER_LABELS_MACOS_JSON='["self-hosted","macOS","orchestrum-release"]'
+    runs-on: ${{ fromJSON(vars.ORCHESTRUM_RELEASE_RUNNER_LABELS_MACOS_JSON || '["self-hosted","macOS"]') }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/ui/package-lock.json
+
+      - name: Clean desktop dist
+        run: >-
+          node -e "require('fs').rmSync('apps/desktop/dist', { recursive: true, force: true })"
+
+      - name: Install workspace dependencies
+        run: npm run bootstrap
+
+      - name: Build macOS desktop release
+        run: npm run dist:desktop:mac
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: orchestrum-macos-${{ needs.prepare.outputs.tag }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.zip
+            apps/desktop/dist/*.blockmap
+
+  build_linux:
+    if: ${{ inputs.build_linux }}
+    needs: prepare
+    # Native Linux artifacts require a Linux self-hosted runner.
+    # Optional pin: ORCHESTRUM_RELEASE_RUNNER_LABELS_LINUX_JSON='["self-hosted","Linux","orchestrum-release"]'
+    runs-on: ${{ fromJSON(vars.ORCHESTRUM_RELEASE_RUNNER_LABELS_LINUX_JSON || '["self-hosted","Linux"]') }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/ui/package-lock.json
+
+      - name: Clean desktop dist
+        run: >-
+          node -e "require('fs').rmSync('apps/desktop/dist', { recursive: true, force: true })"
+
+      - name: Install workspace dependencies
+        run: npm run bootstrap
+
+      - name: Build Linux desktop release
+        run: npm run dist:desktop:linux
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: orchestrum-linux-${{ needs.prepare.outputs.tag }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            apps/desktop/dist/*.AppImage
+            apps/desktop/dist/*.tar.gz
+            apps/desktop/dist/*.blockmap
+
+  build_windows:
+    if: ${{ inputs.build_windows }}
+    needs: prepare
+    # Native Windows artifacts require a Windows self-hosted runner.
+    # Optional pin: ORCHESTRUM_RELEASE_RUNNER_LABELS_WINDOWS_JSON='["self-hosted","Windows","orchestrum-release"]'
+    runs-on: ${{ fromJSON(vars.ORCHESTRUM_RELEASE_RUNNER_LABELS_WINDOWS_JSON || '["self-hosted","Windows"]') }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/ui/package-lock.json
+
+      - name: Clean desktop dist
+        run: >-
+          node -e "require('fs').rmSync('apps/desktop/dist', { recursive: true, force: true })"
+
+      - name: Install workspace dependencies
+        run: npm run bootstrap
+
+      - name: Build Windows desktop release
+        run: npm run dist:desktop:win
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: orchestrum-windows-${{ needs.prepare.outputs.tag }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            apps/desktop/dist/*.exe
+            apps/desktop/dist/*.zip
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/latest*.yml
+
+  publish:
+    needs:
+      - prepare
+      - build_macos
+      - build_linux
+      - build_windows
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (needs.build_macos.result == 'success' || needs.build_macos.result == 'skipped') &&
+        (needs.build_linux.result == 'success' || needs.build_linux.result == 'skipped') &&
+        (needs.build_windows.result == 'success' || needs.build_windows.result == 'skipped')
+      }}
+    runs-on: ${{ fromJSON(vars.ORCHESTRUM_RELEASE_PREP_RUNNER_LABELS_JSON || '["self-hosted"]') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create or update GitHub release
+        id: release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+          RELEASE_NOTES: ${{ needs.prepare.outputs.notes }}
+          RELEASE_DRAFT: ${{ inputs.draft }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = process.env.RELEASE_TAG;
+            const name = process.env.RELEASE_NAME;
+            const notes = (process.env.RELEASE_NOTES || "").trim();
+            const draft = process.env.RELEASE_DRAFT === "true";
+            const prerelease = process.env.RELEASE_PRERELEASE === "true";
+
+            let release;
+
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              release = (
+                await github.rest.repos.updateRelease({
+                  owner,
+                  repo,
+                  release_id: existing.data.id,
+                  tag_name: tag,
+                  name,
+                  body: notes || existing.data.body || "",
+                  draft,
+                  prerelease
+                })
+              ).data;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              release = (
+                await github.rest.repos.createRelease({
+                  owner,
+                  repo,
+                  tag_name: tag,
+                  target_commitish: context.sha,
+                  name,
+                  body: notes || undefined,
+                  draft,
+                  prerelease,
+                  generate_release_notes: notes.length === 0
+                })
+              ).data;
+            }
+
+            core.setOutput("release_id", String(release.id));
+            core.setOutput("html_url", release.html_url);
+
+      - name: Upload release assets
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const releaseId = Number(process.env.RELEASE_ID);
+            const assetsRoot = path.join(process.env.GITHUB_WORKSPACE, "release-assets");
+
+            function collectFiles(dir) {
+              if (!fs.existsSync(dir)) {
+                return [];
+              }
+
+              return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  return collectFiles(fullPath);
+                }
+                return [fullPath];
+              });
+            }
+
+            const files = collectFiles(assetsRoot);
+            if (files.length === 0) {
+              core.setFailed("No release assets were downloaded from build jobs.");
+              return;
+            }
+
+            const existingAssets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner,
+              repo,
+              release_id: releaseId,
+              per_page: 100
+            });
+
+            const existingByName = new Map(existingAssets.map((asset) => [asset.name, asset]));
+
+            for (const filePath of files) {
+              const assetName = path.basename(filePath);
+              const existing = existingByName.get(assetName);
+
+              if (existing) {
+                await github.rest.repos.deleteReleaseAsset({
+                  owner,
+                  repo,
+                  asset_id: existing.id
+                });
+              }
+
+              const data = fs.readFileSync(filePath);
+
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: releaseId,
+                name: assetName,
+                data,
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "content-length": data.length
+                }
+              });
+            }
+
+      - name: Write job summary
+        uses: actions/github-script@v7
+        env:
+          RELEASE_URL: ${{ steps.release.outputs.html_url }}
+        with:
+          script: |
+            await core.summary
+              .addHeading("Release published")
+              .addLink(process.env.RELEASE_URL, process.env.RELEASE_URL)
+              .write();

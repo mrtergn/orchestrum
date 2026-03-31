@@ -23,7 +23,10 @@
     "desktop": "npm --prefix apps/desktop run dev",
     "changelog": "node scripts/changelog.mjs",
     "build:desktop": "npm run build:ui && npm run build:service && npm --prefix apps/desktop run build",
-    "dist:desktop": "npm --prefix apps/desktop run dist"
+    "dist:desktop": "npm run build:ui && npm run build:service && npm --prefix apps/desktop run dist",
+    "dist:desktop:mac": "npm run build:ui && npm run build:service && npm --prefix apps/desktop run dist:mac",
+    "dist:desktop:linux": "npm run build:ui && npm run build:service && npm --prefix apps/desktop run dist:linux",
+    "dist:desktop:win": "npm run build:ui && npm run build:service && npm --prefix apps/desktop run dist:win"
   },
   "dependencies": {
     "body-parser": "^2.2.2",
