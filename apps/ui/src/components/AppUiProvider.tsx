@@ -18,6 +18,9 @@ export type RunConfigSeed = {
   workspaceId?: string;
   workflowId?: string;
   userGoal?: string;
+  runKind?: "workflow" | "qa" | "benchmark" | "canary";
+  baseUrl?: string;
+  targetPath?: string;
 };
 
 type RunFiltersState = {

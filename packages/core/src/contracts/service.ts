@@ -1,4 +1,4 @@
-import type { RunState, StepState } from "../runner/types.js";
+import type { GovernanceProfile, RunKind, RunReadiness, RunState, StepState } from "../runner/types.js";
 
 export const TASK_RUNTIME_STATUSES = [
   "queued",
@@ -64,6 +64,21 @@ export type RunStartOptions = {
   passphrase?: string;
 };
 
+export type BrowserRunOptions = {
+  baseUrl?: string;
+  targetPath?: string;
+  iterations?: number;
+  intervalMs?: number;
+  passphrase?: string;
+};
+
+export type BrowserRunRequest = {
+  workspaceId: string;
+  baseUrl?: string;
+  targetPath?: string;
+  options?: BrowserRunOptions;
+};
+
 export type RunStartRequest = {
   workspaceId: string;
   workflowId: string;
@@ -76,6 +91,10 @@ export type RunStartResponse = {
   ok: boolean;
   runId?: string;
   error?: string;
+};
+
+export type BrowserRunResponse = RunStartResponse & {
+  kind?: Exclude<RunKind, "workflow">;
 };
 
 export type RunResumeRequest = {
@@ -103,6 +122,75 @@ export type DiagnosticsExportRequest = {
 export type DiagnosticsExportResponse = {
   archive?: string;
   error?: string;
+};
+
+export type DoctorSeverity = "info" | "warn" | "error";
+
+export type DoctorCheck = {
+  id: string;
+  label: string;
+  ok: boolean;
+  severity: DoctorSeverity;
+  summary: string;
+  details?: string[];
+};
+
+export type DoctorReport = {
+  generatedAt: string;
+  rootDir: string;
+  runsDir: string;
+  workspaceId?: string;
+  checks: DoctorCheck[];
+  summary: {
+    ok: boolean;
+    warnCount: number;
+    errorCount: number;
+  };
+};
+
+export type LearningEntry = {
+  id: string;
+  timestamp: string;
+  category: string;
+  insight: string;
+  relatedFiles: string[];
+  sourceRunId?: string;
+  confidence: number;
+};
+
+export type LearningsResponse = {
+  workspaceId?: string;
+  learnings: LearningEntry[];
+};
+
+export type DocsSyncResponse = {
+  ok: boolean;
+  syncedAt?: string;
+  summary?: string;
+  updatedFiles?: string[];
+  changedFiles?: string[];
+  error?: string;
+};
+
+export type ReleaseReadiness = RunReadiness & {
+  workspaceId?: string;
+  latestRunId?: string;
+  signals?: {
+    pendingApprovals: number;
+    governanceAlerts: number;
+    docsFresh: boolean;
+    qualityGateOk: boolean;
+  };
+};
+
+export type WorkspaceProfileShape = {
+  risk_tolerance?: string;
+  max_cost_per_run?: number;
+  default_strategy?: string;
+  sandbox_mode?: string;
+  execution_mode?: "inline" | "worktree";
+  browser_base_url?: string;
+  governance?: GovernanceProfile;
 };
 
 export function normalizeTaskStatus(status: string | null | undefined): TaskRuntimeStatus {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { LearningEntry, ReleaseReadiness } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
 
 /* ---------- types ---------- */
@@ -41,6 +42,8 @@ export default function MetricsPage() {
   const { selectedWorkspaceId: workspaceId } = useAppUi();
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [evaluations, setEvaluations] = useState<EvaluationResult[]>([]);
+  const [learnings, setLearnings] = useState<LearningEntry[]>([]);
+  const [readiness, setReadiness] = useState<ReleaseReadiness | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -63,6 +66,28 @@ export default function MetricsPage() {
       setEvaluations(data.evaluations ?? []);
     };
     load();
+  }, [workspaceId]);
+
+  useEffect(() => {
+    const load = async () => {
+      if (!workspaceId) {
+        setLearnings([]);
+        setReadiness(null);
+        return;
+      }
+      const [learningsRes, readinessRes] = await Promise.all([
+        fetch(`/api/learnings?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" }),
+        fetch(`/api/release/readiness?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" })
+      ]);
+      if (learningsRes.ok) {
+        const payload = await learningsRes.json();
+        setLearnings(Array.isArray(payload.learnings) ? payload.learnings.slice(0, 6) : []);
+      }
+      if (readinessRes.ok) {
+        setReadiness((await readinessRes.json()) as ReleaseReadiness);
+      }
+    };
+    void load();
   }, [workspaceId]);
 
   const successRate = analytics
@@ -121,6 +146,52 @@ export default function MetricsPage() {
             <KPICard icon="$" label="Total Cost" value={`$${to(analytics.totalCost).toFixed(2)}`} accent="violet" sub={`$${to(analytics.costPerFeature).toFixed(2)} per feature`} />
             <KPICard icon="↻" label="Avg Loops" value={to(analytics.loopCounts?.avg).toFixed(1)} accent="sky" sub={`${to(analytics.loopCounts?.total)} total loops`} />
           </section>
+
+          {(readiness || learnings.length > 0) && (
+            <section className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Release Readiness</div>
+                  <span className="text-lg font-semibold text-white">{readiness?.score ?? 0}/100</span>
+                </div>
+                <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-amber-500 to-cyan-400 transition-all"
+                    style={{ width: `${Math.max(0, Math.min(100, readiness?.score ?? 0))}%` }}
+                  />
+                </div>
+                <div className="space-y-1 text-xs text-slate-400">
+                  {(readiness?.blocking ?? []).length === 0 ? (
+                    <div className="text-emerald-300">No blocking signals detected.</div>
+                  ) : (
+                    readiness?.blocking.map((item) => <div key={item}>{item}</div>)
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Recent Learnings</div>
+                {learnings.length === 0 ? (
+                  <div className="text-xs text-slate-500 py-4 text-center">No workspace learnings yet.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {learnings.map((learning) => (
+                      <div key={learning.id} className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-300">{learning.category}</div>
+                          <div className="text-[10px] text-slate-500">{Math.round(learning.confidence * 100)}%</div>
+                        </div>
+                        <div className="mt-2 text-sm text-slate-200">{learning.insight}</div>
+                        {learning.relatedFiles.length > 0 && (
+                          <div className="mt-2 text-[11px] text-slate-500">{learning.relatedFiles.join(", ")}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
 
           {/* Trend charts */}
           <section className="grid gap-4 lg:grid-cols-2">

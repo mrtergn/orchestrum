@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useAppUi } from "@/components/AppUiProvider";
 import { normalizeAgentRuntimeState, normalizeTaskStatus } from "@/lib/runtime";
 
 type Agent = {
@@ -29,6 +30,7 @@ function stateColor(state: string) {
 }
 
 export default function MissionPage() {
+  const { selectedWorkspaceId, openRunConfig } = useAppUi();
   const [snapshot, setSnapshot] = useState<Snapshot>({ agents: [], org: [], tasks: [], messages: [], queue: { queued: 0, running: 0 } });
   const [events, setEvents] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
@@ -95,6 +97,12 @@ export default function MissionPage() {
           <p className="text-sm text-slate-400">Real-time view of agents, tasks, and system events.</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "benchmark" })}
+            className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-cyan-200"
+          >
+            Launch Benchmark
+          </button>
           <div className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-400"}`} />
           <span className={`text-[10px] uppercase tracking-[0.2em] ${connected ? "text-emerald-300" : "text-rose-300"}`}>
             {connected ? "Connected" : "Disconnected"}

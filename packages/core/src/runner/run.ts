@@ -18,6 +18,7 @@ import { estimateCostUsd, resolvePricing, normalizeUsage, LlmUsage } from "./cos
 import { loadPolicy, checkPatchPolicy, checkCostPolicy } from "./policy.js";
 import { runSandboxedLLM, isDockerAvailable, SandboxConfig } from "./sandbox.js";
 import { loadRecentSummaries, appendSummary, buildRunSummary } from "./memory.js";
+import { appendLearnings, buildRunLearnings, formatLearningsForContext, loadRelevantLearnings } from "./learnings.js";
 import { loadPlugins, runPluginHook, OrchestrumPlugin } from "./plugins.js";
 import type { RunState } from "./types.js";
 import { analyzeRun } from "../analytics/runAnalysis.js";
@@ -44,6 +45,9 @@ import { Logger } from "./logger.js";
 import { getLicenseStatus, isFeatureAllowed } from "../licensing/index.js";
 import { loadWorkspaceProfile } from "../profiles/index.js";
 import { emitTelemetry } from "../telemetry/index.js";
+import { appendGovernanceEvent, resolveGovernanceSettings, runQualityGate, scanGovernedCommands, scanGovernedDiff } from "./governance.js";
+import { prepareWorktreeContext, removeRunWorktree } from "./worktrees.js";
+import { computeReleaseReadiness } from "../release/readiness.js";
 
 export type RunOptions = {
   workflowPath: string;
@@ -289,7 +293,10 @@ async function executeWorkflow(options: {
   workflow = strategyApplied.workflow;
   policy = strategyApplied.policy;
   const plugins = pluginsAllowed ? await loadPlugins(options.repoPath, config, licenseTier).catch(() => [] as OrchestrumPlugin[]) : [];
-  const memorySummaries = await loadRecentSummaries(options.repoPath, 3).catch(() => []);
+  const governanceSettings = resolveGovernanceSettings(config, profile);
+  const recentSummaries = await loadRecentSummaries(options.repoPath, 3).catch(() => []);
+  const relevantLearnings = await loadRelevantLearnings(options.repoPath, options.goal, 3).catch(() => []);
+  const memorySummaries = [...recentSummaries, ...formatLearningsForContext(relevantLearnings)].slice(-6);
   let sandboxConfig = resolveSandboxConfig(options.sandbox, config, advancedSandboxAllowed);
   let sandboxWarning: string | null = null;
   if (sandboxConfig?.enabled) {
@@ -310,7 +317,6 @@ async function executeWorkflow(options: {
     await checkoutBranch(options.repoPath, options.branch);
   }
 
-  let headSha = await getHeadSha(options.repoPath);
   const runId = options.resume?.runId ?? options.runId ?? createRunId();
   const workspaceId = options.workspaceId ?? "default";
   const workspaceDir = path.join(options.runsDir, workspaceId);
@@ -321,6 +327,21 @@ async function executeWorkflow(options: {
 
   const runMetaPath = path.join(runDir, "run.json");
   const eventsPath = path.join(runDir, "events.ndjson");
+  const existingRunMetaRaw = options.resume ? await readTextIfExists(runMetaPath) : null;
+  const existingRunMeta = existingRunMetaRaw
+    ? JSON.parse(existingRunMetaRaw) as RunState & { resumeCount?: number; resumedFrom?: string | null }
+    : null;
+  let headSha = await getHeadSha(options.repoPath);
+  const worktreeContext = await prepareWorktreeContext({
+    repoPath: options.repoPath,
+    workspaceId,
+    runId,
+    mode: profile?.execution_mode ?? config?.execution?.mode ?? "inline",
+    headSha,
+    existingWorktreePath: existingRunMeta?.worktreePath ?? null
+  });
+  const executionRepoPath = worktreeContext.repoPath;
+  headSha = await getHeadSha(executionRepoPath).catch(() => headSha);
   if (!fsSync.existsSync(eventsPath)) {
     await fs.writeFile(eventsPath, "", { flag: "a" });
   }
@@ -333,6 +354,7 @@ async function executeWorkflow(options: {
   let runMeta: RunState & { repoPath: string; workflow: string; branch?: string | null } = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     runId,
+    kind: "workflow",
     repoPath: options.repoPath,
     workflow: workflow.__path,
     goal: options.goal,
@@ -363,6 +385,8 @@ async function executeWorkflow(options: {
       valid: licenseStatus.valid,
       expiresAt: licenseStatus.expiresAt ?? null
     },
+    worktreePath: worktreeContext.worktreePath,
+    readiness: null,
     profile: profile ?? null
   };
 
@@ -385,9 +409,8 @@ async function executeWorkflow(options: {
   };
 
   if (options.resume) {
-    const existing = await readTextIfExists(runMetaPath);
-    if (existing) {
-      const prev = JSON.parse(existing) as RunState & { resumeCount?: number; resumedFrom?: string | null };
+    if (existingRunMeta) {
+      const prev = existingRunMeta;
       runMeta = {
         ...runMeta,
         schemaVersion: prev.schemaVersion ?? runMeta.schemaVersion,
@@ -406,6 +429,9 @@ async function executeWorkflow(options: {
         dynamicAgents: prev.dynamicAgents ?? runMeta.dynamicAgents,
         strategy: prev.strategy ?? runMeta.strategy,
         license: prev.license ?? runMeta.license,
+        kind: prev.kind ?? runMeta.kind,
+        worktreePath: prev.worktreePath ?? runMeta.worktreePath,
+        readiness: prev.readiness ?? runMeta.readiness,
         profile: prev.profile ?? runMeta.profile,
         resumedFrom: options.resume.fromStepId,
         resumeCount: (prev.resumeCount ?? 0) + 1
@@ -489,7 +515,7 @@ async function executeWorkflow(options: {
   const agentSemaphore = new Semaphore(maxAgents);
   const parallelLimiter = new Semaphore(maxAgents);
 
-  const repoIndex = await buildRepoIndex(options.repoPath);
+  const repoIndex = await buildRepoIndex(executionRepoPath);
 
   const blocks = buildStepBlocks(workflow);
   const flatSteps = flattenBlocks(blocks);
@@ -600,7 +626,7 @@ async function executeWorkflow(options: {
           fixStep,
           maxRounds: adaptiveMaxLoop,
           workflow,
-          repoPath: options.repoPath,
+          repoPath: executionRepoPath,
           runDir,
           runId,
           events,
@@ -629,6 +655,7 @@ async function executeWorkflow(options: {
           config,
           plugins,
           memorySummaries,
+          governanceSettings,
           modelBias,
           allowArbitration: arbitrationAllowed
         });
@@ -677,7 +704,7 @@ async function executeWorkflow(options: {
               stepId: sub.stepId,
               runId,
               workflow,
-              repoPath: options.repoPath,
+              repoPath: executionRepoPath,
               runDir,
               events,
               agentSemaphore,
@@ -695,6 +722,7 @@ async function executeWorkflow(options: {
               config,
               plugins,
               memorySummaries,
+              governanceSettings,
               securityThreshold: workflow.security?.threshold,
               modelBias,
               allowArbitration: arbitrationAllowed
@@ -726,7 +754,7 @@ async function executeWorkflow(options: {
           }
         }
         if (results.some((r) => r && "commitSha" in r && r.commitSha)) {
-          headSha = await getHeadSha(options.repoPath);
+          headSha = await getHeadSha(executionRepoPath);
         }
 
         const anyFailed = results.some((r) => r && "ok" in r && !r.ok);
@@ -764,7 +792,7 @@ async function executeWorkflow(options: {
           stepId,
           runId,
           workflow,
-          repoPath: options.repoPath,
+          repoPath: executionRepoPath,
           runDir,
           events,
           agentSemaphore,
@@ -782,6 +810,7 @@ async function executeWorkflow(options: {
           config,
           plugins,
           memorySummaries,
+          governanceSettings,
           securityThreshold: workflow.security?.threshold,
           modelBias,
           allowArbitration: arbitrationAllowed
@@ -841,7 +870,7 @@ async function executeWorkflow(options: {
           const dynamicResults = await runDynamicAgentSteps({
             agents: spawnedAgents,
             workflow,
-            repoPath: options.repoPath,
+            repoPath: executionRepoPath,
             runDir,
             runId,
             events,
@@ -860,6 +889,7 @@ async function executeWorkflow(options: {
             config,
             plugins,
             memorySummaries,
+            governanceSettings,
             modelBias,
             allowArbitration: arbitrationAllowed
           });
@@ -894,7 +924,7 @@ async function executeWorkflow(options: {
         runMeta,
         runDir,
         workflow,
-        repoPath: options.repoPath,
+        repoPath: executionRepoPath,
         strategyConfig,
         strategyProfileMode: strategyProfile.mode,
         strategyState,
@@ -903,6 +933,17 @@ async function executeWorkflow(options: {
         config,
         analyticsAllowed,
         strategyEvolutionAllowed
+      });
+      await writeJson(path.join(runDir, "run.json"), runMeta);
+      await finalizeRunState({
+        runMeta,
+        runDir,
+        workspaceId,
+        workspacePath: options.repoPath,
+        runsDir: options.runsDir,
+        executionRepoPath,
+        sourceRepoPath: options.repoPath,
+        events
       });
       await writeJson(path.join(runDir, "run.json"), runMeta);
       events.emit({ t: "run.cancelled", runId, ts: nowTs() });
@@ -921,7 +962,7 @@ async function executeWorkflow(options: {
       runMeta,
       runDir,
       workflow,
-      repoPath: options.repoPath,
+      repoPath: executionRepoPath,
       strategyConfig,
       strategyProfileMode: strategyProfile.mode,
       strategyState,
@@ -930,6 +971,17 @@ async function executeWorkflow(options: {
       config,
       analyticsAllowed,
       strategyEvolutionAllowed
+    });
+    await writeJson(path.join(runDir, "run.json"), runMeta);
+    await finalizeRunState({
+      runMeta,
+      runDir,
+      workspaceId,
+      workspacePath: options.repoPath,
+      runsDir: options.runsDir,
+      executionRepoPath,
+      sourceRepoPath: options.repoPath,
+      events
     });
     await writeJson(path.join(runDir, "run.json"), runMeta);
     events.emit({ t: "run.finished", runId, ok: false, ts: nowTs() });
@@ -947,7 +999,7 @@ async function executeWorkflow(options: {
     runMeta,
     runDir,
     workflow,
-    repoPath: options.repoPath,
+    repoPath: executionRepoPath,
     strategyConfig,
     strategyProfileMode: strategyProfile.mode,
     strategyState,
@@ -956,6 +1008,17 @@ async function executeWorkflow(options: {
     config,
     analyticsAllowed,
     strategyEvolutionAllowed
+  });
+  await writeJson(path.join(runDir, "run.json"), runMeta);
+  await finalizeRunState({
+    runMeta,
+    runDir,
+    workspaceId,
+    workspacePath: options.repoPath,
+    runsDir: options.runsDir,
+    executionRepoPath,
+    sourceRepoPath: options.repoPath,
+    events
   });
   await writeJson(path.join(runDir, "run.json"), runMeta);
   events.emit({ t: "run.finished", runId, ok: runOk, ts: nowTs() });
@@ -992,6 +1055,7 @@ async function runAuditLoop(options: {
   config: Awaited<ReturnType<typeof loadConfig>> | null;
   plugins: OrchestrumPlugin[];
   memorySummaries: string[];
+  governanceSettings: ReturnType<typeof resolveGovernanceSettings>;
   modelBias?: Record<string, number>;
   allowArbitration: boolean;
 }): Promise<{ ok: boolean; lastGitDiffPath: string | null; lastCommandsLogPath: string | null; headSha?: string; specText?: string; continueOnError?: boolean; error?: string }>
@@ -1028,6 +1092,7 @@ async function runAuditLoop(options: {
       config: options.config,
       plugins: options.plugins,
       memorySummaries: options.memorySummaries,
+      governanceSettings: options.governanceSettings,
       securityThreshold: options.workflow.security?.threshold,
       modelBias: options.modelBias,
       allowArbitration: options.allowArbitration
@@ -1060,6 +1125,11 @@ async function runAuditLoop(options: {
       if (diff) {
         try {
           assertDiffPathSafety(diff);
+          const governanceDiffFindings = scanGovernedDiff(
+            diff,
+            extractChangedFilesFromDiff(diff),
+            options.governanceSettings
+          );
           await requireApprovalIfNeeded({
             runDir: options.runDir,
             stepId: options.auditStep.id,
@@ -1069,6 +1139,25 @@ async function runAuditLoop(options: {
             repoPath: options.repoPath,
             kind: "diff"
           });
+          if (governanceDiffFindings.length > 0) {
+            await appendGovernanceEvent(options.runDir, {
+              category: "config_protection",
+              severity: "error",
+              runId: options.runId,
+              stepId: options.auditStep.id,
+              summary: governanceDiffFindings.map((finding) => finding.message).join(" "),
+              files: extractChangedFilesFromDiff(diff)
+            });
+            await requireApprovalIfNeeded({
+              runDir: options.runDir,
+              stepId: options.auditStep.id,
+              runId: options.runId,
+              findings: governanceDiffFindings,
+              events: options.events,
+              repoPath: options.repoPath,
+              kind: "governance"
+            });
+          }
           await applyPatch(options.repoPath, diff);
           const violation = await checkPatchPolicy(options.repoPath, options.policy);
           if (violation) {
@@ -1116,6 +1205,7 @@ async function runAuditLoop(options: {
       config: options.config,
       plugins: options.plugins,
       memorySummaries: options.memorySummaries,
+      governanceSettings: options.governanceSettings,
       securityThreshold: options.workflow.security?.threshold,
       modelBias: options.modelBias,
       allowArbitration: options.allowArbitration
@@ -1171,6 +1261,7 @@ async function runStep(options: {
   config: Awaited<ReturnType<typeof loadConfig>> | null;
   plugins: OrchestrumPlugin[];
   memorySummaries: string[];
+  governanceSettings: ReturnType<typeof resolveGovernanceSettings>;
   securityThreshold?: number;
   modelBias?: Record<string, number>;
   allowArbitration: boolean;
@@ -1631,15 +1722,37 @@ async function runStep(options: {
       }
       assertFilesystemPermission(capability, stepId);
       assertDiffPathSafety(diff);
+      const changedFiles = extractChangedFilesFromDiff(diff);
+      const diffFindings = scanDiff(diff);
+      const governanceDiffFindings = scanGovernedDiff(diff, changedFiles, options.governanceSettings);
       await requireApprovalIfNeeded({
         runDir,
         stepId,
         runId: options.runId,
-        findings: scanDiff(diff),
+        findings: diffFindings,
         events,
         repoPath,
         kind: "diff"
       });
+      if (governanceDiffFindings.length > 0) {
+        await appendGovernanceEvent(runDir, {
+          category: "config_protection",
+          severity: "error",
+          runId: options.runId,
+          stepId,
+          summary: governanceDiffFindings.map((finding) => finding.message).join(" "),
+          files: changedFiles
+        });
+        await requireApprovalIfNeeded({
+          runDir,
+          stepId,
+          runId: options.runId,
+          findings: governanceDiffFindings,
+          events,
+          repoPath,
+          kind: "governance"
+        });
+      }
       if (isTestGeneration) {
         await fs.mkdir(path.join(repoPath, "__orchestrum_generated_tests__"), { recursive: true });
       }
@@ -1652,9 +1765,9 @@ async function runStep(options: {
       const currentDiff = await gitDiff(repoPath);
       gitDiffPath = path.join(stepDir, "git.diff");
       await writeText(gitDiffPath, currentDiff);
-      const changedFiles = await gitChangedFiles(repoPath).catch(() => [] as string[]);
+      const currentChangedFiles = await gitChangedFiles(repoPath).catch(() => [] as string[]);
       const risk = computeRiskScore({
-        changedFiles,
+        changedFiles: currentChangedFiles,
         diffText: currentDiff,
         securityPaths: options.policy?.forbidden_paths
       });
@@ -1693,15 +1806,36 @@ async function runStep(options: {
 
     if (commands.length > 0) {
       assertShellPermission(capability, commands, options.config?.shell_allowlist);
+      const commandFindings = scanCommands(commands);
+      const governanceCommandFindings = scanGovernedCommands(commands, options.governanceSettings);
       await requireApprovalIfNeeded({
         runDir,
         stepId,
         runId: options.runId,
-        findings: scanCommands(commands),
+        findings: commandFindings,
         events,
         repoPath,
         kind: "command"
       });
+      if (governanceCommandFindings.length > 0) {
+        await appendGovernanceEvent(runDir, {
+          category: "command",
+          severity: "error",
+          runId: options.runId,
+          stepId,
+          summary: governanceCommandFindings.map((finding) => finding.message).join(" "),
+          commands
+        });
+        await requireApprovalIfNeeded({
+          runDir,
+          stepId,
+          runId: options.runId,
+          findings: governanceCommandFindings,
+          events,
+          repoPath,
+          kind: "governance"
+        });
+      }
       const logPath = path.join(stepDir, "commands.log");
       commandsLogPath = logPath;
       if (!fsSync.existsSync(logPath)) {
@@ -1719,6 +1853,38 @@ async function runStep(options: {
       if (firstFailure) {
         status.ok = false;
         status.error = status.error ?? "One or more commands failed";
+      }
+    }
+
+    if (status.ok && (shouldApplyPatch || commands.length > 0)) {
+      const qualityGate = await runQualityGate({
+        repoPath,
+        stepDir,
+        stepId,
+        runId: options.runId,
+        settings: options.governanceSettings,
+        emit: (event) => {
+          events.emit(event as any);
+        }
+      });
+      if (!qualityGate.ok) {
+        await appendGovernanceEvent(runDir, {
+          category: "quality_gate",
+          severity: "error",
+          runId: options.runId,
+          stepId,
+          summary: "Quality gate failed for step output.",
+          commands: qualityGate.commands
+        });
+        await requireApprovalIfNeeded({
+          runDir,
+          stepId,
+          runId: options.runId,
+          findings: qualityGate.findings,
+          events,
+          repoPath,
+          kind: "governance"
+        });
       }
     }
   } catch (err) {
@@ -2102,6 +2268,19 @@ function diffTargetsGeneratedTests(diff: string): boolean {
   return hasPath;
 }
 
+function extractChangedFilesFromDiff(diff: string): string[] {
+  const files = new Set<string>();
+  for (const line of diff.split(/\r?\n/)) {
+    if (!line.startsWith("+++ ") && !line.startsWith("--- ")) continue;
+    const parts = line.split(/\s+/);
+    const rawPath = parts[1] ?? "";
+    if (!rawPath || rawPath === "/dev/null") continue;
+    const cleaned = rawPath.replace(/^a\//, "").replace(/^b\//, "");
+    if (cleaned) files.add(cleaned);
+  }
+  return Array.from(files);
+}
+
 function hasArbitrationConfigured(workflow: Workflow): boolean {
   if (workflow.arbitration) return true;
   for (const agent of Object.values(workflow.agents)) {
@@ -2251,7 +2430,7 @@ async function requireApprovalIfNeeded(options: {
   findings: ReturnType<typeof scanDiff> | ReturnType<typeof scanCommands>;
   events: EventWriter;
   repoPath: string;
-  kind: "diff" | "command";
+  kind: "diff" | "command" | "governance";
 }) {
   if (!options.findings || options.findings.length === 0) return;
   if (!requiresApproval(options.findings)) return;
@@ -2448,6 +2627,7 @@ async function runDynamicAgentSteps(options: {
   config: Awaited<ReturnType<typeof loadConfig>> | null;
   plugins: OrchestrumPlugin[];
   memorySummaries: string[];
+  governanceSettings: ReturnType<typeof resolveGovernanceSettings>;
   modelBias?: Record<string, number>;
   allowArbitration: boolean;
 }): Promise<Array<{ stepId: string; result: StepResult }>> {
@@ -2481,6 +2661,7 @@ async function runDynamicAgentSteps(options: {
         config: options.config,
         plugins: options.plugins,
         memorySummaries: options.memorySummaries,
+        governanceSettings: options.governanceSettings,
         securityThreshold: options.workflow.security?.threshold,
         modelBias: options.modelBias,
         allowArbitration: options.allowArbitration
@@ -2526,6 +2707,49 @@ async function appendRunSummary(runMeta: RunState & { repoPath?: string }, runDi
   }
   const summary = buildRunSummary(runMeta, steps);
   await appendSummary(workspacePath, summary);
+}
+
+async function finalizeRunState(options: {
+  runMeta: RunState & { repoPath?: string };
+  runDir: string;
+  workspaceId: string;
+  workspacePath: string;
+  runsDir: string;
+  executionRepoPath: string;
+  sourceRepoPath: string;
+  events: EventWriter;
+}): Promise<void> {
+  const workspacePath = options.runMeta.workspacePath ?? options.workspacePath ?? options.runMeta.repoPath;
+  if (!workspacePath) return;
+
+  const learnings = await buildRunLearnings({
+    workspacePath,
+    runMeta: options.runMeta,
+    runDir: options.runDir
+  }).catch(() => []);
+  await appendLearnings(workspacePath, learnings).catch(() => undefined);
+
+  options.runMeta.readiness = await computeReleaseReadiness({
+    workspacePath,
+    runsDir: options.runsDir,
+    workspaceId: options.workspaceId
+  }).catch(() => null);
+
+  if (options.runMeta.status === "finished" && options.runMeta.worktreePath) {
+    try {
+      await removeRunWorktree({
+        repoPath: options.sourceRepoPath,
+        worktreePath: options.runMeta.worktreePath
+      });
+    } catch (err) {
+      options.events.emit({
+        t: "step.log",
+        stepId: "worktree",
+        line: `Worktree cleanup warning: ${formatError(err)}`,
+        ts: nowTs()
+      });
+    }
+  }
 }
 
 async function applyPostRunEvolution(options: {

@@ -39,8 +39,13 @@ export {
 } from "./runner/secrets.js";
 export type { SecretScope } from "./runner/secrets.js";
 export { writeCrashReport, exportDiagnostics } from "./runner/diagnostics.js";
+export { runDoctor } from "./doctor/index.js";
 export { createBackup, restoreBackup } from "./runner/backup.js";
 export { exportRunBundle, importRunBundle } from "./runner/share.js";
+export { runBrowserRunDetailed } from "./runner/browser.js";
+export { appendLearnings, buildRunLearnings, loadLearnings, loadRelevantLearnings, formatLearningsForContext } from "./runner/learnings.js";
+export { getWorktreesRoot, prepareWorktreeContext, createRunWorktree, removeRunWorktree, scanStaleWorktrees } from "./runner/worktrees.js";
+export { resolveGovernanceSettings, scanGovernedCommands, scanGovernedDiff, runQualityGate, appendGovernanceEvent, loadGovernanceEvents } from "./runner/governance.js";
 export {
   addWorkspaceApproval,
   loadWorkspaceApprovals,
@@ -104,6 +109,10 @@ export {
 export type { SandboxConfig } from "./runner/sandbox.js";
 export { computeRiskScore, extractVulnerabilityScore } from "./security/risk.js";
 export { scanCommands, scanDiff, requiresApproval, summarizeFindings } from "./security/safety.js";
+export { syncWorkspaceDocs, loadDocsSyncState, getDocsSyncStatePath } from "./docs/sync.js";
+export { computeReleaseReadiness } from "./release/readiness.js";
+export { StateIndex, getStateIndexPath } from "./state/index.js";
+export type { StateIndexHealth, IndexedRunRecord } from "./state/index.js";
 export {
   normalizeTaskStatus,
   normalizeAgentRuntimeState,
@@ -119,11 +128,22 @@ export type {
   RunStartOptions,
   RunStartRequest,
   RunStartResponse,
+  BrowserRunOptions,
+  BrowserRunRequest,
+  BrowserRunResponse,
   RunResumeRequest,
   RunResumeResponse,
   RunActionResponse,
   DiagnosticsExportRequest,
-  DiagnosticsExportResponse
+  DiagnosticsExportResponse,
+  DoctorSeverity,
+  DoctorCheck,
+  DoctorReport,
+  LearningEntry,
+  LearningsResponse,
+  DocsSyncResponse,
+  ReleaseReadiness,
+  WorkspaceProfileShape
 } from "./contracts/service.js";
 export { runTournament } from "./orchestration/tournament.js";
 export type { TournamentResult } from "./orchestration/tournament.js";

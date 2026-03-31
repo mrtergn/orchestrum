@@ -8,7 +8,15 @@ const ProfileSchema = z.object({
   risk_tolerance: z.enum(["low", "medium", "high"]).optional(),
   max_cost_per_run: z.number().min(0).optional(),
   default_strategy: z.string().optional(),
-  sandbox_mode: z.enum(["docker", "local"]).optional()
+  sandbox_mode: z.enum(["docker", "local"]).optional(),
+  execution_mode: z.enum(["inline", "worktree"]).optional(),
+  browser_base_url: z.string().url().optional(),
+  governance: z.object({
+    enabled: z.boolean().optional(),
+    dangerous_command_guard: z.boolean().optional(),
+    config_protection: z.boolean().optional(),
+    quality_gate: z.boolean().optional()
+  }).optional()
 });
 
 export type WorkspaceProfile = z.infer<typeof ProfileSchema>;
@@ -59,6 +67,24 @@ export function applyProfileToConfig(profile: WorkspaceProfile | null, config: O
     merged.policy = {
       ...(merged.policy ?? {}),
       risk_tolerance: profile.risk_tolerance
+    };
+  }
+  if (profile.execution_mode) {
+    merged.execution = {
+      ...(merged.execution ?? {}),
+      mode: profile.execution_mode
+    };
+  }
+  if (profile.browser_base_url) {
+    merged.browser = {
+      ...(merged.browser ?? {}),
+      base_url: profile.browser_base_url
+    };
+  }
+  if (profile.governance) {
+    merged.governance = {
+      ...(merged.governance ?? {}),
+      ...profile.governance
     };
   }
   return merged;

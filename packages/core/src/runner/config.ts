@@ -69,6 +69,25 @@ const ConfigSchema = z.object({
       memory_limit_mb: z.number().positive().optional()
     })
     .optional(),
+  execution: z
+    .object({
+      mode: z.enum(["inline", "worktree"]).optional()
+    })
+    .optional(),
+  browser: z
+    .object({
+      base_url: z.string().url().optional(),
+      headless: z.boolean().optional()
+    })
+    .optional(),
+  governance: z
+    .object({
+      enabled: z.boolean().optional(),
+      dangerous_command_guard: z.boolean().optional(),
+      config_protection: z.boolean().optional(),
+      quality_gate: z.boolean().optional()
+    })
+    .optional(),
   strategy: z
     .object({
       mode: z.string().optional()

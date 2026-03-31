@@ -61,6 +61,12 @@ export default function SettingsPage() {
   const [profileMaxCost, setProfileMaxCost] = useState("");
   const [profileStrategy, setProfileStrategy] = useState("");
   const [profileSandbox, setProfileSandbox] = useState("docker");
+  const [profileExecutionMode, setProfileExecutionMode] = useState("inline");
+  const [profileBrowserBaseUrl, setProfileBrowserBaseUrl] = useState("");
+  const [governanceEnabled, setGovernanceEnabled] = useState(false);
+  const [governanceDangerousCommand, setGovernanceDangerousCommand] = useState(true);
+  const [governanceConfigProtection, setGovernanceConfigProtection] = useState(true);
+  const [governanceQualityGate, setGovernanceQualityGate] = useState(false);
   const [profileMessage, setProfileMessage] = useState("");
   const [openAiSet, setOpenAiSet] = useState(false);
   const [openAiKey, setOpenAiKey] = useState("");
@@ -124,6 +130,12 @@ export default function SettingsPage() {
       setProfileMaxCost(profile.max_cost_per_run != null ? String(profile.max_cost_per_run) : "");
       setProfileStrategy(profile.default_strategy ?? "");
       setProfileSandbox(profile.sandbox_mode ?? "docker");
+      setProfileExecutionMode(profile.execution_mode ?? "inline");
+      setProfileBrowserBaseUrl(profile.browser_base_url ?? "");
+      setGovernanceEnabled(Boolean(profile.governance?.enabled));
+      setGovernanceDangerousCommand(profile.governance?.dangerous_command_guard ?? true);
+      setGovernanceConfigProtection(profile.governance?.config_protection ?? true);
+      setGovernanceQualityGate(Boolean(profile.governance?.quality_gate));
     };
     void loadProfile();
   }, [scope, workspaceId]);
@@ -257,8 +269,16 @@ export default function SettingsPage() {
     const profile: any = {
       risk_tolerance: profileRisk,
       sandbox_mode: profileSandbox,
+      execution_mode: profileExecutionMode,
+      browser_base_url: profileBrowserBaseUrl || undefined,
       default_strategy: profileStrategy || undefined,
-      max_cost_per_run: maxCost
+      max_cost_per_run: maxCost,
+      governance: {
+        enabled: governanceEnabled,
+        dangerous_command_guard: governanceDangerousCommand,
+        config_protection: governanceConfigProtection,
+        quality_gate: governanceQualityGate
+      }
     };
     const res = await fetch("/api/profile", {
       method: "PUT",
@@ -540,6 +560,17 @@ export default function SettingsPage() {
                   </select>
                 </div>
                 <div>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Execution Mode</label>
+                  <select
+                    value={profileExecutionMode}
+                    onChange={(e) => setProfileExecutionMode(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                  >
+                    <option value="inline">Inline workspace</option>
+                    <option value="worktree">Isolated worktree</option>
+                  </select>
+                </div>
+                <div>
                   <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Max Cost / Run (USD)</label>
                   <input
                     value={profileMaxCost}
@@ -556,6 +587,36 @@ export default function SettingsPage() {
                     placeholder="balanced"
                     className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
                   />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Browser Base URL</label>
+                  <input
+                    value={profileBrowserBaseUrl}
+                    onChange={(e) => setProfileBrowserBaseUrl(e.target.value)}
+                    placeholder="http://localhost:3000"
+                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                  />
+                </div>
+              </div>
+              <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/20 p-4">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Governance</div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={governanceEnabled} onChange={(e) => setGovernanceEnabled(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
+                    Enable governance layer
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={governanceDangerousCommand} onChange={(e) => setGovernanceDangerousCommand(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
+                    Dangerous command guard
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={governanceConfigProtection} onChange={(e) => setGovernanceConfigProtection(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
+                    Config protection
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={governanceQualityGate} onChange={(e) => setGovernanceQualityGate(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
+                    Quality gate
+                  </label>
                 </div>
               </div>
               <div className="mt-4 flex items-center gap-3">

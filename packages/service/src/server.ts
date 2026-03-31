@@ -32,6 +32,7 @@ import {
   migrateRuns,
   exportDiagnostics,
   writeCrashReport,
+  runDoctor,
   exportTemplate,
   importTemplate,
   exportRunBundle,
@@ -52,6 +53,11 @@ import {
   getSecret,
   applySecretsToEnv,
   addWorkspaceApproval,
+  runBrowserRunDetailed,
+  loadLearnings,
+  syncWorkspaceDocs,
+  computeReleaseReadiness,
+  StateIndex,
   Logger,
   readAppendedLines,
   readTailLines,
@@ -91,6 +97,8 @@ export async function startService(options: ServiceOptions = {}) {
   const runIndex = new RunIndex(runsDir);
   await runIndex.init();
   await recoverInterruptedRunsIndex(runIndex);
+  const stateIndex = new StateIndex({ rootDir, runsDir });
+  await stateIndex.init();
 
   const app = express();
   app.use(cors());
@@ -511,6 +519,7 @@ export async function startService(options: ServiceOptions = {}) {
       configOverrides
     })
       .then(() => {
+        void stateIndex.rebuild().catch(() => undefined);
         void logger.info("run.start.completed", { runId, workspaceId });
       })
       .catch(async (err: any) => {
@@ -524,14 +533,47 @@ export async function startService(options: ServiceOptions = {}) {
           userGoal,
           error: message
         });
+        void stateIndex.rebuild().catch(() => undefined);
         void logger.error("run.start.failed", { runId, workspaceId, message });
       });
 
     return res.json({ ok: true, runId });
   };
 
+  const startBrowserRunHandler = (kind: "qa" | "benchmark" | "canary") =>
+    async (req: express.Request, res: express.Response) => {
+      const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+      const options = normalizeBrowserRunOptions(req.body?.options ?? req.body);
+      if (!workspaceId) return res.status(400).json({ error: "workspaceId required" });
+      const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+      if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+      const runId = sanitizeRunId(req.body?.runId ? String(req.body.runId) : createServiceRunId());
+      void runBrowserRunDetailed({
+        kind,
+        repoPath: workspacePath,
+        runsDir,
+        workspaceId,
+        runId,
+        baseUrl: options.baseUrl,
+        targetPath: options.targetPath,
+        options
+      })
+        .then(() => {
+          void stateIndex.rebuild().catch(() => undefined);
+          void logger.info("browser.run.completed", { runId, workspaceId, kind });
+        })
+        .catch((err: any) => {
+          void stateIndex.rebuild().catch(() => undefined);
+          void logger.error("browser.run.failed", { runId, workspaceId, kind, message: String(err?.message ?? err) });
+        });
+      return res.json({ ok: true, runId, kind });
+    };
+
   app.post("/runs/start", startRunHandler);
   app.post("/api/runs/start", startRunHandler);
+  app.post("/qa/run", startBrowserRunHandler("qa"));
+  app.post("/qa/benchmark", startBrowserRunHandler("benchmark"));
+  app.post("/qa/canary", startBrowserRunHandler("canary"));
 
   app.get("/logs/service", async (req, res) => {
     const tailRaw = req.query.tail ? Number(req.query.tail) : 200;
@@ -610,9 +652,21 @@ export async function startService(options: ServiceOptions = {}) {
     if (!full.startsWith(path.resolve(baseDir))) {
       return res.status(400).json({ error: "Invalid path" });
     }
-    const content = await fs.readFile(full, "utf8").catch(() => null);
-    if (content == null) return res.status(404).json({ error: "Not found" });
-    res.json({ content });
+    const buffer = await fs.readFile(full).catch(() => null);
+    if (buffer == null) return res.status(404).json({ error: "Not found" });
+    const ext = path.extname(full).toLowerCase();
+    if ([".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext)) {
+      return res.json({
+        content: buffer.toString("base64"),
+        encoding: "base64",
+        mimeType: mimeTypeForExtension(ext)
+      });
+    }
+    res.json({
+      content: buffer.toString("utf8"),
+      encoding: "utf8",
+      mimeType: ext === ".json" ? "application/json" : "text/plain"
+    });
   });
 
   app.get("/runs/:id/stream", async (req, res) => {
@@ -704,8 +758,10 @@ export async function startService(options: ServiceOptions = {}) {
       if (repoPath) {
         await addWorkspaceApproval(repoPath, { stepId, kind: "command", createdAt: new Date().toISOString() });
         await addWorkspaceApproval(repoPath, { stepId, kind: "diff", createdAt: new Date().toISOString() });
+        await addWorkspaceApproval(repoPath, { stepId, kind: "governance", createdAt: new Date().toISOString() });
       }
     }
+    void stateIndex.rebuild().catch(() => undefined);
     res.json({ ok: true });
   });
 
@@ -715,9 +771,26 @@ export async function startService(options: ServiceOptions = {}) {
     if (!isFeatureAllowed(tier, "analytics")) {
       return res.status(403).json({ error: "Analytics requires Pro tier." });
     }
-    const workspacePath = await resolveWorkspacePath(rootDir, req.query.workspace as string | undefined);
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
     if (!workspacePath) return res.json({ analytics: null });
-    const analytics = await loadAnalytics(workspacePath);
+    let analytics = await loadAnalytics(workspacePath);
+    if (!analytics || analytics.runs === 0) {
+      const runs = await stateIndex.queryRuns(workspaceId).catch(() => []);
+      analytics = {
+        runs: runs.length,
+        successes: runs.filter((run) => run.status === "finished").length,
+        failures: runs.filter((run) => run.status === "failed").length,
+        totalCost: 0,
+        costPerFeature: 0,
+        perAgent: {},
+        loopCounts: { total: 0, avg: 0 },
+        failureTypes: { policy: 0, audit: 0, test: 0, security: 0 },
+        trends: { cost: [], successRate: [], loops: [], reward: [] },
+        testStability: { total: 0, failed: 0, index: 0 },
+        modelUsage: {}
+      };
+    }
     res.json({ analytics });
   });
 
@@ -982,6 +1055,52 @@ export async function startService(options: ServiceOptions = {}) {
     res.json({ archive });
   });
 
+  app.get("/doctor", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const repoPath = await resolveWorkspacePath(rootDir, workspaceId);
+    await stateIndex.health();
+    const report = await runDoctor({
+      rootDir,
+      runsDir,
+      workspaceId,
+      repoPath: repoPath ?? undefined
+    });
+    res.json(report);
+  });
+
+  app.get("/learnings", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const repoPath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!repoPath) return res.json({ workspaceId, learnings: [] });
+    const learnings = await loadLearnings(repoPath).catch(() => []);
+    res.json({ workspaceId, learnings });
+  });
+
+  app.post("/docs/sync", async (req, res) => {
+    const workspacePath = await resolveWorkspacePath(rootDir, req.body?.workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const payload = await syncWorkspaceDocs(workspacePath);
+    void stateIndex.rebuild().catch(() => undefined);
+    res.json(payload);
+  });
+
+  app.get("/release/readiness", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    await stateIndex.rebuild().catch(() => undefined);
+    const readiness = await computeReleaseReadiness({
+      workspacePath,
+      runsDir,
+      workspaceId
+    });
+    const indexed = await stateIndex.getLatestReadiness(workspaceId).catch(() => null);
+    if (indexed?.runId && !readiness.latestRunId) {
+      readiness.latestRunId = indexed.runId;
+    }
+    res.json(readiness);
+  });
+
   app.post("/run", async (req, res) => {
     const repoPath = String(req.body?.repoPath ?? "");
     const workflowPath = String(req.body?.workflowPath ?? "");
@@ -1217,6 +1336,28 @@ function normalizeRunStartOptions(raw: unknown): {
   };
 }
 
+function normalizeBrowserRunOptions(raw: unknown): {
+  baseUrl?: string;
+  targetPath?: string;
+  iterations?: number;
+  intervalMs?: number;
+  passphrase?: string;
+} {
+  const parsed = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const baseUrl = typeof parsed.baseUrl === "string" && parsed.baseUrl.trim() ? parsed.baseUrl.trim() : undefined;
+  const targetPath = typeof parsed.targetPath === "string" && parsed.targetPath.trim() ? parsed.targetPath.trim() : undefined;
+  const iterationsRaw = typeof parsed.iterations === "number" ? parsed.iterations : Number(parsed.iterations ?? NaN);
+  const intervalRaw = typeof parsed.intervalMs === "number" ? parsed.intervalMs : Number(parsed.intervalMs ?? NaN);
+  const passphrase = typeof parsed.passphrase === "string" && parsed.passphrase.trim() ? parsed.passphrase : undefined;
+  return {
+    baseUrl,
+    targetPath,
+    iterations: Number.isFinite(iterationsRaw) && iterationsRaw > 0 ? Math.floor(iterationsRaw) : undefined,
+    intervalMs: Number.isFinite(intervalRaw) && intervalRaw > 0 ? Math.floor(intervalRaw) : undefined,
+    passphrase
+  };
+}
+
 async function resolveWorkflowPath(workspacePath: string, workflowId: string, rootDir: string): Promise<string | null> {
   const trimmed = workflowId.trim();
   if (!trimmed) return null;
@@ -1268,6 +1409,7 @@ async function writeRunBootstrapFailure(options: {
   const now = new Date().toISOString();
   await writeJson(path.join(runDir, "run.json"), {
     runId: options.runId,
+    kind: "workflow",
     status: "failed",
     start: now,
     end: now,
@@ -1280,6 +1422,8 @@ async function writeRunBootstrapFailure(options: {
     error: options.error,
     totalSteps: 0,
     completedSteps: 0,
+    worktreePath: null,
+    readiness: null,
     pinned: false,
     tags: []
   });
@@ -1573,6 +1717,22 @@ async function buildRunDetail(run: RunRecord) {
     }
   }
   return { run: run.meta, steps, workflow };
+}
+
+function mimeTypeForExtension(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 function getWorkspaceMetaDirForWrite(workspacePath: string): string {

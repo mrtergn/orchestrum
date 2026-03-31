@@ -6,7 +6,7 @@ import { ensureDir, writeJson, readJsonIfExists, writeText } from "./fs.js";
 
 export type WorkspaceApproval = {
   stepId: string;
-  kind: "diff" | "command";
+  kind: "diff" | "command" | "governance";
   createdAt: string;
 };
 
@@ -14,7 +14,7 @@ export type ApprovalRequest = {
   token: string;
   runId: string;
   stepId: string;
-  kind: "diff" | "command";
+  kind: "diff" | "command" | "governance";
   reason: string;
   findings: unknown;
   ts: string;

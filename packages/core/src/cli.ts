@@ -18,6 +18,7 @@ import {
   applySecretsToEnv,
   writeCrashReport,
   exportDiagnostics,
+  runDoctor,
   loadGlobalConfig,
   saveGlobalConfig,
   checkForUpdates,
@@ -30,6 +31,9 @@ import {
   setPluginEnabled,
   exportRunBundle,
   importRunBundle,
+  runBrowserRunDetailed,
+  loadLearnings,
+  syncWorkspaceDocs,
   getLicenseStatus,
   isFeatureAllowed,
   enforceFeature
@@ -189,6 +193,105 @@ program
         process.exit(1);
       }
       console.log(`Approved ${result.runId}:${result.stepId}`);
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+program
+  .command("doctor")
+  .option("--root <path>", "Root directory (default: cwd)")
+  .option("--runs-dir <path>", "Runs directory (default: <root>/runs)")
+  .option("--repo <path>", "Workspace repo path for profile/config validation")
+  .option("--workspace <id>", "Workspace ID")
+  .action(async (options) => {
+    try {
+      const rootDir = options.root ? path.resolve(options.root) : process.cwd();
+      const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.join(rootDir, "runs");
+      const repoPath = options.repo ? path.resolve(options.repo) : undefined;
+      const report = await runDoctor({
+        rootDir,
+        runsDir,
+        workspaceId: options.workspace,
+        repoPath
+      });
+      console.log(JSON.stringify(report, null, 2));
+      if (!report.summary.ok) {
+        process.exitCode = 1;
+      }
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+function registerBrowserCommand(name: "qa" | "benchmark" | "canary", description: string) {
+  program
+    .command(name)
+    .description(description)
+    .requiredOption("--repo <path>", "Target repo path")
+    .option("--workspace <id>", "Workspace ID")
+    .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+    .option("--base-url <url>", "Base URL to inspect")
+    .option("--path <path>", "Relative path to visit")
+    .option("--iterations <n>", "Canary iterations", (value) => Number(value))
+    .option("--interval-ms <n>", "Canary interval in ms", (value) => Number(value))
+    .action(async (options) => {
+      try {
+        const repoPath = path.resolve(options.repo);
+        const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
+        const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
+        const result = await runBrowserRunDetailed({
+          kind: name,
+          repoPath,
+          runsDir,
+          workspaceId,
+          baseUrl: options.baseUrl,
+          targetPath: options.path,
+          options: {
+            baseUrl: options.baseUrl,
+            targetPath: options.path,
+            iterations: Number.isFinite(options.iterations) ? options.iterations : undefined,
+            intervalMs: Number.isFinite(options.intervalMs) ? options.intervalMs : undefined
+          }
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.ok) process.exitCode = 1;
+      } catch (err) {
+        await handleFatal(err);
+      }
+    });
+}
+
+registerBrowserCommand("qa", "Run headless browser QA with artifacts");
+registerBrowserCommand("benchmark", "Run browser benchmark capture");
+registerBrowserCommand("canary", "Run repeated browser canary checks");
+
+const learningsCmd = program.command("learnings").description("Workspace learnings");
+learningsCmd
+  .command("list")
+  .requiredOption("--repo <path>", "Target repo path")
+  .option("--limit <n>", "Entry limit", (value) => Number(value), 20)
+  .action(async (options) => {
+    try {
+      const repoPath = path.resolve(options.repo);
+      const entries = await loadLearnings(repoPath);
+      const limit = Number.isFinite(options.limit) && options.limit > 0 ? options.limit : 20;
+      console.log(JSON.stringify(entries.slice(0, limit), null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+const docsCmd = program.command("docs").description("Documentation utilities");
+docsCmd
+  .command("sync")
+  .requiredOption("--repo <path>", "Target repo path")
+  .action(async (options) => {
+    try {
+      const repoPath = path.resolve(options.repo);
+      const result = await syncWorkspaceDocs(repoPath);
+      console.log(JSON.stringify(result, null, 2));
+      if (!result.ok) process.exitCode = 1;
     } catch (err) {
       await handleFatal(err);
     }

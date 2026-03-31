@@ -33,9 +33,25 @@ export type StepState = {
 
 export type RunStatus = "running" | "finished" | "failed" | "cancelled" | "interrupted";
 
+export type RunKind = "workflow" | "qa" | "benchmark" | "canary";
+
+export type RunReadiness = {
+  score: number;
+  blocking: string[];
+  updatedAt?: string;
+};
+
+export type GovernanceProfile = {
+  enabled?: boolean;
+  dangerous_command_guard?: boolean;
+  config_protection?: boolean;
+  quality_gate?: boolean;
+};
+
 export type RunState = {
   schemaVersion?: number;
   runId: string;
+  kind?: RunKind;
   status: RunStatus;
   start: string;
   end: string | null;
@@ -79,10 +95,15 @@ export type RunState = {
     valid?: boolean;
     expiresAt?: string | null;
   };
+  worktreePath?: string | null;
+  readiness?: RunReadiness | null;
   profile?: {
     risk_tolerance?: string;
     max_cost_per_run?: number;
     default_strategy?: string;
     sandbox_mode?: string;
+    execution_mode?: "inline" | "worktree";
+    browser_base_url?: string;
+    governance?: GovernanceProfile;
   } | null;
 };
