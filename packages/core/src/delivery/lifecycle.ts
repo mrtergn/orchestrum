@@ -3,7 +3,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, appendLine, readJsonIfExists, safeRunId, writeJson, writeText } from "../runner/fs.js";
-import { lookupBinary, runBinary } from "../runner/bin.js";
+import { lookupBinary } from "../runner/bin.js";
 import { loadConfig } from "../runner/config.js";
 import { formatLearningsForContext, loadRelevantLearnings } from "../runner/learnings.js";
 import { prepareWorktreeContext } from "../runner/worktrees.js";
@@ -17,7 +17,6 @@ import { computeReleaseReadiness } from "../release/readiness.js";
 import type { RunState } from "../runner/types.js";
 import {
   CapabilityDiscoveryResultSchema,
-  createDefaultTeamPreset,
   DeliverySessionRequestSchema,
   DeliverySessionStateSchema,
   type CapabilityDiscoveryResult,
@@ -34,11 +33,31 @@ import {
   type RemediationTask,
   type ReviewFinding,
   type RoleBinding,
-  type RoleDefinition,
   type TeamPreset,
   type TeamPresetResponse,
   type WorkPacket
 } from "./types.js";
+import {
+  accumulateDeliverySummary,
+  applyDerivedSessionState,
+  createEmptyDeliverySummary
+} from "./sessionState.js";
+import {
+  createRemediationTasks,
+  extractFindingsFromImport,
+  parseExplicitStatus,
+  resolvePacketCompletionStatus
+} from "./triage.js";
+import { summarizeImport } from "./importSignals.js";
+import { resolveImportPacket } from "./importMatching.js";
+import {
+  buildInitialPackets,
+  buildRemediationPacket,
+  createScaffoldTeamPreset,
+  getCurrentBranch,
+  loadRepoScripts,
+  loadSelectedPathNotes
+} from "./workPackets.js";
 
 const TEAM_PRESET_RELATIVE_PATH = path.join(".orchestrum", "team-preset.json");
 const DELIVERY_DIRNAME = "delivery";
@@ -77,10 +96,6 @@ type DeliveryToolProfile = {
   textVariant: DeliveryTextVariant;
   guidance: string[];
   responseContract: string[];
-};
-
-type ImportMatchResult = DeliveryImportAnalysis & {
-  candidates: WorkPacket[];
 };
 
 const BUILTIN_TOOL_PROFILES: Record<DeliveryTargetTool, DeliveryToolProfile> = {
@@ -547,39 +562,10 @@ export async function summarizeDeliverySessions(options: {
   workspaceId?: string;
 }): Promise<DeliverySummary> {
   const sessions = await listAllDeliverySessions(options.runsDir, options.workspaceId);
-  const summary: DeliverySummary = {
-    workspaceId: options.workspaceId,
-    sessions: sessions.length,
-    activeSessions: 0,
-    blockedSessions: 0,
-    completedSessions: 0,
-    openFindings: 0,
-    resolvedFindings: 0,
-    remediationsOpen: 0,
-    remediationsDone: 0,
-    unresolvedManualPackets: 0,
-    unmatchedImportAttempts: 0,
-    packetStatusCounts: {},
-    toolUsage: {},
-    latestRunId: sessions[0]?.runId ?? null
-  };
-
+  const summary = createEmptyDeliverySummary(options.workspaceId);
+  summary.latestRunId = sessions[0]?.runId ?? null;
   for (const session of sessions) {
-    if (session.status === "running") summary.activeSessions += 1;
-    if (session.status === "blocked" || session.status === "failed") summary.blockedSessions += 1;
-    if (session.status === "completed") summary.completedSessions += 1;
-    summary.openFindings += session.findings.filter((finding) => finding.status === "open").length;
-    summary.resolvedFindings += session.findings.filter((finding) => finding.status === "resolved").length;
-    summary.remediationsOpen += session.remediations.filter((task) => task.status !== "done").length;
-    summary.remediationsDone += session.remediations.filter((task) => task.status === "done").length;
-    summary.unresolvedManualPackets += session.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed").length;
-    summary.unmatchedImportAttempts += session.imports.filter((item) => item.matchStatus !== "matched").length;
-    for (const packet of session.packets) {
-      summary.packetStatusCounts[packet.status] = (summary.packetStatusCounts[packet.status] ?? 0) + 1;
-    }
-    for (const exported of session.exports) {
-      summary.toolUsage[exported.targetTool] = (summary.toolUsage[exported.targetTool] ?? 0) + 1;
-    }
+    accumulateDeliverySummary(summary, session);
   }
 
   return summary;
@@ -675,7 +661,7 @@ export async function analyzeDeliveryImport(options: PacketImportOptions & {
   if (!rawText.trim()) throw new Error("No import content provided.");
   const match = resolveImportPacket(session, {
     requestedPacketId: options.packetId,
-    parsedPacketId: parsePacketId(rawText),
+    rawText,
     targetTool: options.targetTool
   });
 
@@ -691,7 +677,9 @@ export async function analyzeDeliveryImport(options: PacketImportOptions & {
       source: options.source ?? (options.filePath ? "file" : "paste"),
       fileName: options.fileName ?? (options.filePath ? path.basename(options.filePath) : undefined),
       rawText,
-      summary: summarizeImport(rawText),
+      summary: match.summary ?? summarizeImport(rawText),
+      confidence: match.confidence,
+      matchReasons: match.matchReasons,
       createdAt
     };
     await writeText(path.join(getDeliveryDir(runDir), "imports", `${importRecord.id}.txt`), rawText);
@@ -709,7 +697,9 @@ export async function analyzeDeliveryImport(options: PacketImportOptions & {
     matchStatus: match.matchStatus,
     needsPacketMatch: match.matchStatus !== "matched",
     candidatePacketIds: match.candidatePacketIds,
-    summary: summarizeImport(rawText)
+    confidence: match.confidence,
+    matchReasons: match.matchReasons,
+    summary: match.summary ?? summarizeImport(rawText)
   };
 }
 
@@ -722,7 +712,7 @@ export async function importDeliveryPacketResponse(options: PacketImportOptions)
   if (!rawText.trim()) throw new Error("No import content provided.");
   const analysis = resolveImportPacket(session, {
     requestedPacketId: options.packetId,
-    parsedPacketId: parsePacketId(rawText),
+    rawText,
     targetTool: options.targetTool
   });
   if (analysis.matchStatus !== "matched" || !analysis.matchedPacketId) {
@@ -743,7 +733,9 @@ export async function importDeliveryPacketResponse(options: PacketImportOptions)
     source: options.source ?? (options.filePath ? "file" : "paste"),
     fileName: options.fileName ?? (options.filePath ? path.basename(options.filePath) : undefined),
     rawText,
-    summary: summarizeImport(rawText),
+    summary: analysis.summary ?? summarizeImport(rawText),
+    confidence: analysis.confidence,
+    matchReasons: analysis.matchReasons,
     createdAt
   };
   await writeText(path.join(getDeliveryDir(runDir), "imports", `${importRecord.id}.txt`), rawText);
@@ -1133,385 +1125,6 @@ async function buildRepoContext(options: {
   };
 }
 
-function buildInitialPackets(options: {
-  runId: string;
-  workspaceId: string;
-  repoPath: string;
-  goal: string;
-  sprintName?: string;
-  selectedPaths: string[];
-  notes?: string;
-  preset: TeamPreset;
-  roleBindings: RoleBinding[];
-  context: {
-    branch: string | null;
-    readiness: string[];
-    learnings: string[];
-    selectedFileNotes: string[];
-    repoScripts: string[];
-  };
-}): WorkPacket[] {
-  const roleMap = new Map(options.preset.roles.map((role) => [role.id, role]));
-  return options.roleBindings
-    .filter((binding) => binding.mode !== "disabled")
-    .map((binding) => {
-      const role = roleMap.get(binding.roleId) ?? fallbackRole(binding.roleId, binding.mode);
-      const now = new Date().toISOString();
-      const template = options.preset.packet_templates?.[binding.roleId];
-      const acceptanceCriteria = [
-        ...(role.acceptance_criteria ?? []),
-        ...(template?.acceptance_criteria ?? [])
-      ];
-      const expectedOutput = [
-        ...(role.expected_output ?? []),
-        ...(template?.expected_output ?? [])
-      ];
-      const contextNotes = [
-        options.notes ? `Session notes: ${options.notes}` : null,
-        options.context.branch ? `Current branch: ${options.context.branch}` : null,
-        ...options.context.readiness.map((item) => `Readiness: ${item}`),
-        ...options.context.learnings.map((item) => `Learning: ${item}`),
-        ...options.context.selectedFileNotes
-      ].filter((item): item is string => Boolean(item));
-      const commands = binding.mode === "auto_cli"
-        ? buildAutoCliCommands(options.repoPath, options.context.repoScripts)
-        : undefined;
-      const status = !binding.available
-        ? "blocked"
-        : binding.mode === "auto_cli" && (!commands || commands.length === 0)
-          ? "blocked"
-          : "pending";
-      return {
-        id: `${binding.roleId}-${crypto.randomUUID().slice(0, 8)}`,
-        sessionId: options.runId,
-        roleId: binding.roleId,
-        title: buildPacketTitle(binding.roleId, options.goal, options.sprintName),
-        objective: [
-          template?.objective_prefix,
-          role.objective,
-          `Goal: ${options.goal}`
-        ].filter(Boolean).join(" "),
-        summary: binding.reason,
-        mode: binding.mode,
-        status,
-        target: binding.target,
-        repoPath: options.repoPath,
-        workspaceId: options.workspaceId,
-        goal: options.goal,
-        sprintName: options.sprintName,
-        selectedPaths: options.selectedPaths,
-        contextNotes,
-        repoScripts: options.context.repoScripts,
-        acceptanceCriteria,
-        expectedOutput,
-        commands,
-        dependsOn: [],
-        createdAt: now,
-        updatedAt: now
-      } satisfies WorkPacket;
-    });
-}
-
-function buildRemediationPacket(session: DeliverySessionState, remediation: RemediationTask, createdAt: string): WorkPacket {
-  const binding = session.roleBindings.find((item) => item.roleId === remediation.roleId);
-  const mode = binding?.mode ?? "manual_ide";
-  const target = binding?.target ?? "manual";
-  return {
-    id: `remediation-${crypto.randomUUID().slice(0, 8)}`,
-    sessionId: session.runId,
-    roleId: remediation.roleId,
-    title: remediation.title,
-    objective: remediation.summary,
-    summary: `Remediation generated from finding ${remediation.findingId}.`,
-    mode,
-    status: mode === "auto_cli" && !(remediation.suggestedCommands?.length) ? "blocked" : "pending",
-    target,
-    repoPath: session.repoPath,
-    workspaceId: session.workspaceId,
-    goal: session.goal,
-    sprintName: session.sprintName,
-    selectedPaths: session.selectedPaths,
-    contextNotes: [
-      `Generated from finding ${remediation.findingId}.`
-    ],
-    repoScripts: session.packets.flatMap((packet) => packet.repoScripts ?? []),
-    acceptanceCriteria: remediation.acceptanceCriteria,
-    expectedOutput: [
-      "Resolution summary",
-      "Changed files",
-      "Verification notes"
-    ],
-    commands: remediation.suggestedCommands,
-    dependsOn: [],
-    remediationForFindingId: remediation.findingId,
-    createdAt,
-    updatedAt: createdAt
-  };
-}
-
-function createRemediationTasks(
-  session: DeliverySessionState,
-  packet: WorkPacket,
-  findings: ReviewFinding[],
-  createdAt: string
-): RemediationTask[] {
-  return findings
-    .filter((finding) => finding.status === "open" && finding.category !== "follow_up")
-    .map((finding) => {
-      const roleId = remediationRoleForFinding(finding.category);
-      const task: RemediationTask = {
-        id: crypto.randomUUID(),
-        sessionId: session.runId,
-        findingId: finding.id,
-        roleId,
-        title: `Resolve: ${finding.title}`,
-        summary: `Address finding from ${packet.roleId}: ${finding.summary}`,
-        acceptanceCriteria: [
-          "Resolve the specific finding without widening scope unnecessarily.",
-          "Call out verification steps for the fix."
-        ],
-        suggestedCommands: roleId === "tester" ? buildAutoCliCommands(session.repoPath, packet.repoScripts) : undefined,
-        status: "open",
-        createdAt,
-        updatedAt: createdAt
-      };
-      finding.remediationTaskId = task.id;
-      return task;
-    });
-}
-
-function extractFindingsFromImport(options: {
-  session: DeliverySessionState;
-  packet: WorkPacket;
-  importRecord: PacketImport;
-}): ReviewFinding[] {
-  const listedFiles = extractListedFiles(options.importRecord.rawText);
-  const explicit = extractExplicitFindings(options.importRecord.rawText);
-  if (explicit.length > 0) {
-    return explicit.map((entry) => createFinding(options.session, options.packet, options.importRecord, {
-      ...entry,
-      files: entry.files?.length ? entry.files : listedFiles
-    }));
-  }
-  const heuristics = inferHeuristicFindings(options.importRecord.rawText);
-  if (heuristics.length > 0) {
-    return heuristics.map((entry) => createFinding(options.session, options.packet, options.importRecord, {
-      ...entry,
-      files: listedFiles
-    }));
-  }
-  const status = parseExplicitStatus(options.importRecord.rawText);
-  if (status === "completed") {
-    return [];
-  }
-  return [
-    createFinding(options.session, options.packet, options.importRecord, {
-      category: "follow_up",
-      severity: "medium",
-      title: `${options.packet.roleId} response needs review`,
-      summary: summarizeImport(options.importRecord.rawText),
-      files: listedFiles
-    })
-  ];
-}
-
-function createFinding(
-  session: DeliverySessionState,
-  packet: WorkPacket,
-  importRecord: PacketImport,
-  input: {
-    category: ReviewFinding["category"];
-    severity: ReviewFinding["severity"];
-    title: string;
-    summary: string;
-    evidence?: string[];
-    files?: string[];
-  }
-): ReviewFinding {
-  const createdAt = new Date().toISOString();
-  return {
-    id: crypto.randomUUID(),
-    sessionId: session.runId,
-    packetId: packet.id,
-    importId: importRecord.id,
-    category: input.category,
-    severity: input.severity,
-    status: "open",
-    title: input.title,
-    summary: input.summary,
-    evidence: input.evidence ?? [input.summary],
-    files: input.files ?? [],
-    source: packet.target,
-    createdAt,
-    updatedAt: createdAt
-  };
-}
-
-function parseExplicitStatus(input: string): "completed" | "blocked" | null {
-  const match = input.match(/^\s*status\s*:\s*(completed|blocked)\s*$/im);
-  if (!match) return null;
-  const status = match[1];
-  return status ? status.toLowerCase() as "completed" | "blocked" : null;
-}
-
-function resolvePacketCompletionStatus(
-  explicitStatus: "completed" | "blocked" | null,
-  findings: ReviewFinding[]
-): WorkPacket["status"] {
-  if (explicitStatus === "completed") return "completed";
-  if (explicitStatus === "blocked") return "blocked";
-  if (findings.some((finding) => finding.category === "delivery_blocker" || finding.severity === "critical")) {
-    return "blocked";
-  }
-  if (findings.length === 0) return "completed";
-  return "completed";
-}
-
-function parsePacketId(input: string): string | null {
-  const commentMatch = input.match(/ORCHESTRUM_PACKET\s+(\{[\s\S]+?\})/);
-  const packetPayload = commentMatch?.[1];
-  if (packetPayload) {
-    try {
-      const parsed = JSON.parse(packetPayload) as { packetId?: string };
-      if (parsed.packetId) return parsed.packetId;
-    } catch {
-      // ignore
-    }
-  }
-  const lineMatch = input.match(/^\s*Packet ID\s*:\s*([A-Za-z0-9._-]+)\s*$/im);
-  return lineMatch?.[1] ?? null;
-}
-
-function resolveImportPacket(
-  session: DeliverySessionState,
-  options: {
-    requestedPacketId?: string;
-    parsedPacketId?: string | null;
-    targetTool?: DeliveryTargetTool;
-  }
-): ImportMatchResult {
-  const importablePackets = getImportablePackets(session);
-  const candidatePacketIds = importablePackets.map((packet) => packet.id);
-  const parsedPacketId = options.parsedPacketId ?? undefined;
-
-  if (options.requestedPacketId) {
-    const requested = session.packets.find((packet) => packet.id === options.requestedPacketId) ?? null;
-    if (!requested) {
-      return {
-        sessionId: session.runId,
-        parsedPacketId,
-        targetTool: options.targetTool,
-        matchStatus: candidatePacketIds.length > 0 ? "ambiguous" : "unmatched",
-        needsPacketMatch: true,
-        candidatePacketIds,
-        summary: `Requested packet ${options.requestedPacketId} was not found.`,
-        candidates: importablePackets
-      };
-    }
-    return {
-      sessionId: session.runId,
-      parsedPacketId,
-      matchedPacketId: requested.id,
-      targetTool: options.targetTool,
-      matchStatus: "matched",
-      needsPacketMatch: false,
-      candidatePacketIds: [requested.id],
-      summary: `Matched import to requested packet ${requested.id}.`,
-      candidates: [requested]
-    };
-  }
-
-  if (parsedPacketId) {
-    const parsed = session.packets.find((packet) => packet.id === parsedPacketId) ?? null;
-    if (parsed) {
-      return {
-        sessionId: session.runId,
-        parsedPacketId,
-        matchedPacketId: parsed.id,
-        targetTool: options.targetTool,
-        matchStatus: "matched",
-        needsPacketMatch: false,
-        candidatePacketIds: [parsed.id],
-        summary: `Matched import to packet ${parsed.id} via embedded packet id.`,
-        candidates: [parsed]
-      };
-    }
-    return {
-      sessionId: session.runId,
-      parsedPacketId,
-      targetTool: options.targetTool,
-      matchStatus: candidatePacketIds.length > 0 ? "ambiguous" : "unmatched",
-      needsPacketMatch: true,
-      candidatePacketIds,
-      summary: `Embedded packet id ${parsedPacketId} did not match an active packet.`,
-      candidates: importablePackets
-    };
-  }
-
-  const toolMatched = options.targetTool ? getToolMatchedPackets(session, importablePackets, options.targetTool) : [];
-  if (toolMatched.length === 1) {
-    return {
-      sessionId: session.runId,
-      targetTool: options.targetTool,
-      matchedPacketId: toolMatched[0]?.id,
-      matchStatus: "matched",
-      needsPacketMatch: false,
-      candidatePacketIds: [toolMatched[0]!.id],
-      summary: `Matched import to ${toolMatched[0]!.id} via tool target ${options.targetTool}.`,
-      candidates: toolMatched
-    };
-  }
-  if (toolMatched.length > 1) {
-    return {
-      sessionId: session.runId,
-      targetTool: options.targetTool,
-      matchStatus: "ambiguous",
-      needsPacketMatch: true,
-      candidatePacketIds: toolMatched.map((packet) => packet.id),
-      summary: `Multiple packets are waiting for ${options.targetTool} imports.`,
-      candidates: toolMatched
-    };
-  }
-  if (importablePackets.length === 1) {
-    return {
-      sessionId: session.runId,
-      targetTool: options.targetTool,
-      matchedPacketId: importablePackets[0]?.id,
-      matchStatus: "matched",
-      needsPacketMatch: false,
-      candidatePacketIds: [importablePackets[0]!.id],
-      summary: `Matched import to the only pending manual packet ${importablePackets[0]!.id}.`,
-      candidates: importablePackets
-    };
-  }
-  return {
-    sessionId: session.runId,
-    targetTool: options.targetTool,
-    matchStatus: importablePackets.length > 0 ? "ambiguous" : "unmatched",
-    needsPacketMatch: true,
-    candidatePacketIds,
-    summary: importablePackets.length > 0 ? "Multiple manual packets are awaiting imports." : "No manual packets are awaiting imports.",
-    candidates: importablePackets
-  };
-}
-
-function getImportablePackets(session: DeliverySessionState): WorkPacket[] {
-  return session.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed" && packet.status !== "failed");
-}
-
-function getToolMatchedPackets(
-  session: DeliverySessionState,
-  packets: WorkPacket[],
-  targetTool: DeliveryTargetTool
-): WorkPacket[] {
-  return packets.filter((packet) => {
-    const lastExport = packet.lastExportId
-      ? session.exports.find((entry) => entry.id === packet.lastExportId)
-      : null;
-    return lastExport?.targetTool === targetTool || packet.target === targetTool;
-  });
-}
-
 function resolveToolProfile(session: DeliverySessionState, targetTool: DeliveryTargetTool): DeliveryToolProfile {
   const base = BUILTIN_TOOL_PROFILES[targetTool];
   const override = session.preset.tool_profiles?.[targetTool];
@@ -1566,342 +1179,6 @@ function renderPacketMarkdown(session: DeliverySessionState, packet: WorkPacket,
     lines.push("", "## Suggested Commands", ...packet.commands.map((command) => `- ${command}`));
   }
   return lines.join("\n");
-}
-
-function summarizeImport(input: string): string {
-  const summaryLine = input.match(/^\s*summary\s*:\s*(.+)$/im)?.[1]?.trim();
-  if (summaryLine) return summaryLine;
-  return input.trim().split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.slice(0, 240) ?? "Imported response";
-}
-
-function extractExplicitFindings(input: string): Array<{
-  category: ReviewFinding["category"];
-  severity: ReviewFinding["severity"];
-  title: string;
-  summary: string;
-  files?: string[];
-}> {
-  const findings: Array<{
-    category: ReviewFinding["category"];
-    severity: ReviewFinding["severity"];
-    title: string;
-    summary: string;
-    files?: string[];
-  }> = [];
-  const lines = input.split(/\r?\n/);
-  for (const line of lines) {
-    const match = line.match(/^\s*[-*]\s*\[([a-z_]+)\|([a-z]+)\]\s*(.+?)\s*::\s*(.+)\s*$/i);
-    if (!match) continue;
-    const [, rawCategory, rawSeverity, rawTitle, rawSummary] = match;
-    if (!rawCategory || !rawSeverity || !rawTitle || !rawSummary) continue;
-    const category = normalizeFindingCategory(rawCategory);
-    const severity = normalizeFindingSeverity(rawSeverity);
-    findings.push({
-      category,
-      severity,
-      title: rawTitle.trim(),
-      summary: rawSummary.trim()
-    });
-  }
-  return findings;
-}
-
-function extractListedFiles(input: string): string[] {
-  const lines = input.split(/\r?\n/);
-  const files = new Set<string>();
-  let inFilesSection = false;
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) {
-      if (inFilesSection) break;
-      continue;
-    }
-    if (/^#{1,6}\s*(files|changed files|file scope|files changed)\s*$/i.test(line) || /^(files|changed files|file scope|files changed)\s*:\s*$/i.test(line)) {
-      inFilesSection = true;
-      continue;
-    }
-    if (inFilesSection) {
-      const bulletMatch = line.match(/^[-*]\s+`?([^`]+?)`?\s*$/);
-      if (bulletMatch?.[1]) {
-        files.add(bulletMatch[1].trim());
-        continue;
-      }
-      if (/^#{1,6}\s+/.test(line)) break;
-    }
-    const inlinePath = line.match(/(?:^|\s)([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)(?:\s|$)/);
-    if (inlinePath?.[1] && (line.toLowerCase().includes("file") || line.toLowerCase().includes("path"))) {
-      files.add(inlinePath[1].trim());
-    }
-  }
-  return Array.from(files);
-}
-
-function inferHeuristicFindings(input: string): Array<{
-  category: ReviewFinding["category"];
-  severity: ReviewFinding["severity"];
-  title: string;
-  summary: string;
-}> {
-  const lower = input.toLowerCase();
-  const findings: Array<{
-    category: ReviewFinding["category"];
-    severity: ReviewFinding["severity"];
-    title: string;
-    summary: string;
-  }> = [];
-  if (/\b(security|vulnerability|secret|token|xss|csrf|sql injection)\b/.test(lower)) {
-    findings.push({
-      category: "security_risk",
-      severity: /\bcritical|high\b/.test(lower) ? "high" : "medium",
-      title: "Security risk flagged",
-      summary: summarizeSentence(input, /(security|vulnerability|secret|token|xss|csrf|sql injection)/i)
-    });
-  }
-  if (/\b(architecture|design|coupling|maintainability|scalability)\b/.test(lower)) {
-    findings.push({
-      category: "architecture_risk",
-      severity: /\bcritical|high\b/.test(lower) ? "high" : "medium",
-      title: "Architecture risk flagged",
-      summary: summarizeSentence(input, /(architecture|design|coupling|maintainability|scalability)/i)
-    });
-  }
-  if (/\b(test|coverage|typecheck|lint|build failed|failing)\b/.test(lower)) {
-    findings.push({
-      category: "test_gap",
-      severity: /\bblocker|failed|failing\b/.test(lower) ? "high" : "medium",
-      title: "Validation gap detected",
-      summary: summarizeSentence(input, /(test|coverage|typecheck|lint|build failed|failing)/i)
-    });
-  }
-  if (/\b(blocker|unable to|cannot|missing required|not possible)\b/.test(lower)) {
-    findings.push({
-      category: "delivery_blocker",
-      severity: "high",
-      title: "Delivery blocker detected",
-      summary: summarizeSentence(input, /(blocker|unable to|cannot|missing required|not possible)/i)
-    });
-  }
-  if (/\b(todo|follow up|next step|later)\b/.test(lower)) {
-    findings.push({
-      category: "follow_up",
-      severity: "low",
-      title: "Follow-up work suggested",
-      summary: summarizeSentence(input, /(todo|follow up|next step|later)/i)
-    });
-  }
-  if (findings.length === 0 && /\b(error|warning|regression|bug|issue|failed)\b/.test(lower)) {
-    findings.push({
-      category: "code_issue",
-      severity: /\bhigh|critical\b/.test(lower) ? "high" : "medium",
-      title: "Code issue detected",
-      summary: summarizeSentence(input, /(error|warning|regression|bug|issue|failed)/i)
-    });
-  }
-  return dedupeFindings(findings);
-}
-
-function normalizeFindingCategory(input: string): ReviewFinding["category"] {
-  const normalized = input.trim().toLowerCase();
-  switch (normalized) {
-    case "test_gap":
-    case "architecture_risk":
-    case "security_risk":
-    case "delivery_blocker":
-    case "follow_up":
-    case "code_issue":
-      return normalized;
-    default:
-      return "code_issue";
-  }
-}
-
-function normalizeFindingSeverity(input: string): ReviewFinding["severity"] {
-  const normalized = input.trim().toLowerCase();
-  switch (normalized) {
-    case "low":
-    case "medium":
-    case "high":
-    case "critical":
-      return normalized;
-    default:
-      return "medium";
-  }
-}
-
-function dedupeFindings<T extends { category: string; title: string; summary: string }>(findings: T[]): T[] {
-  const seen = new Set<string>();
-  const result: T[] = [];
-  for (const finding of findings) {
-    const key = `${finding.category}:${finding.title}:${finding.summary}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(finding);
-  }
-  return result;
-}
-
-function summarizeSentence(input: string, pattern: RegExp): string {
-  const lines = input.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  return lines.find((line) => pattern.test(line)) ?? lines[0] ?? "Imported finding";
-}
-
-function remediationRoleForFinding(category: ReviewFinding["category"]): string {
-  switch (category) {
-    case "architecture_risk":
-    case "security_risk":
-      return "auditor";
-    case "test_gap":
-      return "tester";
-    case "follow_up":
-      return "planner";
-    default:
-      return "developer";
-  }
-}
-
-function buildPacketTitle(roleId: string, goal: string, sprintName?: string): string {
-  const prefix = sprintName ? `${sprintName}: ` : "";
-  switch (roleId) {
-    case "planner":
-      return `${prefix}Plan ${goal}`;
-    case "developer":
-      return `${prefix}Implement ${goal}`;
-    case "auditor":
-      return `${prefix}Audit ${goal}`;
-    case "tester":
-      return `${prefix}Validate ${goal}`;
-    default:
-      return `${prefix}${roleId} packet`;
-  }
-}
-
-function fallbackRole(roleId: string, mode: WorkPacket["mode"]): RoleDefinition {
-  return {
-    id: roleId,
-    label: roleId,
-    description: roleId,
-    mode
-  };
-}
-
-function buildAutoCliCommands(repoPath: string, repoScripts: string[]): string[] {
-  const packageManager = detectPackageManager(repoPath);
-  const preferred = ["typecheck", "test", "lint", "build"];
-  return preferred
-    .filter((name) => repoScripts.includes(name))
-    .slice(0, 3)
-    .map((name) => `${packageManager} run ${name}`);
-}
-
-function detectPackageManager(repoPath: string): "pnpm" | "yarn" | "npm" {
-  if (fsSync.existsSync(path.join(repoPath, "pnpm-lock.yaml"))) return "pnpm";
-  if (fsSync.existsSync(path.join(repoPath, "yarn.lock"))) return "yarn";
-  return "npm";
-}
-
-async function loadRepoScripts(repoPath: string): Promise<{
-  names: string[];
-  packageManagerCommand: (scriptName: string) => string;
-}> {
-  const pkg = await readJsonIfExists<{ scripts?: Record<string, string> }>(path.join(repoPath, "package.json"));
-  const scripts = Object.keys(pkg?.scripts ?? {});
-  const packageManager = detectPackageManager(repoPath);
-  return {
-    names: scripts,
-    packageManagerCommand: (scriptName: string) => `${packageManager} run ${scriptName}`
-  };
-}
-
-async function loadSelectedPathNotes(repoPath: string, selectedPaths: string[]): Promise<string[]> {
-  const notes: string[] = [];
-  for (const relativePath of selectedPaths.slice(0, 6)) {
-    const fullPath = path.join(repoPath, relativePath);
-    const stat = await fs.stat(fullPath).catch(() => null);
-    if (!stat) {
-      notes.push(`Selected path missing: ${relativePath}`);
-      continue;
-    }
-    if (stat.isDirectory()) {
-      const entries = await fs.readdir(fullPath, { withFileTypes: true }).catch(() => []);
-      notes.push(`Directory ${relativePath} contains ${entries.length} entries.`);
-      continue;
-    }
-    const raw = await fs.readFile(fullPath, "utf8").catch(() => "");
-    const preview = raw.split(/\r?\n/).slice(0, 12).join(" ").replace(/\s+/g, " ").slice(0, 260);
-    notes.push(`File ${relativePath}: ${preview || "empty file"}`);
-  }
-  return notes;
-}
-
-async function getCurrentBranch(repoPath: string): Promise<string | null> {
-  try {
-    const result = await runBinary("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath });
-    return result.stdout.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-function createScaffoldTeamPreset(capabilities: MachineCapability[]): TeamPreset {
-  const preset = createDefaultTeamPreset();
-  const capMap = new Map(capabilities.map((cap) => [cap.id, cap]));
-  preset.roles = preset.roles.map((role) => {
-    if (role.id === "developer") {
-      const preferred = ["cursor", "codex", "code"].filter((target) => capMap.get(`binary:${target}`)?.available);
-      return {
-        ...role,
-        preferred_targets: preferred.length > 0 ? preferred : role.preferred_targets
-      };
-    }
-    if (role.id === "tester" && !capabilities.some((cap) => cap.kind === "repo_script")) {
-      return {
-        ...role,
-        mode: "manual_ide"
-      };
-    }
-    return role;
-  });
-  return preset;
-}
-
-function applyDerivedSessionState(session: DeliverySessionState): DeliverySessionState {
-  session.outputs.completedPacketIds = session.packets.filter((packet) => packet.status === "completed").map((packet) => packet.id);
-  session.outputs.openFindingIds = session.findings.filter((finding) => finding.status === "open").map((finding) => finding.id);
-  session.outputs.resolvedFindingIds = session.findings.filter((finding) => finding.status === "resolved").map((finding) => finding.id);
-  session.outputs.suggestedCommitScope = Array.from(new Set([
-    ...session.selectedPaths,
-    ...session.findings.flatMap((finding) => finding.files)
-  ])).filter(Boolean);
-  session.outputs.humanActionItems = [
-    ...session.packets
-      .filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed")
-      .map((packet) => `Import a response for ${packet.roleId} packet ${packet.id}.`),
-    ...session.findings
-      .filter((finding) => finding.status === "open")
-      .map((finding) => `Resolve ${finding.severity} ${finding.category}: ${finding.title}.`)
-  ];
-  if (session.outputs.openFindingIds.length === 0 && session.packets.every((packet) => packet.status === "completed" || packet.mode === "disabled")) {
-    session.status = "completed";
-  } else if (session.packets.some((packet) => packet.status === "failed" || packet.status === "blocked") || session.findings.some((finding) => finding.category === "delivery_blocker" && finding.status === "open")) {
-    session.status = "blocked";
-  } else {
-    session.status = "running";
-  }
-  session.summary = buildSessionSummary(session);
-  return session;
-}
-
-function buildSessionSummary(session: DeliverySessionState): string {
-  const openFindings = session.outputs.openFindingIds.length;
-  const completedPackets = session.outputs.completedPacketIds.length;
-  const totalPackets = session.packets.length;
-  if (session.status === "completed") {
-    return `Completed ${completedPackets}/${totalPackets} packets with no open findings.`;
-  }
-  if (openFindings > 0) {
-    return `Completed ${completedPackets}/${totalPackets} packets with ${openFindings} open finding(s).`;
-  }
-  return `Completed ${completedPackets}/${totalPackets} packets.`;
 }
 
 function appendEvidence(session: DeliverySessionState, evidence: EvidenceRecord): DeliverySessionState {

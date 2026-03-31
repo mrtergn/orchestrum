@@ -1,4 +1,4 @@
-﻿import type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus } from "../types/status.js";
+import type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus } from "../types/status.js";
 
 export type AgentStatus = "active" | "idle" | "sleeping" | "failed" | "completed";
 
@@ -35,7 +35,7 @@ export type StepState = {
 
 export type RunStatus = CanonicalRunStatus | "finished";
 
-export type RunKind = "workflow" | "mission" | "qa" | "benchmark" | "canary" | "delivery";
+export type RunKind = "mission" | "qa" | "benchmark" | "canary" | "delivery";
 
 export type RunReadiness = {
   score: number;
@@ -55,7 +55,6 @@ export type RunState = {
   meta?: {
     id?: string;
     workspaceId?: string;
-    workflowPath?: string;
     startedAt?: string;
     finishedAt?: string | null;
   };
@@ -82,8 +81,6 @@ export type RunState = {
   pinned?: boolean;
   tags?: string[];
   interruptedAt?: string | null;
-  resumedFrom?: string | null;
-  resumeCount?: number;
   totalSteps?: number;
   completedSteps?: number;
   headSha?: string;
@@ -92,7 +89,6 @@ export type RunState = {
   totalCost?: number;
   costByAgent?: Record<string, { tokens: number; cost: number }>;
   dynamicAgents?: Array<{ id: string; role?: string }>;
-  replayedAt?: string;
   modelUsage?: Record<string, number>;
   reward?: number;
   rewardHistory?: Array<{ ts: string; reward: number }>;
@@ -128,4 +124,5 @@ export type RunState = {
     browser_base_url?: string;
     governance?: GovernanceProfile;
   } | null;
+  error?: string;
 };

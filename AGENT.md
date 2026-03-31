@@ -8,6 +8,14 @@ Primary goals:
 - Preserve feature parity while improving architecture quality.
 - Avoid hidden compatibility behavior and legacy branches.
 
+## README Protection
+- `README.md` is the project's public cover and branded landing page, not just a reference file.
+- README or documentation edits must preserve visual hierarchy, narrative flow, and the overall landing-page feel.
+- Preserve the hero, iconography, Mermaid diagrams, card or table structure, editorial dividers, and footer unless a user explicitly asks for a redesign.
+- README edits should preserve the cover-quality composition, not just the information.
+- Routine docs sync or maintenance edits must patch claims, commands, and links inside the existing structure instead of replacing the README with a bare outline.
+- Structural simplification or flattening is allowed only when the user explicitly requests it.
+
 ## Non-Negotiable Rules
 - No legacy/backward compatibility layers for internal refactors.
 - No silent fallback for critical paths (secrets, storage, approvals, provider config).

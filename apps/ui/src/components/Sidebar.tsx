@@ -30,7 +30,6 @@ const navGroups: NavGroup[] = [
       { href: "/runs", label: "Runs", icon: "◌" },
       { href: "/mission", label: "Mission Feed", icon: "◈" },
       { href: "/metrics", label: "Metrics", icon: "▤" },
-      { href: "/roadmap", label: "Roadmap", icon: "◧" },
       { href: "/diagnostics", label: "Diagnostics", icon: "⚙" },
     ],
   },

@@ -226,7 +226,7 @@ export default function AboutPage() {
             <div className="text-lg">🧩</div>
             <div className="mt-2 text-xs font-medium text-white">Plugin Ecosystem</div>
             <div className="mt-1 text-[11px] leading-relaxed text-slate-400">
-              Extend with local plugins. Cost alerts, custom loggers, and workflow hooks — no servers needed.
+              Extend with local plugins. Cost alerts, custom loggers, and mission hooks stay local.
             </div>
           </div>
         </div>
@@ -257,7 +257,7 @@ export default function AboutPage() {
             <span className="text-base">📖</span>
             <div>
               <div className="font-medium">Documentation</div>
-              <div className="text-[11px] text-slate-500">Architecture, plugins, and workflow guides</div>
+              <div className="text-[11px] text-slate-500">Architecture, plugins, and mission guides</div>
             </div>
           </a>
           <a

@@ -70,7 +70,6 @@ export async function runMissionDetailed(options: StartMissionOptions): Promise<
     userGoal: options.goal,
     workspaceId,
     repoPath: options.repoPath,
-    workflow: template.id,
     missionTemplateId: template.id,
     totalSteps: graph.nodes.length,
     completedSteps: 0,
@@ -732,6 +731,7 @@ function createMissionGraph(template: ReturnType<typeof loadMissionTemplate>, ag
       title: definition.title,
       role: definition.role,
       executor: definition.executor,
+      phase: definition.phase,
       dependsOn: definition.dependsOn ?? [],
       status: "pending" as const,
       assignedAgentId: agent?.id,
@@ -744,6 +744,7 @@ function createMissionGraph(template: ReturnType<typeof loadMissionTemplate>, ag
       effort: providerConfig.effort,
       promptPath: definition.promptPath,
       inputs: definition.inputs,
+      acceptanceCriteria: definition.acceptanceCriteria,
       targetTool: definition.targetTool,
       approval: null,
       artifacts: [],
@@ -759,6 +760,10 @@ function createMissionGraph(template: ReturnType<typeof loadMissionTemplate>, ag
     templateId: template.id,
     name: template.name,
     description: template.description,
+    category: template.category,
+    defaultGoalHint: template.defaultGoalHint,
+    recommendedRoles: template.recommendedRoles,
+    outcomes: template.outcomes,
     nodes
   };
 }

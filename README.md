@@ -1,564 +1,382 @@
+<!--
+README COVER CONTRACT
+This README is the public cover and landing page for Orchestrum.
+Do not flatten it into plain documentation or replace its visual hierarchy with a bare outline.
+Preserve the cover-quality composition: hero, iconography, showcase panels, Mermaid diagrams, card/table sections, and footer unless a user explicitly asks for a redesign.
+Update claims for accuracy, but keep the presentation structure and narrative flow intact.
+-->
 <div align="center">
 
 <br/>
 
-<img alt="Orchestrum" src="apps/ui/public/favicon.svg" width="80">
+<img alt="Orchestrum cover ornament" src=".github/assets/readme/cover-ornament.svg" width="860">
+
+<p>
+  <img alt="Orchestrum mark" src="apps/ui/public/favicon.svg" width="42">
+</p>
 
 # Orchestrum
 
-### **The Local-First AI Engineering OS**
+### **The Local-First AI Engineering Control Plane**
 
-*Compile work into packets. Hand off across multiple AI tools. Import findings and fixes back into one local delivery loop.*
+*Mission orchestration, delivery handoff, and browser QA for teams that want AI leverage without surrendering the repo.*
 
-<br/>
-
+[![Local-First](https://img.shields.io/badge/Local--First-runs%20on%20your%20machine-0f766e?style=for-the-badge)](docs/ARCHITECTURE.md)
 [![MIT License](https://img.shields.io/badge/license-MIT-10b981?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3b82f6?style=for-the-badge&logo=typescript&logoColor=white)](tsconfig.base.json)
-[![Next.js](https://img.shields.io/badge/Next.js_14-black?style=for-the-badge&logo=next.js&logoColor=white)](apps/ui)
-[![Node 18+](https://img.shields.io/badge/Node.js-18%2B-5fa04e?style=for-the-badge&logo=node.js&logoColor=white)](package.json)
-[![Electron](https://img.shields.io/badge/Electron-Desktop-47848f?style=for-the-badge&logo=electron&logoColor=white)](apps/desktop)
+[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-5fa04e?style=for-the-badge&logo=node.js&logoColor=white)](package.json)
+[![Electron Desktop](https://img.shields.io/badge/Electron-Desktop-47848f?style=for-the-badge&logo=electron&logoColor=white)](apps/desktop/package.json)
 
-<br/>
+<sub>TypeScript strict | Next.js UI | local service | plugin hooks | filesystem-backed runs</sub>
 
-[Getting Started](#-getting-started) · [Features](#-features) · [Architecture](#-architecture) · [CLI Reference](#-cli-reference) · [Docs](#-documentation) · [Contributing](#-contributing)
-
-<br/>
-
----
-
-</div>
-
-<br/>
-
-## 🎬 See It in Action
-
-<div align="center">
-
-```
- ┌───────────────────────────────────────────────────────────────┐
- │                                                               │
- │   Goal / Sprint ─> Work Packets ─> Tool Handoff ─> Import     │
- │        |                |                 |            |       │
- │        v                v                 v            v       │
- │   Repo Context      ChatGPT / Cursor   Findings    Remediations│
- │                                                     Evidence   │
- │                                                               │
- │              * All data stays on YOUR machine *               │
- │                                                               │
- └───────────────────────────────────────────────────────────────┘
-```
+<p>
+  <a href="#showcase">Showcase</a> |
+  <a href="#product-surface">Product Surface</a> |
+  <a href="#how-it-moves">How It Moves</a> |
+  <a href="#how-its-built">How It's Built</a> |
+  <a href="#getting-started">Getting Started</a> |
+  <a href="#appendix">Appendix</a>
+</p>
 
 </div>
 
-> **Orchestrum is not a SaaS.** It is a local-first engineering control plane for teams working across multiple AI tools, with human-supervised handoff, import, review, and remediation loops.
+> **Orchestrum is not a SaaS.** It runs on your machine, keeps packets, findings, diagnostics, and run artifacts local, and gives AI-assisted engineering a deliberate operator workflow.
 
-<br/>
+## Showcase
 
-## ✨ Features
+*Three illustrated panels, drawn from the product's actual interface language rather than stock README chrome.*
 
 <table>
 <tr>
-<td width="50%" valign="top">
+<td width="33%" valign="top" align="center">
 
-### 📦 Delivery Loop
-- Start delivery sessions from a goal or sprint title
-- Generate role-specific work packets from repo context
-- Export packets for `ChatGPT`, `Cursor`, `Codex`, `Copilot`, and `Claude`
-- Import responses back into findings, remediations, and evidence
-- Track the whole loop on one local branch
+<img alt="Mission Control panel" src=".github/assets/readme/panel-mission.svg" width="100%">
+
+<p><strong>Mission Control</strong></p>
+<sub>Live feed, queue pressure, active missions, and an event tape that feels operational.</sub>
 
 </td>
-<td width="50%" valign="top">
+<td width="33%" valign="top" align="center">
 
-### 🧭 Team Presets
-- Repo-scoped roles for planner, developer, auditor, and tester
-- Machine capability discovery for `git`, shells, IDE targets, and repo scripts
-- Suggest-and-confirm role bindings instead of hidden auto-magic
-- Structured preset editor plus advanced raw JSON fallback
+<img alt="Delivery panel" src=".github/assets/readme/panel-delivery.svg" width="100%">
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 🤝 Human-Supervised Handoff
-- Manual browser and IDE handoff as first-class modes
-- Explicit packet matching for imported responses
-- Tool-specific export variants for browser, IDE, patch, and review workflows
-- Evidence trail for exports, imports, findings, and remediations
-- Local CLI validation where safe and available
+<p><strong>Delivery Loop</strong></p>
+<sub>Packet export, tool-aware handoff, findings, and remediation flow in one local session.</sub>
 
 </td>
-<td width="50%" valign="top">
+<td width="33%" valign="top" align="center">
 
-### 🔎 Runs, Metrics, and Diagnostics
-- Run detail page with live stream, artifacts, packet export/import, and remediation board
-- Delivery summary metrics for sessions, findings, unmatched imports, and tool usage
-- Diagnostics view for readiness, doctor checks, recovery, docs sync, and import health
-- Desktop wrapper plus local service for a consistent operator workflow
+<img alt="Browser QA and diagnostics panel" src=".github/assets/readme/panel-browser.svg" width="100%">
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 🔬 Workflow Engine
-- Run multiple LLMs in parallel per step
-- Score winners by policy compliance, patch quality, token efficiency
-- Supports `score` / `fastest` / `vote` selection modes
-- Full audit trail of all candidate outputs
-
-</td>
-<td width="50%" valign="top">
-
-### 🛡️ Governance and Validation
-- Governance profiles, command scanning, and quality gates
-- Release readiness, learnings, and doctor checks
-- Shell allowlists and worktree execution support
-- Local-first persistence for runs, logs, artifacts, and indexes
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 📊 Analytics & Metrics
-- Cost trends, success rates, loop frequency
-- Model win-rate and determinism scores
-- Delivery summaries across sessions and tools
-- KPI dashboard with workspace-level readiness and learnings
-
-</td>
-<td width="50%" valign="top">
-
-### 🔌 Plugin System
-- Local plugin installation (`~/.orchestrum/plugins/`)
-- Lifecycle hooks: `onRunStart`, `onStepFinish`, …
-- Toggle enable/disable from UI
-- Capability-based permissions
+<p><strong>Browser QA + Diagnostics</strong></p>
+<sub>Readiness, recovery, QA runs, and evidence surfaces that keep the system explainable.</sub>
 
 </td>
 </tr>
 </table>
 
-<details>
-<summary><strong>🔽 Click to see even more features</strong></summary>
-<br/>
+<p align="center">
+  <img alt="" src=".github/assets/readme/divider.svg" width="760">
+</p>
 
-| Feature | Description |
-|---------|-------------|
-| **🗺️ Roadmap Mode** | Execute milestones sequentially with progress tracking |
-| **🏆 Tournament Mode** | Compare strategies/models/prompts head-to-head |
-| **🧪 Experiment Mode** | Run workflows across strategy modes and compare |
-| **🎭 Simulation Mode** | Estimate cost, tokens & risk without calling the LLM |
-| **👁️ CI Watch Mode** | Watch for commits, auto-audit, auto-fix minor issues |
-| **🧬 Prompt Evolution** | Auto-score prompts, approve/reject/rollback suggestions |
-| **🔴 Red-Team Security** | Adversarial simulation step with vulnerability scoring |
-| **🧠 Knowledge Graph** | Cross-run knowledge injected into prompt context |
-| **🎰 Reward Adaptation** | Reinforcement-style model/strategy selection |
-| **📦 Backup & Restore** | Full archive of runs, memory, and configs |
-| **📤 Template System** | Export/import portable `.orct` workflow bundles |
-| **🔐 Secrets Management** | Encrypted storage with OS keychain support |
-| **📱 Desktop App** | Electron wrapper, offline-first, same local service |
-| **🧩 Workspace Profiles** | Per-repo config overrides for risk, cost, strategy |
-| **⚡ Step Caching** | Input hash deduplication — skip repeated LLM calls |
-| **🌿 Branch + Commit** | Auto-branch, auto-commit with SHA tracking |
-| **🔄 Cluster Mode** | Local worker pool with filesystem-based queue |
-| **💊 Crash Recovery** | Auto-detect interrupted runs, resume from last safe step |
-| **📋 Schema Migrations** | Automatic run schema upgrades on service start |
+## Product Surface
+
+*The public story stays tight, even though the platform has more supporting faces behind it.*
+
+<table>
+<tr>
+<td width="33%" valign="top" align="center">
+
+<img alt="Mission icon" src=".github/assets/readme/icon-mission.svg" width="56">
+
+<p><strong><code>mission</code></strong></p>
+
+<p>Built-in execution graphs for autonomous or semi-autonomous engineering work.</p>
+
+<p><code>orchestrum mission start --template feature-dev ...</code></p>
+
+</td>
+<td width="33%" valign="top" align="center">
+
+<img alt="Delivery icon" src=".github/assets/readme/icon-delivery.svg" width="56">
+
+<p><strong><code>delivery</code></strong></p>
+
+<p>Work-packet export/import, findings, remediations, and evidence tracking in one local session.</p>
+
+<p><code>orchestrum delivery run --repo /path/to/repo ...</code></p>
+
+</td>
+<td width="33%" valign="top" align="center">
+
+<img alt="Browser QA icon" src=".github/assets/readme/icon-browser-qa.svg" width="56">
+
+<p><strong><code>browser qa</code></strong></p>
+
+<p>Local <code>qa</code>, <code>benchmark</code>, and <code>canary</code> runs against a live application.</p>
+
+<p><code>orchestrum qa --base-url http://localhost:3000 ...</code></p>
+
+</td>
+</tr>
+</table>
+
+Supporting pages such as Mission Control, Diagnostics, Templates, Runs, and Workspaces reinforce that core loop without replacing it.
+
+Legacy YAML workflow execution has been removed from the project.
+
+## Features
+
+*Enough structure to feel operator-grade, enough restraint to stay legible from the repo front page.*
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+<img alt="Mission icon" src=".github/assets/readme/icon-mission.svg" width="34">
+<strong>Built-in Missions</strong>
+<ul>
+  <li>Start from built-in mission templates instead of wiring raw workflows.</li>
+  <li>Track node artifacts, events, and run logs on the local filesystem.</li>
+  <li>Pause for external handoff and continue with mission import flows.</li>
+</ul>
+
+</td>
+<td width="50%" valign="top">
+
+<img alt="Delivery icon" src=".github/assets/readme/icon-delivery.svg" width="34">
+<strong>Delivery Handoff</strong>
+<ul>
+  <li>Generate packets from repo context and team preset data.</li>
+  <li>Export for ChatGPT, Cursor, Codex, Copilot, and Claude.</li>
+  <li>Import responses back into findings, remediations, evidence, and summaries.</li>
+</ul>
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+<img alt="Browser QA icon" src=".github/assets/readme/icon-browser-qa.svg" width="34">
+<strong>Browser QA and Diagnostics</strong>
+<ul>
+  <li>Run <code>qa</code>, <code>benchmark</code>, and <code>canary</code> sessions against a local base URL.</li>
+  <li>Capture browser artifacts, readiness signals, and diagnostics in the same control plane.</li>
+  <li>Keep QA evidence alongside mission and delivery data.</li>
+</ul>
+
+</td>
+<td width="50%" valign="top">
+
+<img alt="Orchestrum mark" src="apps/ui/public/favicon.svg" width="30">
+<strong>Local Platform</strong>
+<ul>
+  <li>Operate through the CLI, the Next.js UI, or the Electron desktop shell.</li>
+  <li>Use the local service for API access, indexing, recovery, and SSE streaming.</li>
+  <li>Install local plugins and keep workspace state under <code>.orchestrum/</code> and <code>.memory/</code>.</li>
+</ul>
+
+</td>
+</tr>
+</table>
+
+## How It Moves
+
+*One workspace fans out into three surfaces, then collapses back into one local evidence trail.*
+
+```mermaid
+flowchart LR
+    W[Workspace]
+
+    subgraph S[Surfaces]
+        direction LR
+        M[Mission]
+        D[Delivery]
+        Q[Browser QA]
+    end
+
+    E[Packets / Findings / Artifacts / Diagnostics]
+    L[UI / Desktop / Local Filesystem]
+
+    W --> M
+    W --> D
+    W --> Q
+    M --> E
+    D --> E
+    Q --> E
+    E --> L
+```
+
+## How It's Built
+
+*The topology is intentionally plain: operator surfaces, one service, one core, and local persistence.*
+
+```mermaid
+flowchart LR
+    U[apps/ui]
+    X[apps/desktop]
+    SVC[packages/service]
+    CORE[packages/core]
+    P["runs/ · .orchestrum/ · .memory/ · logs/diagnostics"]
+
+    U --> SVC
+    X --> SVC
+    SVC --> CORE
+    CORE --> P
+```
+
+<details>
+<summary><strong>Typical run layout</strong></summary>
+
+```text
+runs/<workspaceId>/<runId>/
+  run.json
+  events.ndjson
+  logs/
+  steps/
+  nodes/
+  delivery/
+```
 
 </details>
 
-<br/>
+<p align="center">
+  <img alt="" src=".github/assets/readme/divider.svg" width="760">
+</p>
 
-## 🚀 Getting Started
+## Getting Started
+
+*Fast enough to try in minutes, explicit enough to understand what is happening.*
 
 ### Prerequisites
 
 | Requirement | Version |
-|-------------|---------|
+| --- | --- |
 | **Node.js** | 18+ |
 | **npm** | 9+ |
-| **Git** | Any (repo must be initialized) |
-| Docker | Optional — for `--sandbox docker` |
+| **Git** | Any recent version |
 
-### Install & Launch
+### Install and Launch
 
 ```bash
-# Clone and install
 git clone https://github.com/mrtergn/orchestrum.git
 cd orchestrum
 npm run bootstrap
-
-# 🚀 One command to start everything
 npm run ui
 ```
 
-Then open **[http://localhost:3000](http://localhost:3000)** — that's it.
+Open [http://localhost:3000](http://localhost:3000).
+
+### First Session
+
+1. Add a workspace from the UI or with `orchestrum workspace add /path/to/repo`.
+2. Configure provider secrets such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+3. Start a mission from the built-in templates or create a delivery session for the target repo.
+4. Review packets, imports, findings, remediations, artifacts, and diagnostics from the run views.
 
 <details>
-<summary><strong>⚙️ Other ways to start</strong></summary>
+<summary><strong>Other local entry points</strong></summary>
 
 ```bash
-# Global install
-npm i -g orchestrum
-orchestrum ui
-
-# Dev mode (separate service + UI)
-npm run service    # Terminal 1
-npm run dev        # Terminal 2
-
-# Desktop app
+npm run service
+npm run dev
+npm run desktop
 npm run build:desktop
 npm run dist:desktop
 ```
 
 </details>
 
-<br/>
+## Appendix
 
-### First Run — GUI Onboarding
-
-```
-  1. Open Orchestrum UI
-  2. Complete the onboarding wizard:
-     ├─ Select or add a workspace
-     ├─ Check provider access and local capabilities
-     ├─ Confirm the repo team preset
-     ├─ Create the first delivery session
-     └─ Open the first packet export/import flow
-  3. Use Delivery as the primary control center
-  4. Use Metrics and Diagnostics for readiness and health
-```
-
-<br/>
-
-## 🏛️ Architecture
-
-```
-                    ┌──────────────────────────────────┐
-                    │        apps/ui (Next.js 14)      │
-                    │  ┌──────┬──────┬──────┬───────┐  │
-                    │  │Agents│ Org  │Tasks │Mission│  │
-                    │  │      │Chart │Queue │Control│  │
-                    │  └──┬───┴──┬───┴──┬───┴───┬───┘  │
-                    └─────┼──────┼──────┼───────┼──────┘
-                          │      │      │       │
-                     REST + SSE  │      │       │
-                          │      │      │       │
-                    ┌─────▼──────▼──────▼───────▼──────┐
-                    │     packages/service (Express)    │
-                    │   HTTP API · SSE Stream · Index   │
-                    └──────────────┬────────────────────┘
-                                  │
-                    ┌─────────────▼─────────────────────┐
-                    │       packages/core (Engine)       │
-                    │  ┌────────┬────────┬────────────┐  │
-                    │  │Runner  │Sandbox │ Analytics   │  │
-                    │  │Policy  │Cluster │ Evolution   │  │
-                    │  │Plugins │Security│ Arbitration │  │
-                    │  └────────┴────────┴────────────┘  │
-                    └──────────────┬────────────────────┘
-                                  │
-                    ┌─────────────▼─────────────────────┐
-                    │     Filesystem Persistence         │
-                    │  runs/ · .memory/ · logs/ · etc.   │
-                    └───────────────────────────────────┘
-```
+### CLI Snapshot
 
 <details>
-<summary><strong>📂 Project Structure</strong></summary>
+<summary><strong>Mission, delivery, and browser QA</strong></summary>
 
-```
-orcherstrum/
-├── apps/
-│   ├── ui/                 # Next.js 14 frontend
-│   └── desktop/            # Electron wrapper
-├── packages/
-│   ├── core/               # Engine: runner, sandbox, policy, analytics
-│   │   ├── prompts/        # Agent prompt templates
-│   │   ├── workflows/      # YAML workflow definitions
-│   │   └── src/
-│   │       ├── agents/     # Agent management
-│   │       ├── orchestration/
-│   │       ├── security/   # Red-team, approvals
-│   │       ├── evolution/  # Prompt evolution
-│   │       ├── arbitration/# Multi-model scoring
-│   │       └── ...
-│   ├── service/            # Express HTTP + SSE server
-│   ├── cli/                # CLI entry point
-│   ├── analytics/          # Cost & performance tracking
-│   ├── plugins/            # Built-in plugin examples
-│   ├── sandbox/            # Docker isolation
-│   ├── security/           # Security scanning
-│   └── ...
-├── docs/                   # Extended documentation
-├── runs/                   # Run artifacts (git-ignored)
-└── scripts/                # Build & release helpers
+```bash
+orchestrum mission start --template feature-dev --workspace demo --goal "Ship the feature"
+orchestrum mission import --run mission-123 --node implement --workspace demo --file response.md
+orchestrum cancel mission-123 --workspace demo
+
+orchestrum delivery doctor --repo /path/to/repo --workspace demo
+orchestrum delivery init-preset --repo /path/to/repo --workspace demo
+orchestrum delivery run --repo /path/to/repo --workspace demo --goal "Sprint 12"
+orchestrum delivery export packet-1 --run delivery-123 --workspace demo --target chatgpt
+orchestrum delivery import --run delivery-123 --workspace demo --target chatgpt --file response.txt
+orchestrum delivery findings --run delivery-123 --workspace demo
+orchestrum delivery summary --workspace demo
+
+orchestrum qa --repo /path/to/repo --workspace demo --base-url http://localhost:3000
+orchestrum benchmark --repo /path/to/repo --workspace demo --base-url http://localhost:3000
+orchestrum canary --repo /path/to/repo --workspace demo --base-url http://localhost:3000
 ```
 
 </details>
 
-<br/>
-
-## 🧩 Multi-Repo Workspaces
-
-Register any number of repos and keep runs partitioned:
-
-```bash
-orchestrum workspace add /path/to/repo-a
-orchestrum workspace add /path/to/repo-b
-orchestrum workspace list
-```
-
-Each workspace gets its own:
-- Runs directory (`runs/<workspaceId>/`)
-- Memory store (`.memory/`)
-- Config profile (`.orchestrum/profile.json`)
-
-Switch between workspaces from the UI sidebar.
-
-<br/>
-
-## ⚔️ Multi-Model Arbitration
-
-Run multiple LLMs in parallel and pick the best output:
-
-```yaml
-agents:
-  dev:
-    providers:
-      - openai:codex
-      - openai:gpt-5
-arbitration:
-  mode: score       # score | fastest | vote
-  min_models: 2
-```
-
-The scoring engine evaluates each candidate on:
-- ✅ Policy compliance
-- 🔧 Patch validity
-- 🧪 Test signal
-- 💰 Token efficiency
-
-Full results stored in `steps/<stepId>/arbitration.json`.
-
-<br/>
-
-## 🔒 Security & Isolation
-
-| Layer | Protection |
-|-------|------------|
-| **Sandbox** | Docker containers with no network, non-root user |
-| **Approvals** | Human-in-the-loop gates for high-risk actions |
-| **Policy** | Max files changed, forbidden paths, cost limits |
-| **Red-Team** | Adversarial simulation with vulnerability scoring |
-| **Secrets** | AES-encrypted storage, OS keychain integration |
-| **Capabilities** | Per-agent filesystem/network/shell restrictions |
-
-<br/>
-
-## 💻 CLI Reference
-
 <details>
-<summary><strong>Click to expand full CLI reference</strong></summary>
+<summary><strong>Workspace, diagnostics, and maintenance</strong></summary>
 
 ```bash
-# ── Launch ──────────────────────────────────
-orchestrum ui                                     # Start service + UI
-
-# ── Workflows ───────────────────────────────
-orchestrum run <workflow.yaml> --repo <path>      # Run a workflow
-  --goal "description"                            # What to build
-  --branch feature/x                              # Auto-branch
-  --sandbox docker                                # Container isolation
-  --workspace my-workspace                        # Target workspace
-
-# ── Run Control ─────────────────────────────
-orchestrum resume <runId> --from <stepId>         # Resume from step
-orchestrum cancel <runId>                         # Cancel a run
-orchestrum replay <runId>                         # Replay entire run
-
-# ── Workspaces ──────────────────────────────
+orchestrum ui
 orchestrum workspace add /path/to/repo
 orchestrum workspace list
 
-# ── Secrets ─────────────────────────────────
-orchestrum secrets set KEY --value val --scope global
-orchestrum secrets list --scope global
-orchestrum secrets unset KEY --scope global
-
-# ── Templates ───────────────────────────────
-orchestrum template export ./w.yaml --output t.orct
-orchestrum template import t.orct --repo /path
-
-# ── Plugins ─────────────────────────────────
-orchestrum plugin install /path/to/plugin
-orchestrum plugin list
-orchestrum plugin enable <name>
-orchestrum plugin disable <name>
-orchestrum plugin remove <name>
-
-# ── Advanced ────────────────────────────────
-orchestrum cluster start --workers 4              # Worker pool
-orchestrum ci --watch --repo /path                # CI watch mode
-orchestrum experiment --repo /path                # Strategy comparison
-orchestrum simulate --repo /path --cost-limit 1.0 # Dry run
-orchestrum tournament --repo /path                # Model tournament
-orchestrum evaluate <workflow> --repo /p --runs 5 # Determinism test
-orchestrum roadmap run roadmap.yaml --repo /path  # Milestone exec
-
-# ── Maintenance ─────────────────────────────
+orchestrum doctor --workspace demo
+orchestrum diagnostics export --workspace demo --run mission-123
 orchestrum backup create
-orchestrum backup restore <file> --into /path
-orchestrum diagnostics export --workspace <id>
-orchestrum update check --remote
-orchestrum update install --remote
-orchestrum update install /path/to/update.tar.gz
-orchestrum telemetry enable|disable
+orchestrum backup restore ./backups/backup-123.tar.gz --into /tmp/orchestrum-restore
+orchestrum docs sync --repo /path/to/repo
 ```
 
 </details>
 
-<br/>
+### Docs
 
-## ⚙️ Configuration
+| Document | What it covers |
+| --- | --- |
+| [CLI](docs/CLI.md) | Commands for mission, delivery, browser QA, secrets, backups, and updates |
+| [Architecture](docs/ARCHITECTURE.md) | System layers, data flow, storage model, and recovery |
+| [Examples](docs/EXAMPLES.md) | Concrete mission, delivery, QA, and diagnostics usage |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common startup, import, approval, patch, and stream issues |
+| [OSS Parity](docs/OSS_PARITY.md) | What the open-source build exposes today |
+| [Plugins](docs/PLUGINS.md) | Local plugin model, manifests, and lifecycle hooks |
 
-Config is layered with clear precedence:
+### Contributing
 
-```
-CLI flags  →  Workspace profile  →  Workspace config  →  Global config  →  Workflow defaults
-```
+Orchestrum welcomes focused improvements that strengthen the local-first operator experience.
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [SECURITY.md](SECURITY.md)
 
 <details>
-<summary><strong>Example <code>orchestrum.config.json</code></strong></summary>
-
-```json
-{
-  "defaultWorkflow": "packages/core/workflows/default.yaml",
-  "concurrency": 3,
-  "models": {
-    "pm": "gpt-5",
-    "dev": "codex",
-    "audit": "gpt-5"
-  },
-  "arbitration": {
-    "mode": "score",
-    "min_models": 2
-  },
-  "local_llm": {
-    "provider": "ollama",
-    "endpoint": "http://localhost:11434",
-    "model": "llama3"
-  },
-  "cluster": {
-    "enabled": true,
-    "min_workers": 2,
-    "max_workers": 6
-  },
-  "sandbox": {
-    "enabled": true,
-    "image": "node:20-alpine"
-  },
-  "telemetry": {
-    "enabled": false
-  },
-  "plugins": [
-    "packages/plugins/log-to-console.ts",
-    "packages/plugins/cost-alert.ts"
-  ]
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Environment Variables</strong></summary>
-
-| Variable | Description |
-|----------|-------------|
-| `OPENAI_API_KEY` | Required for OpenAI provider |
-| `OPENAI_API_BASE_URL` | Custom endpoint (default: `api.openai.com/v1`) |
-| `ORCHESTRUM_LOCAL_LLM_ENDPOINT` | Override local LLM endpoint |
-| `ORCHESTRUM_RUNS_DIR` | Override runs directory |
-| `ORCHESTRUM_SECRETS_PASSPHRASE` | Enable encrypted secret storage |
-| `ORCHESTRUM_USE_KEYCHAIN` | `1` to use OS keychain (desktop mode) |
-| `ORCHESTRUM_SERVICE_PORT` | Custom service port |
-| `ORCHESTRUM_UI_PORT` | Custom UI port |
-
-</details>
-
-<br/>
-
-## 📖 Documentation
-
-| Document | Description |
-|----------|-------------|
-| [Architecture](docs/ARCHITECTURE.md) | System design, data flow, storage model |
-| [Workflows](docs/WORKFLOWS.md) | YAML schema, parallel steps, loops |
-| [Plugins](docs/PLUGINS.md) | Plugin API, manifest, lifecycle hooks |
-| [CLI](docs/CLI.md) | Full command reference |
-| [Examples](docs/EXAMPLES.md) | Real-world usage examples |
-
-<br/>
-
-## 🛠️ Troubleshooting
-
-<details>
-<summary><strong>Common issues and quick fixes</strong></summary>
-
-| Problem | Solution |
-|---------|----------|
-| Missing `OPENAI_API_KEY` | Set the key or configure `local_llm` for Ollama fallback |
-| "Not a git repo" | Run `git init` or point `--repo` at an initialized repo |
-| Patch apply failures | Runner auto-falls back from `git apply` to `patch` |
-| Docker unavailable | Runner falls back to local execution with a warning |
-| UI shows no runs | Verify `./runs` exists or set `ORCHESTRUM_RUNS_DIR` |
-| SSE not streaming | Check `events.ndjson` is being appended |
-| Approval stuck | Approve via UI or create `.approved` file and resume |
-
-</details>
-
-<br/>
-
-## 🤝 Contributing
-
-We welcome contributions! Before you start:
-
-1. Read [CONTRIBUTING.md](CONTRIBUTING.md)
-2. Review the [Code of Conduct](CODE_OF_CONDUCT.md)
-3. Check [SECURITY.md](SECURITY.md) for vulnerability reporting
+<summary><strong>Local verification commands</strong></summary>
 
 ```bash
-# Dev workflow
-git clone https://github.com/mrtergn/orchestrum.git
-cd orchestrum
-npm install
-npm run dev     # Starts Next.js dev server
+npm run test
+npm run typecheck
+npm run lint
+npm run build:desktop
 ```
 
-<br/>
+</details>
 
-## 📄 License
+## License
 
-Orchestrum is free and open source under the [MIT License](LICENSE).
+Orchestrum is available under the [MIT License](LICENSE).
 
 <div align="center">
 
-<br/>
+<img alt="" src=".github/assets/readme/divider.svg" width="760">
 
----
+<p>
+  <img alt="Orchestrum mark" src="apps/ui/public/favicon.svg" width="34">
+</p>
 
-<br/>
+**Built with love for developers who want AI workflows that stay close to their code.**
 
-**Built with ❤️ for developers who want AI agents that respect their privacy.**
+*Your repo, packets, findings, and artifacts stay on your machine.*
 
-<br/>
-
-*Your code never leaves your machine. That's a promise, not a feature.*
-
-<br/>
-
-<sub>If Orchestrum helps your workflow, consider giving it a ⭐</sub>
+<sub>If Orchestrum helps your workflow, consider giving it a star.</sub>
 
 </div>

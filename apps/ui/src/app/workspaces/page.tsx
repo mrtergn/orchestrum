@@ -168,7 +168,7 @@ export default function WorkspacesPage() {
           <p className="text-sm text-slate-400">
             {workspaces.length > 0
               ? `${workspaces.length} workspace${workspaces.length !== 1 ? "s" : ""} registered`
-              : "Connect local repositories to run agent workflows."}
+              : "Connect local repositories to run missions, delivery loops, and QA runs."}
           </p>
         </div>
         {selected && (

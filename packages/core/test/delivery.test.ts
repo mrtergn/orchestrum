@@ -6,12 +6,14 @@ import path from "node:path";
 import {
   analyzeDeliveryImport,
   createDefaultTeamPreset,
+  detectMachineCapabilities,
   exportDeliveryPacket,
   initTeamPreset,
   importDeliveryPacketResponse,
   loadDeliverySession,
   loadTeamPreset,
   saveTeamPreset,
+  suggestRoleBindings,
   summarizeDeliverySessions,
   runDeliverySessionDetailed
 } from "../src/delivery/index.js";
@@ -137,6 +139,7 @@ test("delivery session supports packet export, import, findings, and remediation
   assert.ok((afterImport?.remediations.length ?? 0) >= 1);
   const remediationTask = afterImport?.remediations[0];
   assert.ok(remediationTask?.packetId);
+  assert.equal(remediationTask?.priority, "high");
   const remediationPacket = afterImport?.packets.find((packet) => packet.id === remediationTask?.packetId);
   assert.ok(remediationPacket);
 
@@ -170,4 +173,130 @@ test("delivery session supports packet export, import, findings, and remediation
   assert.equal(summary.sessions, 1);
   assert.equal(summary.toolUsage.chatgpt, 1);
   assert.equal(summary.unmatchedImportAttempts, 0);
+  assert.equal(summary.findingCategoryCounts.delivery_blocker, 1);
+  assert.equal(summary.findingSeverityCounts.high, 1);
+  assert.equal(summary.remediationPriorityCounts.high, 1);
+  assert.equal(summary.latestImport?.runId, sessionResult.runId);
+  assert.equal(summary.latestImport?.matchStatus, "matched");
+  assert.equal(summary.latestImport?.confidence, "high");
+  assert.ok((summary.latestImport?.matchReasons ?? []).some((reason) => reason.includes("Requested packet")));
+});
+
+test("delivery import analysis auto-matches strong implementation responses", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-delivery-match-"));
+  const repoPath = path.join(rootDir, "repo");
+  const runsDir = path.join(rootDir, "runs");
+  await fs.mkdir(path.join(repoPath, "src"), { recursive: true });
+  await fs.writeFile(
+    path.join(repoPath, "package.json"),
+    JSON.stringify({
+      name: "delivery-match-demo",
+      version: "1.0.0"
+    }, null, 2),
+    "utf8"
+  );
+  await fs.writeFile(path.join(repoPath, "src", "index.ts"), "export const ok = true;\n", "utf8");
+
+  const preset = createDefaultTeamPreset();
+  const plannerRole = preset.roles.find((role) => role.id === "planner");
+  if (plannerRole) {
+    plannerRole.mode = "manual_ide";
+    plannerRole.preferred_targets = ["cursor"];
+  }
+  preset.tool_preferences = {
+    ...preset.tool_preferences,
+    planner: ["cursor"],
+    developer: ["cursor"]
+  };
+  const capabilities = await detectMachineCapabilities(repoPath);
+  const roleBindings = suggestRoleBindings(preset, capabilities);
+
+  const sessionResult = await runDeliverySessionDetailed({
+    repoPath,
+    runsDir,
+    workspaceId: "demo",
+    goal: "Tighten implementation",
+    selectedPaths: ["src/index.ts"],
+    preset,
+    roleBindings
+  });
+
+  const developerPacket = sessionResult.session.packets.find((packet) => packet.roleId === "developer");
+  const plannerPacket = sessionResult.session.packets.find((packet) => packet.roleId === "planner");
+  assert.ok(developerPacket);
+  assert.ok(plannerPacket);
+  assert.equal(developerPacket?.target, "cursor");
+  assert.equal(plannerPacket?.target, "cursor");
+
+  const analysis = await analyzeDeliveryImport({
+    runsDir,
+    runId: sessionResult.runId,
+    workspaceId: "demo",
+    targetTool: "cursor",
+    text: [
+      "Status: completed",
+      "Summary: Implemented the patch and updated the affected file.",
+      "Changed Files:",
+      "- src/index.ts",
+      "Verification:",
+      "- npm test :: ok"
+    ].join("\n"),
+    source: "paste"
+  });
+
+  assert.equal(analysis.matchStatus, "matched");
+  assert.equal(analysis.matchedPacketId, developerPacket?.id);
+  assert.equal(analysis.confidence, "high");
+  assert.ok((analysis.matchReasons ?? []).some((reason) => reason.includes("developer response shape")));
+});
+
+test("delivery import extracts verification and blocker findings from structured sections", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-delivery-signals-"));
+  const repoPath = path.join(rootDir, "repo");
+  const runsDir = path.join(rootDir, "runs");
+  await fs.mkdir(path.join(repoPath, "src"), { recursive: true });
+  await fs.writeFile(
+    path.join(repoPath, "package.json"),
+    JSON.stringify({
+      name: "delivery-signals-demo",
+      version: "1.0.0"
+    }, null, 2),
+    "utf8"
+  );
+  await fs.writeFile(path.join(repoPath, "src", "index.ts"), "export const ok = true;\n", "utf8");
+
+  const sessionResult = await runDeliverySessionDetailed({
+    repoPath,
+    runsDir,
+    workspaceId: "demo",
+    goal: "Validate delivery import parser",
+    selectedPaths: ["src/index.ts"],
+    preset: createDefaultTeamPreset()
+  });
+  const developerPacket = sessionResult.session.packets.find((packet) => packet.roleId === "developer");
+  assert.ok(developerPacket);
+
+  const result = await importDeliveryPacketResponse({
+    runsDir,
+    runId: sessionResult.runId,
+    workspaceId: "demo",
+    packetId: developerPacket!.id,
+    targetTool: "cursor",
+    text: [
+      `Packet ID: ${developerPacket!.id}`,
+      "Status: blocked",
+      "Summary: Validation failed after the patch.",
+      "Changed Files:",
+      "- src/index.ts",
+      "Verification:",
+      "- npm test :: failed because the migration is missing",
+      "Blocked By:",
+      "- rollout cannot continue until the schema version is updated"
+    ].join("\n"),
+    source: "paste"
+  });
+
+  const categories = result.findings.map((finding) => finding.category);
+  assert.ok(categories.includes("test_gap"));
+  assert.ok(categories.includes("delivery_blocker"));
 });

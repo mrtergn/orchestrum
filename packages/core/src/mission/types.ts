@@ -80,6 +80,21 @@ export type MissionAgent = {
   };
 };
 
+export const MISSION_TEMPLATE_CATEGORIES = [
+  "bugfix",
+  "implementation",
+  "refactor",
+  "hardening",
+  "security",
+  "delivery",
+  "release",
+  "documentation"
+] as const;
+export type MissionTemplateCategory = typeof MISSION_TEMPLATE_CATEGORIES[number];
+
+export const MISSION_NODE_PHASES = ["plan", "implement", "verify", "review", "handoff"] as const;
+export type MissionNodePhase = typeof MISSION_NODE_PHASES[number];
+
 export type NodeExecutorKind = "prompt" | "patch" | "audit" | "delivery.export" | "delivery.wait";
 
 export type MissionInputRef =
@@ -94,17 +109,23 @@ export type MissionNodeTemplate = {
   title: string;
   role: string;
   executor: NodeExecutorKind;
+  phase?: MissionNodePhase;
   dependsOn?: string[];
   promptPath?: string;
   inputs?: MissionInputRef[];
   targetTool?: "chatgpt" | "claude" | "cursor" | "codex" | "copilot";
   approvalOnDiff?: boolean;
+  acceptanceCriteria?: string[];
 };
 
 export type MissionTemplate = {
   id: string;
   name: string;
   description: string;
+  category: MissionTemplateCategory;
+  defaultGoalHint?: string;
+  recommendedRoles?: string[];
+  outcomes?: string[];
   nodes: MissionNodeTemplate[];
 };
 
@@ -143,6 +164,7 @@ export type MissionNode = {
   title: string;
   role: string;
   executor: NodeExecutorKind;
+  phase?: MissionNodePhase;
   dependsOn: string[];
   status: MissionNodeStatus;
   assignedAgentId?: string;
@@ -157,6 +179,7 @@ export type MissionNode = {
   exitCode?: number | null;
   promptPath?: string;
   inputs?: MissionInputRef[];
+  acceptanceCriteria?: string[];
   targetTool?: "chatgpt" | "claude" | "cursor" | "codex" | "copilot";
   approval?: MissionApprovalGate | null;
   artifacts: NodeArtifactRef[];
@@ -170,6 +193,10 @@ export type MissionGraph = {
   templateId: string;
   name: string;
   description: string;
+  category: MissionTemplateCategory;
+  defaultGoalHint?: string;
+  recommendedRoles?: string[];
+  outcomes?: string[];
   nodes: MissionNode[];
 };
 
@@ -178,7 +205,6 @@ export type MissionRun = RunState & {
   missionTemplateId: string;
   graph: MissionGraph;
   repoPath: string;
-  workflow: string;
 };
 
 export type NodeExecutorResult = {

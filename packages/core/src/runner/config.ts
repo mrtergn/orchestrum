@@ -29,7 +29,6 @@ const PolicySchema = z.object({
 
 const ConfigSchema = z.object({
   version: z.literal(1).optional(),
-  defaultWorkflow: z.string().optional(),
   concurrency: ConcurrencySchema.optional(),
   models: z.record(z.string()).optional(),
   arbitration: z

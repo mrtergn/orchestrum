@@ -1,0 +1,84 @@
+<svg width="560" height="320" viewBox="0 0 560 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="deliveryBg" x1="40" y1="22" x2="520" y2="296" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="1" stop-color="#0B1120"/>
+    </linearGradient>
+  </defs>
+  <style>
+    .shell { fill: url(#deliveryBg); stroke: #334155; stroke-width: 2; }
+    .panel { fill: #0F172A; stroke: #334155; stroke-width: 1.4; }
+    .card { fill: #111827; stroke: #334155; stroke-width: 1.2; }
+    .muted { fill: #94A3B8; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1.6px; }
+    .title { fill: #E2E8F0; font-size: 16px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-weight: 700; }
+    .body { fill: #CBD5E1; font-size: 11px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .tiny { fill: #94A3B8; font-size: 9px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .amber { fill: #F59E0B; }
+    .cyan { fill: #38BDF8; }
+    .emerald { fill: #10B981; }
+    .rose { fill: #FB7185; }
+  </style>
+
+  <rect x="18" y="18" width="524" height="284" rx="24" class="shell"/>
+  <rect x="34" y="34" width="492" height="252" rx="18" class="panel"/>
+  <path d="M34 66H526" stroke="#334155" stroke-width="1.4"/>
+
+  <text x="56" y="54" class="muted">DELIVERY</text>
+  <text x="402" y="54" class="muted">HANDOFF LOOP</text>
+
+  <rect x="54" y="82" width="82" height="50" rx="12" class="card"/>
+  <rect x="148" y="82" width="82" height="50" rx="12" class="card"/>
+  <rect x="242" y="82" width="82" height="50" rx="12" class="card"/>
+  <text x="68" y="100" class="muted">SESSIONS</text>
+  <text x="162" y="100" class="muted">OPEN</text>
+  <text x="256" y="100" class="muted">IMPORTED</text>
+  <text x="68" y="121" class="title">7</text>
+  <text x="162" y="121" class="title">14</text>
+  <text x="256" y="121" class="title">23</text>
+
+  <rect x="54" y="150" width="182" height="106" rx="14" class="card"/>
+  <text x="68" y="168" class="muted">TEAM PRESET</text>
+  <rect x="68" y="180" width="154" height="18" rx="9" fill="#172033"/>
+  <rect x="68" y="206" width="154" height="18" rx="9" fill="#172033"/>
+  <rect x="68" y="232" width="154" height="18" rx="9" fill="#172033"/>
+  <text x="82" y="193" class="tiny" fill="#E2E8F0">planner -> ChatGPT</text>
+  <text x="82" y="219" class="tiny" fill="#E2E8F0">developer -> Codex</text>
+  <text x="82" y="245" class="tiny" fill="#E2E8F0">auditor -> Claude</text>
+  <circle cx="206" cy="189" r="3.4" class="cyan"/>
+  <circle cx="206" cy="215" r="3.4" class="amber"/>
+  <circle cx="206" cy="241" r="3.4" class="emerald"/>
+
+  <rect x="250" y="150" width="118" height="106" rx="14" class="card"/>
+  <text x="264" y="168" class="muted">TARGETS</text>
+  <rect x="264" y="182" width="40" height="16" rx="8" fill="#10324D"/>
+  <rect x="310" y="182" width="44" height="16" rx="8" fill="#33240D"/>
+  <rect x="264" y="206" width="34" height="16" rx="8" fill="#0F3A34"/>
+  <text x="274" y="193" class="tiny" fill="#BAE6FD">CHATGPT</text>
+  <text x="321" y="193" class="tiny" fill="#FDE68A">CODEX</text>
+  <text x="273" y="217" class="tiny" fill="#A7F3D0">CLAUDE</text>
+  <path d="M264 236H352" stroke="#334155" stroke-width="1.4"/>
+  <path d="M276 236H300" stroke="#38BDF8" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M312 236H336" stroke="#F59E0B" stroke-width="2.4" stroke-linecap="round"/>
+
+  <rect x="382" y="82" width="124" height="174" rx="14" class="card"/>
+  <text x="396" y="100" class="muted">SESSIONS</text>
+  <rect x="396" y="116" width="96" height="24" rx="10" fill="#172033"/>
+  <rect x="396" y="148" width="96" height="24" rx="10" fill="#172033"/>
+  <rect x="396" y="180" width="96" height="24" rx="10" fill="#172033"/>
+  <text x="408" y="131" class="tiny" fill="#E2E8F0">packet export</text>
+  <text x="408" y="163" class="tiny" fill="#E2E8F0">findings import</text>
+  <text x="408" y="195" class="tiny" fill="#E2E8F0">remediation pass</text>
+  <circle cx="478" cy="128" r="4" class="cyan"/>
+  <circle cx="478" cy="160" r="4" class="rose"/>
+  <circle cx="478" cy="192" r="4" class="emerald"/>
+
+  <path d="M82 270H466" stroke="#334155" stroke-width="1.4"/>
+  <rect x="98" y="261" width="68" height="18" rx="9" fill="#172033"/>
+  <rect x="194" y="261" width="68" height="18" rx="9" fill="#172033"/>
+  <rect x="290" y="261" width="68" height="18" rx="9" fill="#172033"/>
+  <text x="113" y="273" class="tiny" fill="#E2E8F0">PACKETS</text>
+  <text x="207" y="273" class="tiny" fill="#E2E8F0">FINDINGS</text>
+  <text x="298" y="273" class="tiny" fill="#E2E8F0">FIXES</text>
+  <path d="M167 270H193" stroke="#38BDF8" stroke-width="2" stroke-linecap="round"/>
+  <path d="M263 270H289" stroke="#10B981" stroke-width="2" stroke-linecap="round"/>
+</svg>

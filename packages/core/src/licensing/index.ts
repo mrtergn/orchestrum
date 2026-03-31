@@ -5,12 +5,10 @@ export type LicenseTier = "Free" | "Pro" | "Studio";
 export type LicenseFeature =
   | "multi_workspace"
   | "arbitration"
-  | "roadmap"
   | "analytics"
   | "cluster"
   | "plugins"
   | "strategy_evolution"
-  | "tournament"
   | "advanced_sandbox";
 
 export type LicensePayload = {

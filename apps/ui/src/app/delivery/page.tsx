@@ -63,6 +63,43 @@ export default function DeliveryPage() {
     const availableBindings = (preset?.suggestedBindings ?? []).filter((binding) => binding.available).length;
     return `${roleCount} role(s), ${availableBindings} ready binding(s)`;
   }, [activePreset, preset?.suggestedBindings]);
+  const latestImport = summary?.latestImport ?? null;
+  const latestImportHealth = useMemo(() => {
+    const unmatchedAttempts = summary?.unmatchedImportAttempts ?? 0;
+    const unresolvedManualPackets = summary?.unresolvedManualPackets ?? 0;
+    if (!latestImport) {
+      return {
+        label: "Waiting",
+        trend: "No signal",
+        summary: "No indexed import analysis yet.",
+        accent: "text-slate-300"
+      };
+    }
+    const matched = latestImport.matchStatus === "matched";
+    const confidence = latestImport.confidence ?? "low";
+    if (matched && confidence === "high" && unmatchedAttempts === 0) {
+      return {
+        label: "Healthy",
+        trend: "Stable",
+        summary: `${unmatchedAttempts} unmatched attempts, ${unresolvedManualPackets} manual packet(s) still open.`,
+        accent: "text-emerald-200"
+      };
+    }
+    if (matched && confidence !== "low" && unmatchedAttempts <= 2) {
+      return {
+        label: "Watch",
+        trend: "Mixed",
+        summary: `${unmatchedAttempts} unmatched attempts, ${unresolvedManualPackets} manual packet(s) still open.`,
+        accent: "text-cyan-200"
+      };
+    }
+    return {
+      label: "Attention",
+      trend: "Noisy",
+      summary: `${unmatchedAttempts} unmatched attempts, ${unresolvedManualPackets} manual packet(s) still open.`,
+      accent: "text-amber-200"
+    };
+  }, [latestImport, summary?.unmatchedImportAttempts, summary?.unresolvedManualPackets]);
 
   return (
     <main className="space-y-6">
@@ -141,12 +178,96 @@ export default function DeliveryPage() {
                 ))}
             </div>
           </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
+            <div className="mb-3 text-sm font-semibold text-white">Triage Rollup</div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <RollupList
+                title="Severity"
+                empty="No findings yet."
+                entries={Object.entries(summary?.findingSeverityCounts ?? {}).sort((a, b) => b[1] - a[1])}
+              />
+              <RollupList
+                title="Category"
+                empty="No categories yet."
+                entries={Object.entries(summary?.findingCategoryCounts ?? {}).sort((a, b) => b[1] - a[1])}
+              />
+              <RollupList
+                title="Priority"
+                empty="No remediation priorities yet."
+                entries={Object.entries(summary?.remediationPriorityCounts ?? {}).sort((a, b) => b[1] - a[1])}
+              />
+            </div>
+          </div>
         </div>
 
         <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-semibold text-white">Recent Delivery Sessions</div>
             <span className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{runs.length}</span>
+          </div>
+          <div className="mb-4 rounded-xl border border-slate-800 bg-slate-900/30 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-white">Latest Import Analysis</div>
+                <div className="mt-1 text-xs text-slate-500">Most recent indexed import attempt across delivery sessions.</div>
+              </div>
+              {latestImport && (
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                    {latestImport.matchStatus}
+                  </span>
+                  {latestImport.confidence && (
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] ${
+                        latestImport.confidence === "high"
+                          ? "border-emerald-400/30 text-emerald-200"
+                          : latestImport.confidence === "medium"
+                            ? "border-cyan-400/30 text-cyan-200"
+                            : "border-amber-400/30 text-amber-200"
+                      }`}
+                    >
+                      {latestImport.confidence} confidence
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+            {!latestImport && <div className="mt-3 text-xs text-slate-500">No import analysis recorded yet.</div>}
+            {latestImport && (
+              <div className="mt-3 space-y-3">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <MiniStat label="Health" value={latestImportHealth.label} accent={latestImportHealth.accent} />
+                  <MiniStat label="Trend" value={latestImportHealth.trend} accent={latestImportHealth.accent} />
+                  <MiniStat label="Backlog" value={`${summary?.unmatchedImportAttempts ?? 0}/${summary?.unresolvedManualPackets ?? 0}`} accent="text-slate-200" />
+                </div>
+                <div className="text-[11px] text-slate-500">{latestImportHealth.summary}</div>
+                <div className="text-xs text-slate-300">
+                  {latestImport.summary || "No summary captured for the latest import attempt."}
+                </div>
+                <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
+                  <span>{new Date(latestImport.createdAt).toLocaleString()}</span>
+                  {latestImport.targetTool && <span>{toolLabel(latestImport.targetTool)}</span>}
+                  <span>{latestImport.source}</span>
+                  {latestImport.fileName && <span>{latestImport.fileName}</span>}
+                </div>
+                {latestImport.matchReasons.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {latestImport.matchReasons.slice(0, 4).map((reason) => (
+                      <span key={reason} className="rounded-full border border-slate-800 bg-slate-950/60 px-2 py-1 text-[11px] text-slate-300">
+                        {reason}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <Link
+                  href={`/runs/${latestImport.runId}${selectedWorkspaceId ? `?workspace=${encodeURIComponent(selectedWorkspaceId)}` : ""}`}
+                  className="inline-flex text-[11px] uppercase tracking-[0.18em] text-cyan-300 hover:text-cyan-200"
+                >
+                  Open run →
+                </Link>
+              </div>
+            )}
           </div>
           <div className="space-y-2">
             {runs.length === 0 && <div className="text-xs text-slate-500">No delivery sessions yet for this workspace.</div>}
@@ -178,6 +299,32 @@ function SummaryCard({ label, value, sub, accent }: { label: string; value: stri
       <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
       <div className={`mt-2 text-2xl font-semibold ${accent}`}>{value}</div>
       <div className="mt-1 text-[11px] text-slate-500">{sub}</div>
+    </div>
+  );
+}
+
+function RollupList({ title, empty, entries }: { title: string; empty: string; entries: Array<[string, number]> }) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-4">
+      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
+      <div className="mt-3 space-y-2">
+        {entries.length === 0 && <div className="text-xs text-slate-500">{empty}</div>}
+        {entries.map(([label, count]) => (
+          <div key={label} className="flex items-center justify-between gap-3 text-xs text-slate-300">
+            <span>{label}</span>
+            <span className="text-slate-500">{count}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, accent }: { label: string; value: string; accent: string }) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
+      <div className={`mt-2 text-sm font-semibold ${accent}`}>{value}</div>
     </div>
   );
 }

@@ -1,0 +1,18 @@
+<svg width="760" height="52" viewBox="0 0 760 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .soft { stroke: #64748B; stroke-width: 1.6; stroke-linecap: round; }
+    .ink { stroke: #0F172A; stroke-width: 1.8; stroke-linecap: round; }
+    .amber { fill: #F59E0B; }
+    .cyan { fill: #38BDF8; }
+    .emerald { fill: #10B981; }
+  </style>
+
+  <path d="M34 26H274" class="soft"/>
+  <path d="M486 26H726" class="soft"/>
+  <path d="M286 26H342" class="ink"/>
+  <path d="M418 26H474" class="ink"/>
+  <path d="M380 14L392 26L380 38L368 26L380 14Z" fill="#0F172A" stroke="#475569" stroke-width="1.6"/>
+  <circle cx="286" cy="26" r="4.5" class="amber"/>
+  <circle cx="474" cy="26" r="4.5" class="emerald"/>
+  <circle cx="380" cy="26" r="4.5" class="cyan"/>
+</svg>

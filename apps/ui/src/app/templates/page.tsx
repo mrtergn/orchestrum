@@ -8,6 +8,11 @@ type TemplateEntry = {
   title: string;
   description: string;
   source?: string;
+  category?: string;
+  defaultGoalHint?: string;
+  recommendedRoles?: string[];
+  outcomes?: string[];
+  nodeCount?: number;
 };
 
 type TemplateManifest = {
@@ -69,7 +74,7 @@ export default function TemplatesPage() {
       </section>
 
       <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 text-sm text-slate-400">
-        Standalone workflow YAML execution and template import/export were removed. Start missions from these built-in templates.
+        Legacy YAML execution was removed. Start missions from these built-in templates.
       </section>
 
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -84,7 +89,36 @@ export default function TemplatesPage() {
                 <div className="mt-1 text-[10px] font-mono text-slate-500">{template.name}</div>
               </div>
             </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {template.category && (
+                <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-cyan-200">
+                  {template.category}
+                </span>
+              )}
+              {typeof template.nodeCount === "number" && (
+                <span className="rounded-full border border-slate-700 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                  {template.nodeCount} node{template.nodeCount === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
             <p className="mt-3 text-xs leading-relaxed text-slate-400">{template.description}</p>
+            {template.defaultGoalHint && (
+              <p className="mt-3 text-[11px] leading-relaxed text-slate-500">{template.defaultGoalHint}</p>
+            )}
+            {(template.recommendedRoles?.length ?? 0) > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {template.recommendedRoles?.map((role) => (
+                  <span key={role} className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                    {role}
+                  </span>
+                ))}
+              </div>
+            )}
+            {(template.outcomes?.length ?? 0) > 0 && (
+              <div className="mt-4 space-y-1 text-[11px] text-slate-500">
+                {template.outcomes?.slice(0, 3).map((item) => <div key={item}>- {item}</div>)}
+              </div>
+            )}
             <div className="mt-4 flex gap-2">
               <button
                 onClick={() => {

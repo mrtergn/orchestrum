@@ -52,6 +52,9 @@ export type ReviewFindingStatus = typeof FINDING_STATUSES[number];
 export const REMEDIATION_STATUSES = ["open", "in_progress", "done", "blocked"] as const;
 export type RemediationStatus = typeof REMEDIATION_STATUSES[number];
 
+export const REMEDIATION_PRIORITIES = ["low", "medium", "high", "critical"] as const;
+export type RemediationPriority = typeof REMEDIATION_PRIORITIES[number];
+
 export const IMPORT_MATCH_STATUSES = ["matched", "ambiguous", "unmatched"] as const;
 export type DeliveryImportMatchStatus = typeof IMPORT_MATCH_STATUSES[number];
 
@@ -199,6 +202,8 @@ export const PacketImportSchema = z.object({
   fileName: z.string().optional(),
   rawText: z.string(),
   summary: z.string().optional(),
+  confidence: z.enum(["low", "medium", "high"]).optional(),
+  matchReasons: z.array(z.string()).default([]),
   createdAt: z.string().min(1)
 });
 export type PacketImport = z.infer<typeof PacketImportSchema>;
@@ -230,6 +235,7 @@ export const RemediationTaskSchema = z.object({
   roleId: z.string().min(1),
   title: z.string().min(1),
   summary: z.string().min(1),
+  priority: z.enum(REMEDIATION_PRIORITIES),
   acceptanceCriteria: z.array(z.string()).default([]),
   suggestedCommands: z.array(z.string()).optional(),
   status: z.enum(REMEDIATION_STATUSES),
@@ -324,9 +330,26 @@ export const DeliveryImportAnalysisSchema = z.object({
   matchStatus: z.enum(IMPORT_MATCH_STATUSES),
   needsPacketMatch: z.boolean().default(false),
   candidatePacketIds: z.array(z.string()).default([]),
+  confidence: z.enum(["low", "medium", "high"]).optional(),
+  matchReasons: z.array(z.string()).default([]),
   summary: z.string().optional()
 });
 export type DeliveryImportAnalysis = z.infer<typeof DeliveryImportAnalysisSchema>;
+
+export const DeliverySummaryLatestImportSchema = z.object({
+  runId: z.string().min(1),
+  importId: z.string().min(1),
+  createdAt: z.string().min(1),
+  source: z.enum(["paste", "file", "auto_cli"]),
+  fileName: z.string().optional(),
+  targetTool: z.enum(DELIVERY_TARGET_TOOLS).optional(),
+  matchStatus: z.enum(IMPORT_MATCH_STATUSES),
+  matchedPacketId: z.string().optional(),
+  summary: z.string().optional(),
+  confidence: z.enum(["low", "medium", "high"]).optional(),
+  matchReasons: z.array(z.string()).default([])
+});
+export type DeliverySummaryLatestImport = z.infer<typeof DeliverySummaryLatestImportSchema>;
 
 export const DeliverySummarySchema = z.object({
   workspaceId: z.string().optional(),
@@ -342,7 +365,11 @@ export const DeliverySummarySchema = z.object({
   unmatchedImportAttempts: z.number().int().nonnegative(),
   packetStatusCounts: z.record(z.string(), z.number().int().nonnegative()),
   toolUsage: z.record(z.string(), z.number().int().nonnegative()),
-  latestRunId: z.string().nullable().optional()
+  findingCategoryCounts: z.record(z.string(), z.number().int().nonnegative()),
+  findingSeverityCounts: z.record(z.string(), z.number().int().nonnegative()),
+  remediationPriorityCounts: z.record(z.string(), z.number().int().nonnegative()),
+  latestRunId: z.string().nullable().optional(),
+  latestImport: DeliverySummaryLatestImportSchema.nullable().optional()
 });
 export type DeliverySummary = z.infer<typeof DeliverySummarySchema>;
 

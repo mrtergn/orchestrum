@@ -32,33 +32,13 @@ export type TaskRuntimeStatus = typeof TASK_RUNTIME_STATUSES[number];
 
 export type AgentRuntimeState = "active" | "idle" | "sleeping" | "error";
 
-export type WorkflowSummary = {
-  name: string;
-  agents: Record<string, { provider?: string; model?: string; providers?: string[]; role?: string }>;
-  steps: Array<{
-    id: string;
-    agent?: string;
-    phase?: string;
-    parallel?: boolean;
-    type?: string;
-    substeps?: Array<{ id: string; agent?: string; phase?: string; type?: string }>;
-  }>;
-  loop?: {
-    max_rounds?: number;
-    max_loop_per_step?: number;
-    audit_step_id?: string;
-    fix_step_id?: string;
-  };
-  enable_auto_tests?: boolean;
-  security?: { threshold?: number };
-};
-
 export type MissionNodeSummary = Pick<
   MissionNode,
   | "id"
   | "title"
   | "role"
   | "executor"
+  | "phase"
   | "dependsOn"
   | "status"
   | "assignedAgentId"
@@ -71,6 +51,7 @@ export type MissionNodeSummary = Pick<
   | "authSource"
   | "exitCode"
   | "targetTool"
+  | "acceptanceCriteria"
   | "approval"
   | "artifacts"
   | "findingCount"
@@ -79,13 +60,15 @@ export type MissionNodeSummary = Pick<
   | "error"
 >;
 
-export type MissionGraphSummary = Pick<MissionGraph, "templateId" | "name" | "description"> & {
+export type MissionGraphSummary = Pick<
+  MissionGraph,
+  "templateId" | "name" | "description" | "category" | "defaultGoalHint" | "recommendedRoles" | "outcomes"
+> & {
   nodes: MissionNodeSummary[];
 };
 
 export type RunSummary = RunState & {
   repoPath?: string;
-  workflow?: string;
   error?: string;
 };
 
@@ -93,7 +76,6 @@ export type RunDetail = {
   run: RunSummary;
   steps: StepState[];
   graph: MissionGraphSummary | null;
-  workflow: WorkflowSummary | null;
   delivery?: DeliverySessionState | null;
 };
 
@@ -153,7 +135,6 @@ export type DeliveryPacketImportRequest = {
 export type RunStartRequest = {
   workspaceId: string;
   missionTemplateId?: string;
-  workflowId?: string;
   userGoal?: string;
   runId?: string;
   options?: RunStartOptions;
@@ -166,7 +147,7 @@ export type RunStartResponse = {
 };
 
 export type BrowserRunResponse = RunStartResponse & {
-  kind?: Exclude<RunKind, "workflow">;
+  kind?: Extract<RunKind, "qa" | "benchmark" | "canary">;
 };
 
 export type RunResumeRequest = {

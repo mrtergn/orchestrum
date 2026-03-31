@@ -8,7 +8,7 @@ import { createRunId, formatError, nowIso, nowTs } from "./utils.js";
 import type { BrowserRunOptions as BrowserLaunchOptions } from "../contracts/service.js";
 import type { RunKind, RunReadiness, RunState } from "./types.js";
 
-export type BrowserRunKind = Exclude<RunKind, "workflow">;
+export type BrowserRunKind = RunKind;
 
 export type BrowserRunInput = {
   kind: BrowserRunKind;
@@ -43,7 +43,7 @@ export async function runBrowserRunDetailed(options: BrowserRunInput): Promise<{
   const iterations = options.kind === "canary"
     ? Math.max(1, Math.floor(options.options?.iterations ?? 3))
     : 1;
-  const runMeta: RunState & { repoPath: string; workflow: string; error?: string } = {
+  const runMeta: RunState = {
     runId,
     kind: options.kind,
     status: "running",
@@ -52,7 +52,6 @@ export async function runBrowserRunDetailed(options: BrowserRunInput): Promise<{
     goal: options.targetPath ?? resolvedBaseUrl,
     userGoal: options.targetPath ?? resolvedBaseUrl,
     repoPath: options.repoPath,
-    workflow: `browser:${options.kind}`,
     workspaceId: options.workspaceId,
     workspacePath: options.repoPath,
     totalSteps: iterations,

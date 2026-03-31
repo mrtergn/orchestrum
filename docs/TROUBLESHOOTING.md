@@ -7,11 +7,10 @@ Symptoms:
 - Health endpoint unavailable
 
 Checks:
-1. Verify service process is running.
-2. Confirm `ORCHESTRUM_SERVICE_PORT` value.
+1. Verify the service process is running.
+2. Confirm `ORCHESTRUM_SERVICE_PORT`.
 3. Check port conflicts.
 
-Commands:
 ```bash
 lsof -i :4137
 npx orchestrum doctor
@@ -25,8 +24,30 @@ Symptoms:
 
 Checks:
 1. Verify `ORCHESTRUM_SERVICE_URL` or `NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL`.
-2. Confirm reverse proxy/API route configuration.
-3. Ensure CORS is enabled for your local setup.
+2. Confirm local proxy or API route configuration.
+3. Ensure CORS is enabled for your setup.
+
+## Mission Cannot Start
+
+Symptoms:
+- provider key errors
+- template or workspace lookup failures
+
+Checks:
+1. Confirm the workspace exists.
+2. Set provider secrets such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+3. Verify the mission template id is one of the built-in templates.
+
+## Delivery Import Does Not Match a Packet
+
+Symptoms:
+- import exits non-zero
+- UI shows unmatched import attempts
+
+Checks:
+1. Export the packet again and keep the packet id in the response.
+2. Import against the correct run id and target tool.
+3. Inspect the packet text to ensure the response still includes the expected context.
 
 ## Approval Token Not Found
 
@@ -38,25 +59,25 @@ Checks:
 2. Confirm the run directory and workspace.
 3. Verify token TTL has not expired.
 
-## Keychain Secrets Not Working
+## Patch Apply Failures
 
 Symptoms:
-- keychain operation errors
-
-Resolution:
-1. Install optional dependency `keytar` and required OS keychain libraries.
-2. Or disable keychain mode and use `ORCHESTRUM_SECRETS_PASSPHRASE`.
-
-## Workflow Parse Fails
-
-Symptoms:
-- `Invalid workflow YAML`
-- `Loop audit_step_id not found`
+- `Patch apply failed`
 
 Checks:
-1. Validate YAML syntax.
-2. Ensure step IDs referenced by `loop` exist.
-3. If using `extends`, verify base path is correct and not circular.
+1. Ensure the repository has no conflicting local edits.
+2. Re-run with a narrower goal.
+3. Re-open the run detail page and inspect artifacts before retrying.
+
+## SSE or Event Stream Issues
+
+Symptoms:
+- stale run status in UI
+
+Checks:
+1. Verify `/events` is reachable.
+2. Confirm no proxy strips `text/event-stream`.
+3. Inspect the browser network tab for disconnects.
 
 ## Cluster Timeout
 
@@ -66,46 +87,4 @@ Symptoms:
 Checks:
 1. Confirm worker processes are alive.
 2. Inspect queue and results directories.
-3. Increase timeout when workload is large.
-
-## Patch Apply Failures
-
-Symptoms:
-- `Patch apply failed`
-
-Checks:
-1. Ensure repository has no conflicting local edits.
-2. Re-run with a narrower goal.
-3. Resume from the failed step after fixing conflicts.
-
-## SSE/Event Stream Issues
-
-Symptoms:
-- stale run status in UI
-
-Checks:
-1. Verify `/events` endpoint is reachable.
-2. Confirm no proxy strips `text/event-stream`.
-3. Inspect browser network tab for stream disconnects.
-
-## Vitest Migration Problems
-
-Symptoms:
-- test runner command not found
-- coverage provider missing
-
-Resolution:
-1. Run install/bootstrap again.
-2. Verify `vitest` and `@vitest/coverage-v8` are installed.
-3. Run `npm test` from repo root.
-
-## Release and Update Script Errors
-
-Symptoms:
-- changelog duplicate version
-- install script exits early
-
-Checks:
-1. Ensure version does not already exist in `CHANGELOG.md`.
-2. Verify update package path exists.
-3. Re-run script with absolute path when in doubt.
+3. Increase timeout if the workload is large.

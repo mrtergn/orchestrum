@@ -1,7 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Workflow } from "../runner/workflow.js";
-import type { PolicyConfig } from "../runner/policy.js";
 import type { RunAnalysis } from "../analytics/runAnalysis.js";
 import { writeJson } from "../runner/fs.js";
 
@@ -99,60 +97,6 @@ export async function saveStrategyState(workspacePath: string, state: StrategySt
   await writeJson(path.join(memoryDir, "strategy_state.json"), state);
 }
 
-export function applyStrategy(options: {
-  workflow: Workflow;
-  policy: PolicyConfig | null;
-  profile: StrategyProfile;
-  state?: StrategyState;
-}): { workflow: Workflow; policy: PolicyConfig | null; adjustments: string[] } {
-  const { workflow, policy, profile, state } = options;
-  const adjustments: string[] = [];
-  const merged: Workflow = { ...workflow, agents: { ...workflow.agents } };
-
-  if (merged.loop) {
-    const baseRounds = merged.loop.max_rounds ?? 1;
-    merged.loop = {
-      ...merged.loop,
-      max_rounds: Math.max(1, baseRounds + profile.loopMaxRoundsDelta)
-    };
-    if (state?.auditStrictness === "high") {
-      merged.loop.max_rounds = Math.max(merged.loop.max_rounds ?? 1, baseRounds + 1);
-      adjustments.push("audit strictness elevated");
-    }
-    if (state?.auditStrictness === "low") {
-      merged.loop.max_rounds = Math.max(1, baseRounds - 1);
-      adjustments.push("audit strictness relaxed");
-    }
-  }
-
-  if (profile.autoTests === "on") {
-    merged.enable_auto_tests = true;
-    adjustments.push("auto tests enabled");
-  } else if (profile.autoTests === "off") {
-    merged.enable_auto_tests = false;
-    adjustments.push("auto tests disabled");
-  }
-
-  if (merged.concurrency?.max_agents) {
-    merged.concurrency = {
-      max_agents: Math.max(1, merged.concurrency.max_agents + profile.parallelismDelta)
-    };
-  }
-
-  const policyAdjusted = policy ? { ...policy } : null;
-  if (policyAdjusted) {
-    if (policyAdjusted.max_cost_usd) {
-      policyAdjusted.max_cost_usd = Number((policyAdjusted.max_cost_usd * profile.costToleranceMultiplier).toFixed(4));
-    }
-    if (policyAdjusted.max_files_changed && profile.policyStrictness !== "balanced") {
-      const delta = profile.policyStrictness === "low" ? 5 : -5;
-      policyAdjusted.max_files_changed = Math.max(1, policyAdjusted.max_files_changed + delta);
-    }
-  }
-
-  return { workflow: merged, policy: policyAdjusted, adjustments };
-}
-
 export function suggestStrategyMode(analysis: RunAnalysis, availableModes: string[], currentMode: string): string {
   if (analysis.securityAlerts > 0 || analysis.policyViolations > 1 || !analysis.success) {
     if (availableModes.includes("conservative")) return "conservative";
@@ -179,9 +123,7 @@ export async function updateStrategyState(
   } else {
     next.auditStrictness = "normal";
   }
-  if (notes.length > 0) {
-    next.notes = notes;
-  }
+  if (notes.length > 0) next.notes = notes;
   await saveStrategyState(workspacePath, next);
   return next;
 }

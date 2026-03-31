@@ -31,7 +31,7 @@ export default function HelpPage() {
         <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-slate-300">
           <li>Add a local workspace on the <Link href="/workspaces" className="text-amber-300 underline underline-offset-2 hover:text-amber-200">Workspaces</Link> page.</li>
           <li>Set <K>OPENAI_API_KEY</K> (or another provider key) in <Link href="/settings" className="text-amber-300 underline underline-offset-2 hover:text-amber-200">Settings → AI Providers</Link>.</li>
-          <li>Pick a workflow template from <Link href="/templates" className="text-amber-300 underline underline-offset-2 hover:text-amber-200">Templates</Link> and start a run.</li>
+          <li>Pick a mission template from <Link href="/templates" className="text-amber-300 underline underline-offset-2 hover:text-amber-200">Templates</Link> and start a run.</li>
           <li>Watch the live graph and logs on the <strong className="text-white">Run Detail</strong> page.</li>
           <li>Inspect step artifacts to verify outputs and patches.</li>
         </ol>

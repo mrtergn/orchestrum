@@ -1,5 +1,4 @@
-export { runWorkflow, runWorkflowDetailed, resumeWorkflow, cancelRun, replayRun } from "./runner/run.js";
-export { loadWorkflow } from "./runner/workflow.js";
+export { cancelRun } from "./runner/run.js";
 export { registerAgent } from "./agents/index.js";
 export * from "./constants.js";
 export type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus, ApprovalStatus } from "./types/status.js";
@@ -77,8 +76,7 @@ export {
   loadPromptHistory,
   approvePromptSuggestion,
   rejectPromptSuggestion,
-  rollbackPromptVersion,
-  updatePromptHistory
+  rollbackPromptVersion
 } from "./evolution/promptEvolution.js";
 export type {
   PromptHistoryFile,
@@ -92,27 +90,16 @@ export {
   resolveStrategyProfile,
   loadStrategyState,
   updateStrategyState,
-  applyStrategy,
   suggestStrategyMode
 } from "./evolution/strategy.js";
 export type { StrategyConfig, StrategyProfile, StrategyState } from "./evolution/strategy.js";
-export { computeReward, loadAdaptationState, updateAdaptationState } from "./evolution/reward.js";
+export { computeReward, loadAdaptationState, saveAdaptationState } from "./evolution/reward.js";
 export type { RewardConfig, AdaptationState } from "./evolution/reward.js";
-export { analyzeRun } from "./analytics/runAnalysis.js";
 export type { RunAnalysis } from "./analytics/runAnalysis.js";
 export { loadAnalytics, updateAnalytics } from "./analytics/store.js";
 export type { AnalyticsData } from "./analytics/store.js";
 export { loadKnowledgeGraph, updateKnowledgeGraph } from "./analytics/knowledge.js";
 export type { KnowledgeGraph, KnowledgeNode, KnowledgeEdge } from "./analytics/knowledge.js";
-export {
-  runArbitration
-} from "./arbitration/engine.js";
-export type {
-  ArbitrationMode,
-  ArbitrationCandidate,
-  ArbitrationDecision,
-  ProviderSpec
-} from "./arbitration/engine.js";
 export {
   buildTask,
   enqueueTask,
@@ -225,7 +212,6 @@ export type {
   MissionNodeSummary,
   TaskRuntimeStatus,
   AgentRuntimeState,
-  WorkflowSummary,
   RunSummary,
   RunDetail,
   RunProgressSnapshot,
@@ -278,17 +264,6 @@ export type {
   NodeExecutorResult,
   MissionRunResult
 } from "./mission/types.js";
-export { runTournament } from "./orchestration/tournament.js";
-export type { TournamentResult } from "./orchestration/tournament.js";
-export { evaluateWorkflow } from "./orchestration/evaluate.js";
-export type { EvaluationResult } from "./orchestration/evaluate.js";
-export { runExperiment } from "./orchestration/experiment.js";
-export { simulateWorkflow } from "./orchestration/simulate.js";
-export { startCiWatch } from "./orchestration/ci.js";
-export { exportTemplate, importTemplate } from "./orchestration/templates.js";
-export type { TemplateMetadata } from "./orchestration/templates.js";
-export { runRoadmap, loadRoadmap } from "./roadmap/runner.js";
-export type { RoadmapEntry, RoadmapState } from "./roadmap/runner.js";
 export { migrateRuns, migrateRun, CURRENT_SCHEMA_VERSION } from "./migrations/index.js";
 export {
   getLicensePath,

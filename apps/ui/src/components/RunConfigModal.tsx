@@ -15,6 +15,11 @@ type Template = {
   title: string;
   description: string;
   source?: string;
+  category?: string;
+  defaultGoalHint?: string;
+  recommendedRoles?: string[];
+  outcomes?: string[];
+  nodeCount?: number;
 };
 
 type StartResponse = {
@@ -208,10 +213,14 @@ export function RunConfigModal() {
 
   const templateOptions = useMemo(() => {
     if (state.templates.length === 0) {
-      return [{ name: "feature-dev", title: "Feature Dev Loop", description: "" }];
+      return [{ name: "feature-dev", title: "Feature Dev Loop", description: "", category: "implementation", nodeCount: 3 }];
     }
     return state.templates;
   }, [state.templates]);
+  const selectedTemplate = useMemo(
+    () => templateOptions.find((template) => template.name === state.missionTemplateId) ?? templateOptions[0],
+    [state.missionTemplateId, templateOptions]
+  );
 
   if (!runConfigOpen) return null;
 
@@ -365,6 +374,35 @@ export function RunConfigModal() {
                   </option>
                 ))}
               </select>
+              {selectedTemplate && (
+                <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/20 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {selectedTemplate.category && (
+                      <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-cyan-200">
+                        {selectedTemplate.category}
+                      </span>
+                    )}
+                    {typeof selectedTemplate.nodeCount === "number" && (
+                      <span className="rounded-full border border-slate-700 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                        {selectedTemplate.nodeCount} node{selectedTemplate.nodeCount === 1 ? "" : "s"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-3 text-sm text-slate-200">{selectedTemplate.description}</div>
+                  {selectedTemplate.defaultGoalHint && (
+                    <div className="mt-2 text-xs text-slate-400">{selectedTemplate.defaultGoalHint}</div>
+                  )}
+                  {(selectedTemplate.recommendedRoles?.length ?? 0) > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {selectedTemplate.recommendedRoles?.map((role) => (
+                        <span key={role} className="rounded-full border border-slate-700 bg-slate-950/50 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                          {role}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ) : isBrowserRun ? (
             <div className="grid gap-3 md:grid-cols-2">
@@ -395,9 +433,17 @@ export function RunConfigModal() {
               <textarea
                 value={state.goal}
                 onChange={(event) => dispatch({ type: "setGoal", goal: event.target.value })}
-                placeholder="Describe what this mission should accomplish."
+                placeholder={selectedTemplate?.defaultGoalHint ?? "Describe what this mission should accomplish."}
                 className="mt-2 h-28 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
               />
+              {(selectedTemplate?.outcomes?.length ?? 0) > 0 && (
+                <div className="mt-3 space-y-1">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Expected Outcomes</div>
+                  <div className="space-y-1 text-xs text-slate-400">
+                    {selectedTemplate?.outcomes?.map((item) => <div key={item}>- {item}</div>)}
+                  </div>
+                </div>
+              )}
             </div>
           ) : state.runKind === "canary" ? (
             <div className="grid gap-3 md:grid-cols-2">

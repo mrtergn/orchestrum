@@ -5,6 +5,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { completeWithProvider } from "../src/mission/providers.js"
 import { runMissionDetailed } from "../src/mission/runtime.js";
+import { listMissionTemplates } from "../src/mission/templates.js";
 import {
   buildAgents,
   createMissionSandbox,
@@ -66,6 +67,10 @@ test("feature-dev mission completes with OpenAI-backed agents", async () => {
 
     assert.equal(result.ok, true);
     assert.equal(result.run.status, "finished");
+    assert.equal(result.run.graph.category, "implementation");
+    assert.equal(result.run.graph.defaultGoalHint, "Describe the feature change, target files, and any constraints.");
+    assert.equal(result.run.graph.nodes.find((node) => node.id === "implement")?.phase, "implement");
+    assert.ok((result.run.graph.nodes.find((node) => node.id === "implement")?.acceptanceCriteria?.length ?? 0) > 0);
     assert.match(await fs.readFile(path.join(sandbox.repoPath, "src", "index.ts"), "utf8"), /false/);
     assert.ok((result.run.totalTokens ?? 0) > 0);
     assert.ok(fsSync.existsSync(path.join(result.runDir, "nodes", "implement", "git.diff")));
@@ -73,4 +78,22 @@ test("feature-dev mission completes with OpenAI-backed agents", async () => {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalKey;
   }
+});
+
+test("mission template catalog exposes structured metadata", () => {
+  const bugfixTemplate = listMissionTemplates().find((template) => template.name === "bugfix-hotpatch");
+  const deliveryTemplate = listMissionTemplates().find((template) => template.name === "delivery-sprint");
+  const docsTemplate = listMissionTemplates().find((template) => template.name === "docs-sync");
+  const remediationTemplate = listMissionTemplates().find((template) => template.name === "delivery-remediation-loop");
+  assert.ok(bugfixTemplate);
+  assert.ok(deliveryTemplate);
+  assert.ok(docsTemplate);
+  assert.ok(remediationTemplate);
+  assert.equal(bugfixTemplate?.category, "bugfix");
+  assert.equal(docsTemplate?.category, "documentation");
+  assert.equal(deliveryTemplate?.category, "delivery");
+  assert.equal(deliveryTemplate?.nodeCount, 4);
+  assert.equal(remediationTemplate?.nodeCount, 4);
+  assert.ok((deliveryTemplate?.recommendedRoles?.length ?? 0) >= 2);
+  assert.ok((deliveryTemplate?.outcomes?.length ?? 0) >= 1);
 });

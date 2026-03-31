@@ -5,14 +5,11 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import fsSync from "node:fs";
 import {
-  runWorkflow,
   runMissionDetailed,
   resumeMissionRun,
   importMissionNodeInput,
   loadMissionRun,
-  resumeWorkflow,
   cancelRun,
-  replayRun,
   createBackup,
   restoreBackup,
   setSecret,
@@ -27,8 +24,6 @@ import {
   saveGlobalConfig,
   checkForUpdates,
   installUpdate,
-  exportTemplate,
-  importTemplate,
   listInstalledPlugins,
   installPlugin,
   removePlugin,
@@ -53,14 +48,7 @@ import {
   isFeatureAllowed,
   enforceFeature
 } from "../index.js";
-import { loadConfig } from "../runner/config.js";
 import { addWorkspace, loadWorkspaces, findWorkspaceById, findWorkspaceByPath } from "../runner/workspaces.js";
-import { startCiWatch } from "../orchestration/ci.js";
-import { runExperiment } from "../orchestration/experiment.js";
-import { simulateWorkflow } from "../orchestration/simulate.js";
-import { evaluateWorkflow } from "../orchestration/evaluate.js";
-import { runTournament } from "../orchestration/tournament.js";
-import { runRoadmap } from "../roadmap/runner.js";
 import { startCluster } from "../cluster/manager.js";
 import { OrchestrumError } from "../errors.js";
 import { DEFAULT_SERVICE_PORT, DEFAULT_UI_PORT } from "../constants.js";
@@ -74,31 +62,6 @@ export function registerCommandRegistryOnce(program: Command): void {
 }
 
 export function registerCommandRegistry(program: Command): void {
-program
-  .command("resume")
-  .argument("<runId>", "Run ID to resume")
-  .requiredOption("--from <stepId>", "Step ID to resume from")
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .action(async (runId, options) => {
-    try {
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      const ok = await resumeWorkflow({
-        runId,
-        runsDir,
-        fromStepId: options.from,
-        workspaceId: options.workspace
-      });
-      if (!ok) {
-        process.exitCode = 1;
-      }
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
 const missionCmd = program.command("mission").description("Manage mission runs");
 
 missionCmd
@@ -220,22 +183,6 @@ program
         ? path.resolve(options.runsDir)
         : path.resolve(process.cwd(), "runs");
       await cancelRun(runsDir, runId, options.workspace);
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-program
-  .command("replay")
-  .argument("<runId>", "Run ID to replay")
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .action(async (runId, options) => {
-    try {
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      await replayRun({ runId, runsDir, workspaceId: options.workspace });
     } catch (err) {
       await handleFatal(err);
     }
@@ -866,42 +813,6 @@ telemetryCmd
     }
   });
 
-const templateCmd = program.command("template").description("Manage workflow templates");
-
-templateCmd
-  .command("export")
-  .argument("<workflow>", "Workflow YAML path")
-  .option("--output <path>", "Output .orct path")
-  .action(async (workflowPath, options) => {
-    try {
-      const output = await exportTemplate({
-        workflowPath: path.resolve(workflowPath),
-        outputPath: options.output ? path.resolve(options.output) : undefined
-      });
-      console.log(`Template exported: ${output}`);
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-templateCmd
-  .command("import")
-  .argument("<file>", "Template .orct file")
-  .requiredOption("--repo <path>", "Workspace repo path")
-  .action(async (file, options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      const targetDir = path.join(repoPath, ".orchestrum", "templates");
-      const result = await importTemplate({
-        archivePath: path.resolve(file),
-        targetDir
-      });
-      console.log(`Template imported: ${result.path}`);
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
 program
   .command("share")
   .argument("<runId>", "Run ID to export")
@@ -940,179 +851,6 @@ program
         runsDir
       });
       console.log(`Imported run ${result.runId} into workspace ${result.workspaceId}`);
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-program
-  .command("ci")
-  .requiredOption("--repo <path>", "Target repo path")
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .option("--watch", "Watch repo for new commits")
-  .action(async (options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      if (options.watch) {
-        await startCiWatch({
-          repoPath,
-          runsDir,
-          workspaceId
-        });
-      } else {
-        console.error("CI mode requires --watch for now.");
-      }
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-program
-  .command("experiment")
-  .requiredOption("--repo <path>", "Target repo path")
-  .option("--workflow <path>", "Workflow path (default from config)")
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .option("--strategy <mode>", "Primary strategy mode (optional)")
-  .action(async (options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      let workflowPath: string | null = options.workflow ? path.resolve(options.workflow) : null;
-      if (!workflowPath) {
-        const config = await loadConfig(repoPath);
-        if (!config?.defaultWorkflow) {
-          throw new Error("No workflow provided and config has no defaultWorkflow");
-        }
-        workflowPath = path.resolve(repoPath, config.defaultWorkflow);
-      }
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      await runExperiment({
-        workflowPath,
-        repoPath,
-        runsDir,
-        workspaceId,
-        primaryMode: options.strategy
-      });
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-program
-  .command("simulate")
-  .requiredOption("--repo <path>", "Target repo path")
-  .option("--workflow <path>", "Workflow path (default from config)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .option("--strategy <mode>", "Strategy mode override (optional)")
-  .option("--cost-limit <usd>", "Cost limit for simulation", parseFloat)
-  .action(async (options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      let workflowPath: string | null = options.workflow ? path.resolve(options.workflow) : null;
-      if (!workflowPath) {
-        const config = await loadConfig(repoPath);
-        if (!config?.defaultWorkflow) {
-          throw new Error("No workflow provided and config has no defaultWorkflow");
-        }
-        workflowPath = path.resolve(repoPath, config.defaultWorkflow);
-      }
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      await simulateWorkflow({
-        workflowPath,
-        repoPath,
-        workspaceId,
-        strategyMode: options.strategy,
-        costLimit: options.costLimit
-      });
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-program
-  .command("tournament")
-  .requiredOption("--repo <path>", "Target repo path")
-  .option("--workflow <path>", "Workflow path (default from config)")
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .action(async (options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      let workflowPath: string | null = options.workflow ? path.resolve(options.workflow) : null;
-      if (!workflowPath) {
-        const config = await loadConfig(repoPath);
-        if (!config?.defaultWorkflow) {
-          throw new Error("No workflow provided and config has no defaultWorkflow");
-        }
-        workflowPath = path.resolve(repoPath, config.defaultWorkflow);
-      }
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      await requireFeature("tournament");
-      await runTournament({ workflowPath, repoPath, runsDir, workspaceId });
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-program
-  .command("evaluate")
-  .argument("<workflow>", "Path to workflow YAML")
-  .requiredOption("--repo <path>", "Target repo path")
-  .option("--runs <n>", "Number of runs", (value) => Number(value), 5)
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .action(async (workflow, options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      await evaluateWorkflow({
-        workflowPath: path.resolve(workflow),
-        repoPath,
-        runsDir,
-        workspaceId,
-        runs: options.runs
-      });
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
-const roadmapCmd = program.command("roadmap").description("Run roadmap milestones");
-
-roadmapCmd
-  .command("run")
-  .argument("<roadmap>", "Path to roadmap YAML")
-  .requiredOption("--repo <path>", "Target repo path")
-  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--workspace <id>", "Workspace ID (optional)")
-  .action(async (roadmapPath, options) => {
-    try {
-      const repoPath = path.resolve(options.repo);
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      await requireFeature("roadmap");
-      await runRoadmap({
-        roadmapPath: path.resolve(roadmapPath),
-        repoPath,
-        runsDir,
-        workspaceId
-      });
     } catch (err) {
       await handleFatal(err);
     }
@@ -1193,6 +931,8 @@ program
       await handleFatal(err);
     }
   });
+
+}
 
 async function resolveWorkspaceId(repoPath: string, workspaceId?: string): Promise<string> {
   const rootDir = process.cwd();
@@ -1457,5 +1197,4 @@ async function handleFatal(err: unknown) {
   }
   await writeCrashReport(process.cwd(), err).catch(() => undefined);
   process.exit(1);
-}
 }

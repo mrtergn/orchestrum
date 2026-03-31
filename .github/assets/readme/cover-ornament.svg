@@ -1,0 +1,75 @@
+<svg width="860" height="340" viewBox="0 0 860 340" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="90" y1="30" x2="770" y2="310" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="1" stop-color="#0B1120"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="430" y1="86" x2="430" y2="254" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38BDF8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#10B981" stop-opacity="0.22"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .frame { fill: url(#bg); stroke: #334155; stroke-width: 2.2; }
+    .line { stroke: #475569; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    .soft { stroke: #1E293B; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+    .ink { stroke: #E2E8F0; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .amber { stroke: #F59E0B; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .cyan { stroke: #38BDF8; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .emerald { stroke: #10B981; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .panel { fill: #0F172A; stroke: #334155; stroke-width: 1.6; }
+    .chip { fill: #0F172A; stroke: #475569; stroke-width: 1.2; }
+    .chipText { fill: #94A3B8; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1.3px; text-anchor: middle; }
+    .accentFillA { fill: #F59E0B; }
+    .accentFillC { fill: #38BDF8; }
+    .accentFillE { fill: #10B981; }
+  </style>
+
+  <rect x="30" y="24" width="800" height="292" rx="28" class="frame"/>
+  <rect x="48" y="42" width="764" height="256" rx="20" class="soft"/>
+
+  <path d="M90 86H292" class="line"/>
+  <path d="M568 86H770" class="line"/>
+  <path d="M90 254H292" class="line"/>
+  <path d="M568 254H770" class="line"/>
+
+  <rect x="82" y="112" width="170" height="112" rx="18" class="panel"/>
+  <rect x="608" y="112" width="170" height="112" rx="18" class="panel"/>
+
+  <rect x="96" y="126" width="78" height="22" rx="11" class="chip"/>
+  <text x="135" y="141" class="chipText">MISSION</text>
+  <rect x="96" y="162" width="142" height="10" rx="5" fill="#1F2937"/>
+  <rect x="96" y="182" width="120" height="10" rx="5" fill="#1F2937"/>
+  <rect x="96" y="202" width="94" height="10" rx="5" fill="#1F2937"/>
+  <circle cx="224" cy="167" r="5" class="accentFillA"/>
+  <circle cx="204" cy="187" r="5" class="accentFillC"/>
+  <circle cx="174" cy="207" r="5" class="accentFillE"/>
+
+  <rect x="622" y="126" width="80" height="22" rx="11" class="chip"/>
+  <text x="662" y="141" class="chipText">DELIVERY</text>
+  <rect x="622" y="162" width="138" height="10" rx="5" fill="#1F2937"/>
+  <rect x="622" y="182" width="120" height="10" rx="5" fill="#1F2937"/>
+  <rect x="622" y="202" width="150" height="10" rx="5" fill="#1F2937"/>
+  <circle cx="734" cy="167" r="5" class="accentFillC"/>
+  <circle cx="714" cy="187" r="5" class="accentFillA"/>
+  <circle cx="744" cy="207" r="5" class="accentFillE"/>
+
+  <ellipse cx="430" cy="170" rx="96" ry="84" fill="url(#glow)"/>
+  <circle cx="430" cy="170" r="78" class="line"/>
+  <circle cx="430" cy="170" r="54" class="soft"/>
+  <path d="M430 124L462 170L430 216L398 170Z" class="ink"/>
+  <path d="M430 102V124" class="cyan"/>
+  <path d="M480 196L457 183" class="emerald"/>
+  <path d="M380 196L403 183" class="amber"/>
+  <circle cx="430" cy="94" r="8" fill="#38BDF8"/>
+  <circle cx="488" cy="200" r="8" fill="#10B981"/>
+  <circle cx="372" cy="200" r="8" fill="#F59E0B"/>
+  <path d="M402 170H458" class="ink"/>
+  <path d="M430 142V198" class="ink"/>
+
+  <rect x="356" y="62" width="148" height="18" rx="9" class="chip"/>
+  <text x="430" y="75" class="chipText">ORCHESTRUM</text>
+  <rect x="322" y="263" width="216" height="20" rx="10" class="chip"/>
+  <text x="430" y="277" class="chipText">LOCAL FIRST CONTROL</text>
+</svg>

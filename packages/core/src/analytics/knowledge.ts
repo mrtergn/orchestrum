@@ -1,7 +1,6 @@
-﻿import fs from "node:fs/promises";
+import fs from "node:fs/promises";
 import path from "node:path";
 import type { RunState } from "../runner/types.js";
-import type { Workflow } from "../runner/workflow.js";
 import type { RunAnalysis } from "./runAnalysis.js";
 import { writeJson } from "../runner/fs.js";
 
@@ -45,13 +44,13 @@ export async function loadKnowledgeGraph(workspacePath: string): Promise<Knowled
 export async function updateKnowledgeGraph(options: {
   workspacePath: string;
   runMeta: RunState;
-  workflow: Workflow;
   analysis: RunAnalysis;
   changedFiles: string[];
+  agentIds?: string[];
 }): Promise<KnowledgeGraph> {
   const graph = await loadKnowledgeGraph(options.workspacePath);
-  const nodeMap = new Map(graph.nodes.map((n) => [n.id, n]));
-  const edgeMap = new Map(graph.edges.map((e) => [`${e.from}|${e.to}|${e.type}`, e]));
+  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+  const edgeMap = new Map(graph.edges.map((edge) => [`${edge.from}|${edge.to}|${edge.type}`, edge]));
 
   const ensureNode = (id: string, type: KnowledgeNode["type"], label?: string) => {
     if (!nodeMap.has(id)) {
@@ -64,9 +63,9 @@ export async function updateKnowledgeGraph(options: {
     const existing = edgeMap.get(key);
     if (existing) {
       existing.weight += weight;
-    } else {
-      edgeMap.set(key, { from, to, type, weight });
+      return;
     }
+    edgeMap.set(key, { from, to, type, weight });
   };
 
   const failures: Array<{ id: string; count: number }> = [];
@@ -79,7 +78,11 @@ export async function updateKnowledgeGraph(options: {
     ensureNode(failure.id, "failure", failure.id.replace("failure:", ""));
   }
 
-  for (const agentId of Object.keys(options.workflow.agents)) {
+  const agentIds = options.agentIds
+    ?? Object.keys(options.runMeta.costByAgent ?? {})
+    ?? options.runMeta.dynamicAgents?.map((agent) => agent.id)
+    ?? [];
+  for (const agentId of agentIds) {
     ensureNode(`agent:${agentId}`, "agent", agentId);
   }
 
@@ -102,6 +105,9 @@ export async function updateKnowledgeGraph(options: {
     }
     for (const model of Object.keys(options.runMeta.modelUsage ?? {})) {
       ensureEdge(`model:${model}`, failure.id, "caused_failure", failure.count);
+    }
+    for (const agentId of agentIds) {
+      ensureEdge(`agent:${agentId}`, failure.id, "related_to", Math.max(1, failure.count));
     }
     for (const file of options.changedFiles) {
       ensureEdge(`file:${file}`, failure.id, "caused_failure", Math.max(1, failure.count));

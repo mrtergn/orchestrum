@@ -7,5 +7,5 @@ test("open-source licensing allows every feature", async () => {
   assert.equal(status.valid, true);
   assert.equal(isFeatureAllowed(status.tier, "plugins"), true);
   assert.equal(isFeatureAllowed(status.tier, "analytics"), true);
-  assert.doesNotThrow(() => enforceFeature(status.tier, "roadmap"));
+  assert.doesNotThrow(() => enforceFeature(status.tier, "cluster"));
 });

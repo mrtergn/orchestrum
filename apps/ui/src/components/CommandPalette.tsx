@@ -33,7 +33,6 @@ export function CommandPalette() {
       { id: "nav-runs", label: "Go to Runs", section: "Navigation", run: () => router.push("/runs") },
       { id: "nav-mission", label: "Go to Mission Feed", section: "Navigation", run: () => router.push("/mission") },
       { id: "nav-metrics", label: "Go to Metrics", section: "Navigation", run: () => router.push("/metrics") },
-      { id: "nav-roadmap", label: "Go to Roadmap", section: "Navigation", run: () => router.push("/roadmap") },
       { id: "nav-settings", label: "Open Settings", section: "Navigation", run: () => router.push("/settings") },
       { id: "nav-diagnostics", label: "Go to Diagnostics", section: "Navigation", run: () => router.push("/diagnostics") },
       { id: "nav-help", label: "Open Help & Docs", section: "Navigation", run: () => router.push("/help") },

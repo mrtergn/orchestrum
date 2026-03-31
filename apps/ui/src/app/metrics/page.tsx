@@ -29,20 +29,10 @@ type AnalyticsData = {
   workerStats?: Array<{ ts: string; active: number; queue: number }>;
 };
 
-type EvaluationResult = {
-  id: string;
-  workflow: string;
-  runs: number;
-  runIds: string[];
-  similarity: number;
-  createdAt: string;
-};
-
 /* ---------- page ---------- */
 export default function MetricsPage() {
   const { selectedWorkspaceId: workspaceId } = useAppUi();
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
-  const [evaluations, setEvaluations] = useState<EvaluationResult[]>([]);
   const [learnings, setLearnings] = useState<LearningEntry[]>([]);
   const [readiness, setReadiness] = useState<ReleaseReadiness | null>(null);
   const [deliverySummary, setDeliverySummary] = useState<DeliverySummary | null>(null);
@@ -55,17 +45,6 @@ export default function MetricsPage() {
         const data = await res.json();
         setAnalytics(normalizeAnalytics(data.analytics ?? data));
       }
-    };
-    load();
-  }, [workspaceId]);
-
-  useEffect(() => {
-    const load = async () => {
-      if (!workspaceId) { setEvaluations([]); return; }
-      const res = await fetch(`/api/evaluations?workspace=${encodeURIComponent(workspaceId)}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setEvaluations(data.evaluations ?? []);
     };
     load();
   }, [workspaceId]);
@@ -101,12 +80,17 @@ export default function MetricsPage() {
     ? analytics.runs === 0 ? 0 : Math.round((analytics.successes / analytics.runs) * 100)
     : 0;
 
-  const latestEvaluation = evaluations[0];
   const modelUsageList = useMemo(
     () => Object.entries(analytics?.modelUsage ?? {}).sort((a, b) => b[1] - a[1]),
     [analytics?.modelUsage]
   );
   const modelMax = useMemo(() => Math.max(...modelUsageList.map(([, c]) => c), 1), [modelUsageList]);
+  const deliveryResolution = useMemo(() => {
+    if (!deliverySummary) return null;
+    const total = deliverySummary.openFindings + deliverySummary.resolvedFindings;
+    if (total <= 0) return null;
+    return Math.round((deliverySummary.resolvedFindings / total) * 100);
+  }, [deliverySummary]);
 
   const failureMax = analytics
     ? Math.max(to(analytics.failureTypes?.policy), to(analytics.failureTypes?.audit), to(analytics.failureTypes?.test), to(analytics.failureTypes?.security), 1)
@@ -140,7 +124,7 @@ export default function MetricsPage() {
         <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-500/20 to-amber-500/5 text-2xl text-amber-400">▤</div>
           <h3 className="mt-3 text-base font-semibold text-white">No analytics yet</h3>
-          <p className="mt-1 text-sm text-slate-400">Run a workflow to populate metrics.</p>
+          <p className="mt-1 text-sm text-slate-400">Run a mission, delivery session, or QA pass to populate metrics.</p>
         </section>
       )}
 
@@ -266,24 +250,24 @@ export default function MetricsPage() {
               </div>
             </div>
 
-            {/* Determinism */}
+            {/* Delivery Resolution */}
             <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
               <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Determinism Score</div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Finding Resolution</div>
                 <span className="text-lg font-semibold text-white">
-                  {latestEvaluation ? `${(latestEvaluation.similarity * 100).toFixed(0)}%` : "n/a"}
+                  {deliveryResolution == null ? "n/a" : `${deliveryResolution}%`}
                 </span>
               </div>
-              {latestEvaluation && (
+              {deliveryResolution != null && (
                 <>
                   <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all"
-                      style={{ width: `${latestEvaluation.similarity * 100}%` }}
+                      style={{ width: `${deliveryResolution}%` }}
                     />
                   </div>
                   <div className="text-[10px] text-slate-500">
-                    {latestEvaluation.runs} runs on <span className="text-slate-400">{latestEvaluation.workflow}</span>
+                    {deliverySummary?.resolvedFindings ?? 0} resolved of {(deliverySummary?.openFindings ?? 0) + (deliverySummary?.resolvedFindings ?? 0)} findings
                   </div>
                 </>
               )}

@@ -16,7 +16,7 @@ export class OpenAIProvider implements IAgentProvider {
   async complete(prompt: string, options: CompletionOptions): Promise<CompletionResult>;
   async complete(arg1: string | CompletionOptions, arg2?: CompletionOptions): Promise<CompletionResult> {
     if (!this.apiKey) {
-      throw new ProviderError("OPENAI_API_KEY is missing. Set it before running workflows.", "provider.openai.missing_key");
+      throw new ProviderError("OPENAI_API_KEY is missing. Set it before running missions or delivery sessions.", "provider.openai.missing_key");
     }
 
     const resolved = normalizeCompletionArgs(arg1, arg2);

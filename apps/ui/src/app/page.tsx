@@ -192,7 +192,7 @@ export default function HomePage() {
         >
           <div className="text-lg text-amber-300/80">▶</div>
           <div className="mt-2 text-sm font-semibold text-white">New Run</div>
-          <div className="mt-1 text-xs text-slate-500">Start an autonomous workflow from a template or custom goal.</div>
+          <div className="mt-1 text-xs text-slate-500">Start an autonomous mission from a built-in template or custom goal.</div>
         </button>
         <Link
           href="/tasks"

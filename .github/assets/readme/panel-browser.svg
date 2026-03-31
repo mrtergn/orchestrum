@@ -1,0 +1,69 @@
+<svg width="560" height="320" viewBox="0 0 560 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="browserBg" x1="38" y1="22" x2="522" y2="296" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="1" stop-color="#0B1120"/>
+    </linearGradient>
+  </defs>
+  <style>
+    .shell { fill: url(#browserBg); stroke: #334155; stroke-width: 2; }
+    .panel { fill: #0F172A; stroke: #334155; stroke-width: 1.4; }
+    .card { fill: #111827; stroke: #334155; stroke-width: 1.2; }
+    .muted { fill: #94A3B8; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1.6px; }
+    .title { fill: #E2E8F0; font-size: 16px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-weight: 700; }
+    .body { fill: #CBD5E1; font-size: 11px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .tiny { fill: #94A3B8; font-size: 9px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    .amber { fill: #F59E0B; }
+    .cyan { fill: #38BDF8; }
+    .emerald { fill: #10B981; }
+    .rose { fill: #FB7185; }
+  </style>
+
+  <rect x="18" y="18" width="524" height="284" rx="24" class="shell"/>
+  <rect x="34" y="34" width="492" height="252" rx="18" class="panel"/>
+  <path d="M34 66H526" stroke="#334155" stroke-width="1.4"/>
+
+  <text x="56" y="54" class="muted">DIAGNOSTICS + QA</text>
+  <rect x="428" y="43" width="74" height="14" rx="7" fill="#10324D" stroke="#38BDF8" stroke-width="1"/>
+  <text x="446" y="53" class="tiny" fill="#BAE6FD">RUN QA</text>
+
+  <rect x="54" y="84" width="168" height="72" rx="14" class="card"/>
+  <text x="68" y="102" class="muted">READINESS</text>
+  <text x="68" y="130" class="title">86 / 100</text>
+  <rect x="68" y="138" width="126" height="8" rx="4" fill="#172033"/>
+  <rect x="68" y="138" width="94" height="8" rx="4" fill="#10B981"/>
+  <text x="68" y="154" class="tiny" fill="#A7F3D0">docs sync | approvals | recovery</text>
+
+  <rect x="54" y="170" width="168" height="92" rx="14" class="card"/>
+  <text x="68" y="188" class="muted">RECOVERY</text>
+  <rect x="68" y="200" width="140" height="18" rx="9" fill="#172033"/>
+  <rect x="68" y="226" width="140" height="18" rx="9" fill="#172033"/>
+  <text x="80" y="212" class="tiny" fill="#E2E8F0">run-314 interrupted</text>
+  <text x="80" y="238" class="tiny" fill="#E2E8F0">run-315 resume ready</text>
+  <circle cx="194" cy="209" r="3.5" class="amber"/>
+  <circle cx="194" cy="235" r="3.5" class="cyan"/>
+
+  <rect x="242" y="84" width="264" height="178" rx="14" class="card"/>
+  <text x="256" y="102" class="muted">BROWSER RUN</text>
+  <rect x="256" y="114" width="236" height="116" rx="12" fill="#172033" stroke="#334155" stroke-width="1.2"/>
+  <path d="M256 140H492" stroke="#334155" stroke-width="1.2"/>
+  <circle cx="272" cy="127" r="3" class="amber"/>
+  <circle cx="282" cy="127" r="3" class="cyan"/>
+  <circle cx="292" cy="127" r="3" class="emerald"/>
+  <rect x="274" y="156" width="86" height="50" rx="10" fill="#0F172A"/>
+  <rect x="372" y="156" width="102" height="20" rx="10" fill="#0F172A"/>
+  <rect x="372" y="184" width="102" height="20" rx="10" fill="#0F172A"/>
+  <text x="286" y="175" class="tiny" fill="#E2E8F0">qa / benchmark</text>
+  <text x="286" y="191" class="tiny" fill="#94A3B8">artifact capture</text>
+  <text x="386" y="169" class="tiny" fill="#E2E8F0">canary checks</text>
+  <text x="386" y="197" class="tiny" fill="#E2E8F0">diagnostic export</text>
+  <circle cx="460" cy="166" r="3.5" class="emerald"/>
+  <circle cx="460" cy="194" r="3.5" class="rose"/>
+
+  <rect x="256" y="238" width="68" height="16" rx="8" fill="#10324D"/>
+  <rect x="332" y="238" width="84" height="16" rx="8" fill="#0F3A34"/>
+  <rect x="424" y="238" width="68" height="16" rx="8" fill="#33240D"/>
+  <text x="271" y="249" class="tiny" fill="#BAE6FD">ARTIFACTS</text>
+  <text x="351" y="249" class="tiny" fill="#A7F3D0">READINESS</text>
+  <text x="442" y="249" class="tiny" fill="#FDE68A">LOGS</text>
+</svg>
