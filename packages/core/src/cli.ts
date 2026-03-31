@@ -34,6 +34,12 @@ import {
   runBrowserRunDetailed,
   loadLearnings,
   syncWorkspaceDocs,
+  discoverDeliverySetup,
+  initTeamPreset,
+  runDeliverySessionDetailed,
+  exportDeliveryPacket,
+  importDeliveryPacketResponse,
+  loadDeliveryFindings,
   getLicenseStatus,
   isFeatureAllowed,
   enforceFeature
@@ -265,6 +271,159 @@ function registerBrowserCommand(name: "qa" | "benchmark" | "canary", description
 registerBrowserCommand("qa", "Run headless browser QA with artifacts");
 registerBrowserCommand("benchmark", "Run browser benchmark capture");
 registerBrowserCommand("canary", "Run repeated browser canary checks");
+
+const deliveryCmd = program.command("delivery").description("AI delivery work packet lifecycle");
+
+deliveryCmd
+  .command("doctor")
+  .requiredOption("--repo <path>", "Target repo path")
+  .option("--workspace <id>", "Workspace ID")
+  .action(async (options) => {
+    try {
+      const repoPath = path.resolve(options.repo);
+      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace).catch(() => options.workspace ?? "default");
+      const result = await discoverDeliverySetup({
+        repoPath,
+        workspaceId
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+deliveryCmd
+  .command("init-preset")
+  .requiredOption("--repo <path>", "Target repo path")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--force", "Overwrite with a newly scaffolded preset")
+  .action(async (options) => {
+    try {
+      const repoPath = path.resolve(options.repo);
+      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace).catch(() => options.workspace ?? "default");
+      const result = await initTeamPreset({
+        repoPath,
+        workspaceId,
+        force: Boolean(options.force)
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+deliveryCmd
+  .command("run")
+  .requiredOption("--repo <path>", "Target repo path")
+  .requiredOption("--goal <text>", "Delivery goal or sprint title")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .option("--sprint <name>", "Optional sprint name")
+  .option("--notes <text>", "Optional session notes")
+  .option("--path <value...>", "Relevant repo paths to include")
+  .action(async (options) => {
+    try {
+      const repoPath = path.resolve(options.repo);
+      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
+      const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
+      const result = await runDeliverySessionDetailed({
+        repoPath,
+        runsDir,
+        workspaceId,
+        goal: String(options.goal),
+        sprintName: options.sprint ? String(options.sprint) : undefined,
+        notes: options.notes ? String(options.notes) : undefined,
+        selectedPaths: Array.isArray(options.path) ? options.path.map((item: string) => String(item)) : []
+      });
+      console.log(JSON.stringify({
+        ok: result.ok,
+        runId: result.runId,
+        summary: result.session.summary,
+        status: result.session.status
+      }, null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+deliveryCmd
+  .command("export")
+  .argument("<packetId>", "Packet ID")
+  .requiredOption("--run <id>", "Delivery run ID")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .option("--format <format>", "markdown|json", "markdown")
+  .action(async (packetId, options) => {
+    try {
+      const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
+      const result = await exportDeliveryPacket({
+        runsDir,
+        runId: String(options.run),
+        workspaceId: options.workspace ? String(options.workspace) : undefined,
+        packetId: String(packetId)
+      });
+      if (options.format === "json") {
+        console.log(JSON.stringify(result.sidecar, null, 2));
+      } else {
+        console.log(result.markdown);
+      }
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+deliveryCmd
+  .command("import")
+  .requiredOption("--run <id>", "Delivery run ID")
+  .option("--packet <id>", "Packet ID")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .option("--file <path>", "Import content file")
+  .option("--text <text>", "Import content text")
+  .action(async (options) => {
+    try {
+      const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
+      const inlineText = options.text ? String(options.text) : "";
+      const text = inlineText || (options.file ? await fsSync.promises.readFile(path.resolve(options.file), "utf8") : await readStdinIfAny());
+      const result = await importDeliveryPacketResponse({
+        runsDir,
+        runId: String(options.run),
+        workspaceId: options.workspace ? String(options.workspace) : undefined,
+        packetId: options.packet ? String(options.packet) : undefined,
+        text,
+        filePath: options.file ? path.resolve(options.file) : undefined,
+        fileName: options.file ? path.basename(String(options.file)) : undefined,
+        source: options.file ? "file" : "paste"
+      });
+      console.log(JSON.stringify({
+        packetId: result.packet.id,
+        status: result.packet.status,
+        findings: result.findings.length,
+        remediations: result.remediations.length
+      }, null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+deliveryCmd
+  .command("findings")
+  .requiredOption("--run <id>", "Delivery run ID")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .action(async (options) => {
+    try {
+      const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
+      const findings = await loadDeliveryFindings({
+        runsDir,
+        runId: String(options.run),
+        workspaceId: options.workspace ? String(options.workspace) : undefined
+      });
+      console.log(JSON.stringify(findings, null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
 
 const learningsCmd = program.command("learnings").description("Workspace learnings");
 learningsCmd
@@ -945,6 +1104,19 @@ async function requireFeature(feature: Parameters<typeof isFeatureAllowed>[1]) {
   const status = await getLicenseStatus();
   const tier = status.valid ? status.tier : "Free";
   enforceFeature(tier, feature);
+}
+
+async function readStdinIfAny(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  return new Promise((resolve, reject) => {
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      input += chunk;
+    });
+    process.stdin.on("end", () => resolve(input));
+    process.stdin.on("error", reject);
+  });
 }
 
 function killProcessOnPort(port: number): void {

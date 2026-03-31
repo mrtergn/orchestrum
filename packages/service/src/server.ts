@@ -58,6 +58,17 @@ import {
   syncWorkspaceDocs,
   computeReleaseReadiness,
   StateIndex,
+  discoverDeliverySetup,
+  loadTeamPreset,
+  saveTeamPreset,
+  initTeamPreset,
+  runDeliverySessionDetailed,
+  loadDeliverySession,
+  listDeliveryPackets,
+  exportDeliveryPacket,
+  importDeliveryPacketResponse,
+  loadDeliveryFindings,
+  loadDeliveryRemediations,
   Logger,
   readAppendedLines,
   readTailLines,
@@ -943,6 +954,59 @@ export async function startService(options: ServiceOptions = {}) {
     res.json({ ok: true });
   });
 
+  app.get("/capabilities", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const result = await discoverDeliverySetup({ repoPath: workspacePath, workspaceId });
+    res.json(result);
+  });
+
+  app.get("/team-preset", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const discovered = await discoverDeliverySetup({ repoPath: workspacePath, workspaceId });
+    res.json({
+      workspaceId,
+      repoPath: workspacePath,
+      path: path.join(workspacePath, ".orchestrum", "team-preset.json"),
+      preset: discovered.preset,
+      scaffoldPreset: discovered.scaffoldPreset,
+      capabilities: discovered.capabilities,
+      suggestedBindings: discovered.suggestedBindings
+    });
+  });
+
+  app.put("/team-preset", async (req, res) => {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const preset = await saveTeamPreset(workspacePath, req.body?.preset ?? {});
+    const discovered = await discoverDeliverySetup({ repoPath: workspacePath, workspaceId });
+    res.json({
+      workspaceId,
+      repoPath: workspacePath,
+      path: path.join(workspacePath, ".orchestrum", "team-preset.json"),
+      preset,
+      scaffoldPreset: discovered.scaffoldPreset,
+      capabilities: discovered.capabilities,
+      suggestedBindings: discovered.suggestedBindings
+    });
+  });
+
+  app.post("/team-preset/init", async (req, res) => {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const result = await initTeamPreset({
+      repoPath: workspacePath,
+      workspaceId,
+      force: Boolean(req.body?.force)
+    });
+    res.json(result);
+  });
+
   app.get("/config/merged", async (req, res) => {
     const workspacePath = await resolveWorkspacePath(rootDir, req.query.workspace as string | undefined);
     if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
@@ -1099,6 +1163,95 @@ export async function startService(options: ServiceOptions = {}) {
       readiness.latestRunId = indexed.runId;
     }
     res.json(readiness);
+  });
+
+  app.post("/delivery/start", async (req, res) => {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
+    if (!workspaceId) return res.status(400).json({ error: "workspaceId required" });
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const goal = typeof req.body?.goal === "string" ? req.body.goal.trim() : "";
+    if (!goal) return res.status(400).json({ error: "goal required" });
+    try {
+      const result = await runDeliverySessionDetailed({
+        repoPath: workspacePath,
+        runsDir,
+        workspaceId,
+        goal,
+        sprintName: req.body?.sprintName ? String(req.body.sprintName) : undefined,
+        notes: req.body?.notes ? String(req.body.notes) : undefined,
+        selectedPaths: Array.isArray(req.body?.selectedPaths) ? req.body.selectedPaths.map((item: unknown) => String(item)) : [],
+        runId: req.body?.runId ? sanitizeRunId(String(req.body.runId)) : undefined
+      });
+      void stateIndex.rebuild().catch(() => undefined);
+      res.json({ ok: result.ok, runId: result.runId, kind: "delivery" });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Failed to start delivery session." });
+    }
+  });
+
+  app.get("/delivery/:id", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const session = await loadDeliverySession({ runsDir, runId: req.params.id, workspaceId });
+    if (!session) return res.status(404).json({ error: "Delivery session not found" });
+    res.json(session);
+  });
+
+  app.get("/delivery/:id/packets", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const packets = await listDeliveryPackets({ runsDir, runId: req.params.id, workspaceId });
+    res.json({ packets });
+  });
+
+  app.get("/delivery/:id/packets/:packetId/export", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    try {
+      const exported = await exportDeliveryPacket({
+        runsDir,
+        runId: req.params.id,
+        workspaceId,
+        packetId: req.params.packetId
+      });
+      res.json(exported);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Packet export failed." });
+    }
+  });
+
+  app.post("/delivery/:id/packets/:packetId/import", async (req, res) => {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    let text = typeof req.body?.text === "string" ? req.body.text : "";
+    const fileName = typeof req.body?.fileName === "string" ? req.body.fileName : undefined;
+    if (!text && typeof req.body?.data === "string" && req.body.data.trim()) {
+      text = Buffer.from(String(req.body.data), "base64").toString("utf8");
+    }
+    try {
+      const result = await importDeliveryPacketResponse({
+        runsDir,
+        runId: req.params.id,
+        workspaceId,
+        packetId: req.params.packetId,
+        text,
+        fileName,
+        source: fileName ? "file" : "paste"
+      });
+      void stateIndex.rebuild().catch(() => undefined);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Packet import failed." });
+    }
+  });
+
+  app.get("/delivery/:id/findings", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const findings = await loadDeliveryFindings({ runsDir, runId: req.params.id, workspaceId });
+    res.json({ findings });
+  });
+
+  app.get("/delivery/:id/remediations", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const remediations = await loadDeliveryRemediations({ runsDir, runId: req.params.id, workspaceId });
+    res.json({ remediations });
   });
 
   app.post("/run", async (req, res) => {
@@ -1676,6 +1829,19 @@ async function buildSnapshot(runDir: string) {
 }
 
 async function buildRunDetail(run: RunRecord) {
+  if (run.meta?.kind === "delivery") {
+    const delivery = await loadDeliverySession({
+      runsDir: path.resolve(run.runDir, "..", ".."),
+      runId: run.runId,
+      workspaceId: run.workspaceId
+    }).catch(() => null);
+    return {
+      run: run.meta,
+      steps: [],
+      workflow: null,
+      delivery
+    };
+  }
   const stepsDir = path.join(run.runDir, "steps");
   const entries = await fs.readdir(stepsDir, { withFileTypes: true }).catch(() => []);
   const steps = await Promise.all(
@@ -1716,7 +1882,7 @@ async function buildRunDetail(run: RunRecord) {
       workflow = null;
     }
   }
-  return { run: run.meta, steps, workflow };
+  return { run: run.meta, steps, workflow, delivery: null };
 }
 
 function mimeTypeForExtension(ext: string): string {

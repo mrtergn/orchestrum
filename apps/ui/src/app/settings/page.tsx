@@ -4,6 +4,31 @@ import { useEffect, useState } from "react";
 import { z } from "zod";
 import { useAppUi } from "@/components/AppUiProvider";
 
+type CapabilityDiscovery = {
+  capabilities?: Array<{
+    id: string;
+    kind: string;
+    label: string;
+    available: boolean;
+    details?: string;
+  }>;
+  suggestedBindings?: Array<{
+    roleId: string;
+    mode: string;
+    target: string;
+    available: boolean;
+    reason: string;
+  }>;
+  scaffoldPreset?: unknown;
+};
+
+type TeamPresetPayload = {
+  preset?: unknown | null;
+  scaffoldPreset?: unknown;
+  capabilities?: CapabilityDiscovery["capabilities"];
+  suggestedBindings?: CapabilityDiscovery["suggestedBindings"];
+};
+
 const ConfigSchema = z.object({
   concurrency: z
     .object({
@@ -39,6 +64,8 @@ const ConfigSchema = z.object({
 });
 
 type Scope = "workspace" | "global";
+const tabs = ["Providers", "Runtime", "Profile", "Advanced"] as const;
+type Tab = (typeof tabs)[number];
 
 export default function SettingsPage() {
   const { selectedWorkspaceId, pushToast } = useAppUi();
@@ -68,6 +95,10 @@ export default function SettingsPage() {
   const [governanceConfigProtection, setGovernanceConfigProtection] = useState(true);
   const [governanceQualityGate, setGovernanceQualityGate] = useState(false);
   const [profileMessage, setProfileMessage] = useState("");
+  const [teamPresetText, setTeamPresetText] = useState("");
+  const [teamPresetMessage, setTeamPresetMessage] = useState("");
+  const [capabilities, setCapabilities] = useState<NonNullable<CapabilityDiscovery["capabilities"]>>([]);
+  const [suggestedBindings, setSuggestedBindings] = useState<NonNullable<CapabilityDiscovery["suggestedBindings"]>>([]);
   const [openAiSet, setOpenAiSet] = useState(false);
   const [openAiKey, setOpenAiKey] = useState("");
   const [providerPassphrase, setProviderPassphrase] = useState("");
@@ -138,6 +169,28 @@ export default function SettingsPage() {
       setGovernanceQualityGate(Boolean(profile.governance?.quality_gate));
     };
     void loadProfile();
+  }, [scope, workspaceId]);
+
+  useEffect(() => {
+    if (scope !== "workspace" || !workspaceId) {
+      setTeamPresetText("");
+      setCapabilities([]);
+      setSuggestedBindings([]);
+      return;
+    }
+    const loadDeliverySetup = async () => {
+      const [presetRes, capabilityRes] = await Promise.all([
+        fetch(`/api/team-preset?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" }),
+        fetch(`/api/capabilities?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" })
+      ]);
+      const presetPayload = presetRes.ok ? ((await presetRes.json()) as TeamPresetPayload) : {};
+      const capabilityPayload = capabilityRes.ok ? ((await capabilityRes.json()) as CapabilityDiscovery) : {};
+      const presetSource = presetPayload.preset ?? presetPayload.scaffoldPreset ?? capabilityPayload.scaffoldPreset ?? {};
+      setTeamPresetText(JSON.stringify(presetSource, null, 2));
+      setCapabilities(capabilityPayload.capabilities ?? presetPayload.capabilities ?? []);
+      setSuggestedBindings(capabilityPayload.suggestedBindings ?? presetPayload.suggestedBindings ?? []);
+    };
+    void loadDeliverySetup();
   }, [scope, workspaceId]);
 
   const handleSave = async () => {
@@ -293,9 +346,63 @@ export default function SettingsPage() {
     setProfileMessage("Profile saved.");
   };
 
-  const tabs = ["Providers", "Runtime", "Profile", "Advanced"] as const;
-  type Tab = (typeof tabs)[number];
-  const [activeTab, setActiveTab] = useState<Tab>("Providers");
+  const handleScaffoldPreset = async () => {
+    if (!workspaceId) {
+      setTeamPresetMessage("Select a workspace first.");
+      return;
+    }
+    const res = await fetch("/api/team-preset/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId,
+        force: true
+      })
+    });
+    const payload = (await res.json().catch(() => ({}))) as TeamPresetPayload & { error?: string };
+    if (!res.ok) {
+      setTeamPresetMessage(payload.error ?? "Unable to scaffold team preset.");
+      return;
+    }
+    setTeamPresetText(JSON.stringify(payload.preset ?? payload.scaffoldPreset ?? {}, null, 2));
+    setCapabilities(payload.capabilities ?? []);
+    setSuggestedBindings(payload.suggestedBindings ?? []);
+    setTeamPresetMessage("Scaffolded team preset created.");
+  };
+
+  const handleSaveTeamPreset = async () => {
+    setTeamPresetMessage("");
+    if (!workspaceId) {
+      setTeamPresetMessage("Select a workspace first.");
+      return;
+    }
+    let preset: unknown;
+    try {
+      preset = JSON.parse(teamPresetText);
+    } catch {
+      setTeamPresetMessage("Team preset JSON is invalid.");
+      return;
+    }
+    const res = await fetch("/api/team-preset", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId,
+        preset
+      })
+    });
+    const payload = (await res.json().catch(() => ({}))) as TeamPresetPayload & { error?: string };
+    if (!res.ok) {
+      setTeamPresetMessage(payload.error ?? "Failed to save team preset.");
+      return;
+    }
+    setTeamPresetMessage("Team preset saved.");
+    setCapabilities(payload.capabilities ?? []);
+    setSuggestedBindings(payload.suggestedBindings ?? []);
+    setTeamPresetText(JSON.stringify(payload.preset ?? preset, null, 2));
+  };
+
+  const [activeTab, setActiveTab] = useState("Providers" as Tab);
 
   return (
     <main className="space-y-6">
@@ -532,6 +639,7 @@ export default function SettingsPage() {
               <p className="mt-1 text-xs text-slate-500">Select a workspace from the header to configure its profile, or switch to Global scope.</p>
             </div>
           ) : (
+            <>
             <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
               <h3 className="text-sm font-semibold text-white">Workspace Profile</h3>
               <p className="mt-1 text-xs text-slate-500">Per-workspace defaults for risk tolerance, costs, and strategy.</p>
@@ -629,6 +737,70 @@ export default function SettingsPage() {
                 {profileMessage && <span className="text-xs text-slate-400">{profileMessage}</span>}
               </div>
             </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Team Preset</h3>
+                  <p className="mt-1 text-xs text-slate-500">Repo-scoped role bindings, handoff defaults, and packet templates for delivery sessions.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleScaffoldPreset}
+                    className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs uppercase tracking-[0.2em] text-slate-300"
+                  >
+                    Scaffold
+                  </button>
+                  <button
+                    onClick={handleSaveTeamPreset}
+                    className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-emerald-200"
+                  >
+                    Save Preset
+                  </button>
+                </div>
+              </div>
+              <textarea
+                value={teamPresetText}
+                onChange={(event) => setTeamPresetText(event.target.value)}
+                className="mt-4 h-72 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-3 font-mono text-xs text-slate-200"
+              />
+              {teamPresetMessage && <div className="mt-3 text-xs text-slate-400">{teamPresetMessage}</div>}
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+              <h3 className="text-sm font-semibold text-white">Capabilities & Suggested Bindings</h3>
+              <p className="mt-1 text-xs text-slate-500">Machine discovery is suggest-and-confirm. These detections do not change behavior until they are saved into the repo preset.</p>
+              <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                <div className="space-y-2">
+                  {(capabilities ?? []).map((capability) => (
+                    <div key={capability.id} className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium text-white">{capability.label}</div>
+                        <span className={`text-[10px] uppercase tracking-[0.18em] ${capability.available ? "text-emerald-300" : "text-slate-500"}`}>
+                          {capability.available ? "available" : "missing"}
+                        </span>
+                      </div>
+                      {capability.details && <div className="mt-1 text-[11px] text-slate-500">{capability.details}</div>}
+                    </div>
+                  ))}
+                  {(!capabilities || capabilities.length === 0) && <div className="text-xs text-slate-500">No capability data loaded.</div>}
+                </div>
+                <div className="space-y-2">
+                  {(suggestedBindings ?? []).map((binding) => (
+                    <div key={binding.roleId} className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium text-white">{binding.roleId}</div>
+                        <span className="text-[10px] uppercase tracking-[0.18em] text-slate-400">{binding.mode}</span>
+                      </div>
+                      <div className="mt-1 text-xs text-slate-400">{binding.target}</div>
+                      <div className="mt-2 text-[11px] text-slate-500">{binding.reason}</div>
+                    </div>
+                  ))}
+                  {(!suggestedBindings || suggestedBindings.length === 0) && <div className="text-xs text-slate-500">No suggested bindings yet.</div>}
+                </div>
+              </div>
+            </div>
+            </>
           )}
         </section>
       )}

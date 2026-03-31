@@ -33,7 +33,7 @@ export type StepState = {
 
 export type RunStatus = "running" | "finished" | "failed" | "cancelled" | "interrupted";
 
-export type RunKind = "workflow" | "qa" | "benchmark" | "canary";
+export type RunKind = "workflow" | "qa" | "benchmark" | "canary" | "delivery";
 
 export type RunReadiness = {
   score: number;

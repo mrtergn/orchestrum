@@ -23,7 +23,7 @@ type StartResponse = {
   error?: string;
 };
 
-type RunKind = "workflow" | "qa" | "benchmark" | "canary";
+type RunKind = "workflow" | "qa" | "benchmark" | "canary" | "delivery";
 
 export function RunConfigModal() {
   const router = useRouter();
@@ -44,6 +44,9 @@ export function RunConfigModal() {
   const [runKind, setRunKind] = useState<RunKind>("workflow");
   const [workflowId, setWorkflowId] = useState("feature-dev.yaml");
   const [goal, setGoal] = useState("");
+  const [sprintName, setSprintName] = useState("");
+  const [notes, setNotes] = useState("");
+  const [selectedPathsText, setSelectedPathsText] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [targetPath, setTargetPath] = useState("");
   const [iterations, setIterations] = useState("3");
@@ -56,6 +59,9 @@ export function RunConfigModal() {
   const [auditModel, setAuditModel] = useState("");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
+  const isWorkflowRun = runKind === "workflow";
+  const isDeliveryRun = runKind === "delivery";
+  const isBrowserRun = runKind === "qa" || runKind === "benchmark" || runKind === "canary";
 
   useEffect(() => {
     if (!runConfigOpen) return;
@@ -82,6 +88,9 @@ export function RunConfigModal() {
     setRunKind(seedKind);
     setWorkflowId(seedWorkflow);
     setGoal(seedGoal);
+    setSprintName(runConfigSeed?.sprintName ?? "");
+    setNotes(runConfigSeed?.notes ?? "");
+    setSelectedPathsText((runConfigSeed?.selectedPaths ?? []).join("\n"));
     setBaseUrl(runConfigSeed?.baseUrl ?? "");
     setTargetPath(runConfigSeed?.targetPath ?? "");
     setIterations("3");
@@ -110,11 +119,15 @@ export function RunConfigModal() {
       setError("Select a workspace.");
       return;
     }
-    if (runKind === "workflow" && !workflowId) {
+    if (isWorkflowRun && !workflowId) {
       setError("Select a workflow.");
       return;
     }
-    if (runKind !== "workflow" && !baseUrl.trim()) {
+    if ((isWorkflowRun || isDeliveryRun) && !goal.trim()) {
+      setError("Enter a goal.");
+      return;
+    }
+    if (isBrowserRun && !baseUrl.trim()) {
       setError("Enter a base URL for browser runs.");
       return;
     }
@@ -128,9 +141,15 @@ export function RunConfigModal() {
       : undefined;
     const parsedIterations = Number(iterations);
     const parsedIntervalMs = Number(intervalMs);
-    const endpoint = runKind === "workflow"
+    const selectedPaths = selectedPathsText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const endpoint = isWorkflowRun
       ? "/api/runs/start"
-      : runKind === "qa"
+      : isDeliveryRun
+        ? "/api/delivery/start"
+        : runKind === "qa"
         ? "/api/qa/run"
         : runKind === "benchmark"
           ? "/api/qa/benchmark"
@@ -141,7 +160,7 @@ export function RunConfigModal() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         workspaceId,
-        ...(runKind === "workflow"
+        ...(isWorkflowRun
           ? {
               workflowId,
               userGoal: goal.trim(),
@@ -151,6 +170,13 @@ export function RunConfigModal() {
                 modelOverrides
               }
             }
+          : isDeliveryRun
+            ? {
+                goal: goal.trim(),
+                sprintName: sprintName.trim() || undefined,
+                notes: notes.trim() || undefined,
+                selectedPaths
+              }
           : {
               baseUrl: baseUrl.trim(),
               targetPath: targetPath.trim() || undefined,
@@ -175,7 +201,7 @@ export function RunConfigModal() {
     }
     pushToast({
       tone: "success",
-      title: `${runKind === "workflow" ? "Run" : runKind} started`,
+      title: `${runKind === "workflow" ? "Run" : runKind === "delivery" ? "Delivery session" : runKind} started`,
       message: `Run ${payload.runId} started.`,
       actionLabel: "Open Run",
       actionHref: `/runs/${payload.runId}?workspace=${encodeURIComponent(workspaceId)}`
@@ -225,13 +251,14 @@ export function RunConfigModal() {
               className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
             >
               <option value="workflow">Workflow</option>
+              <option value="delivery">Delivery / Sprint Run</option>
               <option value="qa">Browser QA</option>
               <option value="benchmark">Benchmark</option>
               <option value="canary">Canary</option>
             </select>
           </div>
 
-          {runKind === "workflow" ? (
+          {isWorkflowRun ? (
             <div>
               <label className="text-xs text-slate-400">Workflow</label>
               <select
@@ -246,7 +273,7 @@ export function RunConfigModal() {
                 ))}
               </select>
             </div>
-          ) : (
+          ) : isBrowserRun ? (
             <div className="grid gap-3 md:grid-cols-2">
               <div>
                 <label className="text-xs text-slate-400">Base URL</label>
@@ -267,11 +294,11 @@ export function RunConfigModal() {
                 />
               </div>
             </div>
-          )}
+          ) : null}
 
-          {runKind === "workflow" ? (
+          {isWorkflowRun || isDeliveryRun ? (
             <div>
-              <label className="text-xs text-slate-400">Goal / Task</label>
+              <label className="text-xs text-slate-400">{isDeliveryRun ? "Delivery Goal" : "Goal / Task"}</label>
               <textarea
                 value={goal}
                 onChange={(event) => setGoal(event.target.value)}
@@ -302,7 +329,41 @@ export function RunConfigModal() {
             </div>
           ) : null}
 
-          {runKind === "workflow" && (
+          {isDeliveryRun && (
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="text-xs text-slate-400">Sprint / Label</label>
+                <input
+                  value={sprintName}
+                  onChange={(event) => setSprintName(event.target.value)}
+                  placeholder="Sprint 10"
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Relevant Paths</label>
+                <textarea
+                  value={selectedPathsText}
+                  onChange={(event) => setSelectedPathsText(event.target.value)}
+                  rows={3}
+                  placeholder="packages/service/src/server.ts&#10;apps/ui/src/components/RunConfigModal.tsx"
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-xs text-slate-400">Notes</label>
+                <textarea
+                  value={notes}
+                  onChange={(event) => setNotes(event.target.value)}
+                  rows={4}
+                  placeholder="Constraints, open questions, links, or current branch notes."
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                />
+              </div>
+            </div>
+          )}
+
+          {isWorkflowRun && (
             <div className="rounded-xl border border-slate-800 bg-slate-900/20 p-4">
             <button
               onClick={() => setAdvancedOpen((prev) => !prev)}
@@ -371,7 +432,7 @@ export function RunConfigModal() {
             disabled={starting}
             className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs uppercase tracking-[0.3em] text-amber-200 disabled:opacity-50"
           >
-            {starting ? "Starting..." : runKind === "workflow" ? "Start Run" : `Start ${runKind}`}
+            {starting ? "Starting..." : runKind === "workflow" ? "Start Run" : runKind === "delivery" ? "Start Delivery" : `Start ${runKind}`}
           </button>
         </div>
       </div>

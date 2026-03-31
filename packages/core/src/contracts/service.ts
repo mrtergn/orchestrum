@@ -1,4 +1,20 @@
 import type { GovernanceProfile, RunKind, RunReadiness, RunState, StepState } from "../runner/types.js";
+import type {
+  CapabilityDiscoveryResult,
+  DeliverySessionRequest,
+  DeliverySessionState,
+  EvidenceRecord,
+  MachineCapability,
+  PacketExport,
+  PacketImport,
+  RemediationTask,
+  ReviewFinding,
+  RoleBinding,
+  RoleDefinition,
+  TeamPreset,
+  TeamPresetResponse,
+  WorkPacket
+} from "../delivery/types.js";
 
 export const TASK_RUNTIME_STATUSES = [
   "queued",
@@ -43,6 +59,7 @@ export type RunDetail = {
   run: RunSummary;
   steps: StepState[];
   workflow: WorkflowSummary | null;
+  delivery?: DeliverySessionState | null;
 };
 
 export type RunProgressSnapshot = {
@@ -77,6 +94,12 @@ export type BrowserRunRequest = {
   baseUrl?: string;
   targetPath?: string;
   options?: BrowserRunOptions;
+};
+
+export type DeliveryStartRequest = DeliverySessionRequest;
+
+export type DeliveryStartResponse = RunStartResponse & {
+  kind?: Extract<RunKind, "delivery">;
 };
 
 export type RunStartRequest = {
@@ -191,6 +214,23 @@ export type WorkspaceProfileShape = {
   execution_mode?: "inline" | "worktree";
   browser_base_url?: string;
   governance?: GovernanceProfile;
+};
+
+export type {
+  TeamPreset,
+  RoleDefinition,
+  MachineCapability,
+  RoleBinding,
+  DeliverySessionRequest,
+  DeliverySessionState,
+  WorkPacket,
+  PacketExport,
+  PacketImport,
+  ReviewFinding,
+  RemediationTask,
+  EvidenceRecord,
+  CapabilityDiscoveryResult,
+  TeamPresetResponse
 };
 
 export function normalizeTaskStatus(status: string | null | undefined): TaskRuntimeStatus {
