@@ -6,7 +6,6 @@ import path from "node:path";
 import {
   analyzeDeliveryImport,
   createDefaultTeamPreset,
-  detectMachineCapabilities,
   exportDeliveryPacket,
   initTeamPreset,
   importDeliveryPacketResponse,
@@ -209,8 +208,46 @@ test("delivery import analysis auto-matches strong implementation responses", as
     planner: ["cursor"],
     developer: ["cursor"]
   };
-  const capabilities = await detectMachineCapabilities(repoPath);
-  const roleBindings = suggestRoleBindings(preset, capabilities);
+  const roleBindings = suggestRoleBindings(preset, [
+    {
+      id: "binary:cursor",
+      kind: "binary",
+      label: "cursor",
+      available: true,
+      command: "/mock/cursor",
+      details: "Mocked cursor capability for deterministic test coverage.",
+      source: "path",
+      detectedAt: new Date().toISOString()
+    },
+    {
+      id: "binary:npm",
+      kind: "binary",
+      label: "npm",
+      available: true,
+      command: "/mock/npm",
+      details: "Mocked npm capability for auto_cli bindings.",
+      source: "path",
+      detectedAt: new Date().toISOString()
+    },
+    {
+      id: "handoff:browser",
+      kind: "browser_handoff",
+      label: "Browser handoff",
+      available: true,
+      details: "Prompt packets can be copied to browser-based AI tools.",
+      source: "builtin",
+      detectedAt: new Date().toISOString()
+    },
+    {
+      id: "handoff:ide",
+      kind: "ide_handoff",
+      label: "IDE handoff",
+      available: true,
+      details: "IDE-based AI tooling detected.",
+      source: "builtin",
+      detectedAt: new Date().toISOString()
+    }
+  ]);
 
   const sessionResult = await runDeliverySessionDetailed({
     repoPath,

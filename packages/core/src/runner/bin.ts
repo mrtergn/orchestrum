@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 export type BinaryRunOptions = {
   cwd?: string;
@@ -27,9 +28,11 @@ export async function lookupBinary(name: string, env?: NodeJS.ProcessEnv): Promi
 
 export function runBinary(command: string, args: string[], options: BinaryRunOptions = {}): Promise<BinaryRunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const invocation = resolveSpawnInvocation(command, args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: options.env,
+      shell: invocation.shell,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -77,4 +80,30 @@ export function runBinary(command: string, args: string[], options: BinaryRunOpt
     }
     child.stdin.end();
   });
+}
+
+function resolveSpawnInvocation(
+  command: string,
+  args: string[]
+): { command: string; args: string[]; shell: boolean } {
+  const extension = path.extname(command).toLowerCase();
+  if (extension === ".js" || extension === ".cjs" || extension === ".mjs") {
+    return {
+      command: process.execPath,
+      args: [command, ...args],
+      shell: false
+    };
+  }
+  if (process.platform === "win32" && (extension === ".cmd" || extension === ".bat")) {
+    return {
+      command,
+      args,
+      shell: true
+    };
+  }
+  return {
+    command,
+    args,
+    shell: false
+  };
 }

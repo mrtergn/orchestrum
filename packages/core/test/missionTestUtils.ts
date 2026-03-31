@@ -24,6 +24,8 @@ export async function createMissionSandbox(prefix: string, fileOverride?: {
     await fs.writeFile(path.join(repoPath, fileOverride.relativePath), fileOverride.initialContent, "utf8");
   }
   await execFileAsync("git", ["init"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "core.autocrlf", "false"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "core.eol", "lf"], { cwd: repoPath });
   await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
   await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
   await execFileAsync("git", ["add", "-A"], { cwd: repoPath });
