@@ -100,6 +100,21 @@ export default function DeliveryPage() {
       accent: "text-amber-200"
     };
   }, [latestImport, summary?.unmatchedImportAttempts, summary?.unresolvedManualPackets]);
+  const confidenceDistribution = useMemo(() => {
+    const counts = summary?.importConfidenceCounts ?? {};
+    const entries = (["high", "medium", "low"] as const).map((label) => ({
+      label,
+      count: counts[label] ?? 0
+    }));
+    const total = entries.reduce((sum, entry) => sum + entry.count, 0);
+    return {
+      total,
+      entries: entries.map((entry) => ({
+        ...entry,
+        share: total > 0 ? entry.count / total : 0
+      }))
+    };
+  }, [summary?.importConfidenceCounts]);
 
   return (
     <main className="space-y-6">
@@ -241,6 +256,18 @@ export default function DeliveryPage() {
                   <MiniStat label="Trend" value={latestImportHealth.trend} accent={latestImportHealth.accent} />
                   <MiniStat label="Backlog" value={`${summary?.unmatchedImportAttempts ?? 0}/${summary?.unresolvedManualPackets ?? 0}`} accent="text-slate-200" />
                 </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Confidence Distribution</div>
+                    <span className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{confidenceDistribution.total} import(s)</span>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {confidenceDistribution.total === 0 && <div className="text-xs text-slate-500">No indexed confidence signals yet.</div>}
+                    {confidenceDistribution.entries.map((entry) => (
+                      <ConfidenceBar key={entry.label} label={entry.label} count={entry.count} share={entry.share} />
+                    ))}
+                  </div>
+                </div>
                 <div className="text-[11px] text-slate-500">{latestImportHealth.summary}</div>
                 <div className="text-xs text-slate-300">
                   {latestImport.summary || "No summary captured for the latest import attempt."}
@@ -325,6 +352,28 @@ function MiniStat({ label, value, accent }: { label: string; value: string; acce
     <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-3">
       <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
       <div className={`mt-2 text-sm font-semibold ${accent}`}>{value}</div>
+    </div>
+  );
+}
+
+function ConfidenceBar({ label, count, share }: { label: string; count: number; share: number }) {
+  const accent =
+    label === "high"
+      ? "bg-emerald-300"
+      : label === "medium"
+        ? "bg-cyan-300"
+        : "bg-amber-300";
+  const width = count > 0 ? Math.max(share * 100, 12) : 0;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 text-[11px] text-slate-400">
+        <span className="uppercase tracking-[0.18em]">{label}</span>
+        <span>{count}</span>
+      </div>
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-900/70">
+        <div className={`h-full rounded-full ${accent}`} style={{ width: `${width}%` }} />
+      </div>
     </div>
   );
 }

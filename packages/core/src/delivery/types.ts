@@ -365,6 +365,7 @@ export const DeliverySummarySchema = z.object({
   unmatchedImportAttempts: z.number().int().nonnegative(),
   packetStatusCounts: z.record(z.string(), z.number().int().nonnegative()),
   toolUsage: z.record(z.string(), z.number().int().nonnegative()),
+  importConfidenceCounts: z.record(z.string(), z.number().int().nonnegative()),
   findingCategoryCounts: z.record(z.string(), z.number().int().nonnegative()),
   findingSeverityCounts: z.record(z.string(), z.number().int().nonnegative()),
   remediationPriorityCounts: z.record(z.string(), z.number().int().nonnegative()),

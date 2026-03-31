@@ -37,6 +37,14 @@ export function countRemediationPriorityCounts(remediations: RemediationTask[]):
   return counts;
 }
 
+export function countImportConfidenceCounts(imports: PacketImport[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const importRecord of imports) {
+    increment(counts, importRecord.confidence);
+  }
+  return counts;
+}
+
 export function createEmptyDeliverySummary(workspaceId?: string): DeliverySummary {
   return {
     workspaceId,
@@ -52,6 +60,7 @@ export function createEmptyDeliverySummary(workspaceId?: string): DeliverySummar
     unmatchedImportAttempts: 0,
     packetStatusCounts: {},
     toolUsage: {},
+    importConfidenceCounts: {},
     findingCategoryCounts: {},
     findingSeverityCounts: {},
     remediationPriorityCounts: {},
@@ -80,6 +89,9 @@ export function accumulateDeliverySummary(summary: DeliverySummary, session: Del
   }
   for (const exported of session.exports) {
     increment(summary.toolUsage, exported.targetTool);
+  }
+  for (const [confidence, count] of Object.entries(countImportConfidenceCounts(session.imports))) {
+    summary.importConfidenceCounts[confidence] = (summary.importConfidenceCounts[confidence] ?? 0) + count;
   }
   for (const [category, count] of Object.entries(countFindingCategoryCounts(session.findings))) {
     summary.findingCategoryCounts[category] = (summary.findingCategoryCounts[category] ?? 0) + count;

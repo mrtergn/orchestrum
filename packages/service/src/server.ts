@@ -2,28 +2,24 @@ import express from "express";
 import cors from "cors";
 import path from "node:path";
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import chokidar from "chokidar";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   loadWorkspaces,
-  loadAnalytics,
-  loadOpportunities,
   migrateRuns,
   writeCrashReport,
   getCurrentVersion,
   StateIndex,
   Logger,
-  readTailLines,
   recoverInterruptedRuns,
-  getLicenseStatus,
-  isFeatureAllowed,
   DEFAULT_SERVICE_PORT
 } from "@orchestrum/core";
 import { writeJson } from "@orchestrum/core";
 import { AgentPlatform } from "./agentPlatform.js";
 import { registerDeliveryRoutes } from "./routes/delivery.js";
+import { registerInsightsOpsRoutes } from "./routes/insightsOps.js";
+import { registerMetaOpsRoutes } from "./routes/metaOps.js";
 import { registerMissionRoutes } from "./routes/missions.js";
 import { registerPromptOpsRoutes } from "./routes/promptOps.js";
 import { registerRunRoutes } from "./routes/runs.js";
@@ -95,103 +91,20 @@ export async function startService(options: ServiceOptions = {}) {
     next();
   });
 
-  app.get("/health", (_req, res) => {
-    res.json({ ok: true, runsDir });
-  });
-
-  app.get("/meta/version", async (_req, res) => {
-    const version = await getCurrentVersion(rootDir).catch(() => null);
-    res.json({ version });
-  });
-
-  app.get("/meta/changelog", async (_req, res) => {
-    const filePath = path.join(rootDir, "CHANGELOG.md");
-    const content = await fs.readFile(filePath, "utf8").catch(() => "");
-    res.json({ content });
-  });
-
-  app.get("/meta/eula", async (_req, res) => {
-    const licensePath = path.join(rootDir, "LICENSE");
-    const fallbackPath = path.join(rootDir, "EULA.md");
-    const content =
-      (await fs.readFile(licensePath, "utf8").catch(() => "")) ||
-      (await fs.readFile(fallbackPath, "utf8").catch(() => ""));
-    res.json({ content });
-  });
-
-  app.get("/meta/about", async (_req, res) => {
-    const version = await getCurrentVersion(rootDir).catch(() => null);
-    res.json({ version, edition: "Open Source", license: { name: "MIT" } });
-  });
-
   const useKeychain = process.env.ORCHESTRUM_USE_KEYCHAIN === "1";
-
-  app.get("/logs/service", async (req, res) => {
-    const tailRaw = req.query.tail ? Number(req.query.tail) : 200;
-    const tail = Number.isFinite(tailRaw) && tailRaw > 0 ? tailRaw : 200;
-    const logPath = path.join(rootDir, "logs", "service.ndjson");
-    const lines = fsSync.existsSync(logPath) ? await readTailLines(logPath, tail) : [];
-    res.json({ lines });
-  });
-
-  app.get("/analytics", async (req, res) => {
-    const license = await getLicenseStatus();
-    const tier = license.valid ? license.tier : "Free";
-    if (!isFeatureAllowed(tier, "analytics")) {
-      return res.status(403).json({ error: "Analytics requires Pro tier." });
-    }
-    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
-    if (!workspacePath) return res.json({ analytics: null });
-    let analytics = await loadAnalytics(workspacePath);
-    if (!analytics || analytics.runs === 0) {
-      const runs = await stateIndex.queryRuns(workspaceId).catch(() => []);
-      analytics = {
-        runs: runs.length,
-        successes: runs.filter((run) => run.status === "finished").length,
-        failures: runs.filter((run) => run.status === "failed").length,
-        totalCost: 0,
-        costPerFeature: 0,
-        perAgent: {},
-        loopCounts: { total: 0, avg: 0 },
-        failureTypes: { policy: 0, audit: 0, test: 0, security: 0 },
-        trends: { cost: [], successRate: [], loops: [], reward: [] },
-        testStability: { total: 0, failed: 0, index: 0 },
-        modelUsage: {}
-      };
-    }
-    res.json({ analytics });
-  });
-
-  app.get("/opportunities", async (req, res) => {
-    const workspacePath = await resolveWorkspacePath(rootDir, req.query.workspace as string | undefined);
-    if (!workspacePath) return res.json({ opportunities: [] });
-    const opportunities = await loadOpportunities(workspacePath);
-    res.json({ opportunities });
-  });
-
-  app.post("/opportunities/run", async (req, res) => {
-    const workspacePath = await resolveWorkspacePath(rootDir, req.body?.workspaceId);
-    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
-    const workspaceId = String(req.body?.workspaceId ?? "");
-    const goal = req.body?.title ?? "Improve project";
-    try {
-      const result = await agentPlatform.startMission({
-        runsDir,
-        workspaceId,
-        repoPath: workspacePath,
-        templateId: "feature-dev",
-        goal
-      });
-      void stateIndex.rebuild().catch(() => undefined);
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ ok: false, error: err?.message ?? "Mission start failed" });
-    }
-  });
 
   const resolveWorkspace = (workspaceId?: string) => resolveWorkspacePath(rootDir, workspaceId);
 
+  registerMetaOpsRoutes(app, {
+    rootDir,
+    runsDir
+  });
+  registerInsightsOpsRoutes(app, {
+    runsDir,
+    stateIndex,
+    agentPlatform,
+    resolveWorkspacePath: resolveWorkspace
+  });
   registerWorkspaceRegistryRoutes(app, {
     rootDir,
     runIndex,

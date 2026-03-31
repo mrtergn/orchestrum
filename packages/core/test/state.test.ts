@@ -104,6 +104,7 @@ test("state index exposes latest delivery import analysis in summary", async () 
   await index.rebuild();
 
   const summary = await index.getDeliverySummary("demo");
+  assert.equal(summary.importConfidenceCounts.high, 1);
   assert.equal(summary.latestImport?.runId, session.runId);
   assert.equal(summary.latestImport?.matchStatus, "matched");
   assert.equal(summary.latestImport?.confidence, "high");

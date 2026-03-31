@@ -176,6 +176,7 @@ test("delivery session supports packet export, import, findings, and remediation
   assert.equal(summary.findingCategoryCounts.delivery_blocker, 1);
   assert.equal(summary.findingSeverityCounts.high, 1);
   assert.equal(summary.remediationPriorityCounts.high, 1);
+  assert.equal(summary.importConfidenceCounts.high, 3);
   assert.equal(summary.latestImport?.runId, sessionResult.runId);
   assert.equal(summary.latestImport?.matchStatus, "matched");
   assert.equal(summary.latestImport?.confidence, "high");

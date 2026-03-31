@@ -15,6 +15,7 @@ import {
 import {
   countFindingCategoryCounts,
   countFindingSeverityCounts,
+  countImportConfidenceCounts,
   countPacketStatuses,
   countRemediationPriorityCounts,
   createEmptyDeliverySummary,
@@ -60,6 +61,7 @@ export type IndexedDeliverySessionRecord = {
   unmatchedImportAttempts: number;
   packetStatusCounts: Record<string, number>;
   toolUsage: Record<string, number>;
+  importConfidenceCounts: Record<string, number>;
   findingCategoryCounts: Record<string, number>;
   findingSeverityCounts: Record<string, number>;
   remediationPriorityCounts: Record<string, number>;
@@ -178,8 +180,8 @@ export class StateIndex {
     await this.health();
     if (!this.db) return [];
     const statement = workspaceId
-      ? this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions WHERE workspace_id = ? ORDER BY updated_at DESC")
-      : this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions ORDER BY updated_at DESC");
+      ? this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions WHERE workspace_id = ? ORDER BY updated_at DESC")
+      : this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions ORDER BY updated_at DESC");
     const rows: IndexedDeliverySessionRecord[] = [];
     if (workspaceId) {
       statement.bind([workspaceId]);
@@ -199,6 +201,7 @@ export class StateIndex {
         unmatchedImportAttempts: Number(row.unmatched_import_attempts ?? 0),
         packetStatusCounts: parseJsonRecord(row.packet_status_counts),
         toolUsage: parseJsonRecord(row.tool_usage),
+        importConfidenceCounts: parseJsonRecord(row.import_confidence_counts),
         findingCategoryCounts: parseJsonRecord(row.finding_category_counts),
         findingSeverityCounts: parseJsonRecord(row.finding_severity_counts),
         remediationPriorityCounts: parseJsonRecord(row.remediation_priority_counts),
@@ -229,6 +232,9 @@ export class StateIndex {
       }
       for (const [tool, count] of Object.entries(session.toolUsage)) {
         summary.toolUsage[tool] = (summary.toolUsage[tool] ?? 0) + count;
+      }
+      for (const [confidence, count] of Object.entries(session.importConfidenceCounts)) {
+        summary.importConfidenceCounts[confidence] = (summary.importConfidenceCounts[confidence] ?? 0) + count;
       }
       for (const [category, count] of Object.entries(session.findingCategoryCounts)) {
         summary.findingCategoryCounts[category] = (summary.findingCategoryCounts[category] ?? 0) + count;
@@ -313,12 +319,13 @@ export class StateIndex {
         if (deliverySession) {
           const packetStatusCounts = countPacketStatuses(deliverySession.packets);
           const toolUsage = countToolUsage(deliverySession.exports);
+          const importConfidenceCounts = countImportConfidenceCounts(deliverySession.imports);
           const findingCategoryCounts = countFindingCategoryCounts(deliverySession.findings);
           const findingSeverityCounts = countFindingSeverityCounts(deliverySession.findings);
           const remediationPriorityCounts = countRemediationPriorityCounts(deliverySession.remediations);
           const latestImport = toDeliverySummaryLatestImport(deliverySession.imports[0], deliverySession.runId);
           this.db.run(
-            "INSERT OR REPLACE INTO delivery_sessions (workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO delivery_sessions (workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
               record.workspaceId,
               deliverySession.runId,
@@ -332,6 +339,7 @@ export class StateIndex {
               deliverySession.imports.filter((item) => item.matchStatus !== "matched").length,
               JSON.stringify(packetStatusCounts),
               JSON.stringify(toolUsage),
+              JSON.stringify(importConfidenceCounts),
               JSON.stringify(findingCategoryCounts),
               JSON.stringify(findingSeverityCounts),
               JSON.stringify(remediationPriorityCounts),
@@ -437,6 +445,7 @@ export class StateIndex {
         unmatched_import_attempts INTEGER,
         packet_status_counts TEXT,
         tool_usage TEXT,
+        import_confidence_counts TEXT,
         finding_category_counts TEXT,
         finding_severity_counts TEXT,
         remediation_priority_counts TEXT,
@@ -445,6 +454,7 @@ export class StateIndex {
       );
     `);
     for (const column of [
+      "ALTER TABLE delivery_sessions ADD COLUMN import_confidence_counts TEXT",
       "ALTER TABLE delivery_sessions ADD COLUMN finding_category_counts TEXT",
       "ALTER TABLE delivery_sessions ADD COLUMN finding_severity_counts TEXT",
       "ALTER TABLE delivery_sessions ADD COLUMN remediation_priority_counts TEXT",
