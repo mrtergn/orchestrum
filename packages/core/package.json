@@ -1,6 +1,6 @@
 {
   "name": "@orchestrum/core",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -12,7 +12,8 @@
   "scripts": {
     "dev": "node --import tsx src/cli.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test --import tsx test/all.test.ts"
+    "test": "vitest run",
+    "coverage": "vitest run --coverage"
   },
   "dependencies": {
     "commander": "^12.0.0",
@@ -29,6 +30,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/sql.js": "^1.4.11",
-    "typescript": "^5.6.2"
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.8"
   }
 }

@@ -65,6 +65,7 @@ const StepSchema = StepBaseSchema.extend({
 });
 
 const WorkflowSchema = z.object({
+  extends: z.string().optional(),
   name: z.string(),
   agents: z.record(AgentSchema),
   enable_auto_tests: z.boolean().optional(),
@@ -115,8 +116,7 @@ export type Workflow = z.infer<typeof WorkflowSchema> & {
 };
 
 export async function loadWorkflow(filePath: string): Promise<Workflow> {
-  const raw = await fs.readFile(filePath, "utf8");
-  const data = yaml.parse(raw);
+  const data = await loadWorkflowSource(filePath);
   const parsed = WorkflowSchema.safeParse(data);
   if (!parsed.success) {
     const message = parsed.error.issues.map((i) => i.message).join("; ");
@@ -162,6 +162,49 @@ export async function loadWorkflow(filePath: string): Promise<Workflow> {
     steps,
     __path: filePath
   };
+}
+
+async function loadWorkflowSource(filePath: string, seen = new Set<string>()): Promise<unknown> {
+  const absolute = path.resolve(filePath);
+  if (seen.has(absolute)) {
+    throw new Error(`Circular workflow extends detected: ${absolute}`);
+  }
+  seen.add(absolute);
+  const raw = await fs.readFile(absolute, "utf8");
+  const parsed = yaml.parse(raw) as Record<string, unknown> | null;
+  if (!parsed || typeof parsed !== "object") {
+    return {};
+  }
+  const baseRef = typeof parsed.extends === "string" ? parsed.extends : null;
+  if (!baseRef) {
+    return parsed;
+  }
+  const basePath = path.resolve(path.dirname(absolute), baseRef);
+  const base = await loadWorkflowSource(basePath, seen);
+  const merged = mergeWorkflow(base as Record<string, unknown>, parsed);
+  delete (merged as Record<string, unknown>).extends;
+  return merged;
+}
+
+function mergeWorkflow(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    if (key === "extends") continue;
+    const current = merged[key];
+    if (Array.isArray(value)) {
+      merged[key] = value;
+      continue;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      merged[key] = mergeWorkflow(
+        (current && typeof current === "object" && !Array.isArray(current)) ? (current as Record<string, unknown>) : {},
+        value as Record<string, unknown>
+      );
+      continue;
+    }
+    merged[key] = value;
+  }
+  return merged;
 }
 
 function normalizeStep(step: StepDefinition, workflowDir: string): StepDefinition {

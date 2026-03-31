@@ -60,12 +60,14 @@ export async function appendLine(filePath: string, line: string): Promise<void> 
   const dir = path.dirname(filePath);
   await ensureDir(dir);
   await fs.appendFile(filePath, `${line}\n`, "utf8");
+  let fd: number | null = null;
   try {
-    const fd = fsSync.openSync(filePath, "r+");
+    fd = fsSync.openSync(filePath, "r+");
     fsSync.fsyncSync(fd);
-    fsSync.closeSync(fd);
-  } catch {
-    // best effort
+  } finally {
+    if (fd !== null) {
+      fsSync.closeSync(fd);
+    }
   }
 }
 

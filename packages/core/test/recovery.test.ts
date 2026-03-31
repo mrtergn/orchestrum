@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -8,7 +8,7 @@ import { writeJson } from "../src/runner/fs.js";
 
 test("recoverInterruptedRuns marks running runs as interrupted", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-recover-"));
-  const runDir = path.join(tmp, "run1");
+  const runDir = path.join(tmp, "workspace-a", "run1");
   await fs.mkdir(runDir, { recursive: true });
   await writeJson(path.join(runDir, "run.json"), {
     runId: "run1",

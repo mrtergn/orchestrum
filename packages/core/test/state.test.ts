@@ -1,8 +1,9 @@
-import { test } from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { StateIndex } from "../src/state/index.js";
 
 test("state index rebuilds from workspace and run files", async () => {
@@ -44,4 +45,11 @@ test("state index rebuilds from workspace and run files", async () => {
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runId, "run-1");
   assert.equal(runs[0]!.readinessScore, 80);
+});
+
+test("state index SQL statements avoid template interpolation", async () => {
+  const sourcePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "state", "index.ts");
+  const source = await fs.readFile(sourcePath, "utf8");
+  assert.equal(/WHERE\\s+workspace_id\\s*=\\s*\\$\\{/.test(source), false);
+  assert.equal(/INSERT[\\s\\S]{0,200}\\$\\{/.test(source), false);
 });

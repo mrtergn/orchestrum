@@ -1,3 +1,6 @@
 @echo off
+setlocal enabledelayedexpansion
 REM Orchestrum CLI wrapper for Windows
-node "C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js" exec --no-workspaces -- orchestrum %*
+set "NODE_EXE=node"
+for /f "usebackq delims=" %%i in (`node -e "process.stdout.write(process.execPath)"`) do set "NODE_EXE=%%i"
+"%NODE_EXE%" "%~dp0..\packages\cli\bin\orchestrum.js" %*

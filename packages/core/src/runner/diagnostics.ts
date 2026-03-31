@@ -81,14 +81,11 @@ async function copyRunDiagnostics(runDir: string, bundleDir: string, maxEvents: 
 }
 
 async function findRunDir(runsDir: string, runId: string, workspaceId?: string): Promise<string | null> {
-  const legacy = path.join(runsDir, runId);
   if (workspaceId) {
     const candidate = path.join(runsDir, workspaceId, runId);
     if (fsSync.existsSync(candidate)) return candidate;
-    if (fsSync.existsSync(legacy)) return legacy;
     return null;
   }
-  if (fsSync.existsSync(legacy)) return legacy;
   const entries = await fs.readdir(runsDir, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;

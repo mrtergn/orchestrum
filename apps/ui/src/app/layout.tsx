@@ -9,6 +9,7 @@ import { RunConfigModal } from "@/components/RunConfigModal";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Notifications } from "@/components/Notifications";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 export const metadata: Metadata = {
   title: {
@@ -49,12 +50,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <StatusBar />
               </header>
               <div className="mb-4">
-                <Notifications />
+                <ErrorBoundary fallbackTitle="Notifications failed to render.">
+                  <Notifications />
+                </ErrorBoundary>
               </div>
               <div className="mb-6">
-                <StatusCenter />
+                <ErrorBoundary fallbackTitle="Status Center failed to render.">
+                  <StatusCenter />
+                </ErrorBoundary>
               </div>
-              {children}
+              <ErrorBoundary fallbackTitle="Page content failed to render.">
+                {children}
+              </ErrorBoundary>
             </div>
           </div>
           <RunConfigModal />

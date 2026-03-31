@@ -14,7 +14,8 @@ const notes = notesFlag !== -1 && args[notesFlag + 1]
   : "Notes pending.";
 
 const date = new Date().toISOString().slice(0, 10);
-const entry = `## ${version} - ${date}\n- ${notes}\n\n`;
+const heading = `## ${version} - ${date}`;
+const entry = `${heading}\n- ${notes}\n\n`;
 
 const filePath = path.resolve("CHANGELOG.md");
 let content = "# Changelog\n\n";
@@ -28,6 +29,11 @@ if (!content.includes("# Changelog")) {
   content = `# Changelog\n\n${content}`;
 }
 
+const duplicatePattern = new RegExp(`^##\\s+${escapeRegExp(version)}\\b`, "m");
+if (duplicatePattern.test(content)) {
+  throw new Error(`CHANGELOG already contains version ${version}.`);
+}
+
 content = content.trimEnd() + "\n\n" + entry;
 await fs.writeFile(filePath, content, "utf8");
 console.log(`Updated ${filePath} with version ${version}.`);
@@ -39,4 +45,8 @@ async function readVersion() {
   } catch {
     return "Unreleased";
   }
+}
+
+function escapeRegExp(input) {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -3,6 +3,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, writeJson, readJsonIfExists, writeText } from "./fs.js";
+import { APPROVAL_TTL_HOURS } from "../constants.js";
 
 export type WorkspaceApproval = {
   stepId: string;
@@ -18,6 +19,8 @@ export type ApprovalRequest = {
   reason: string;
   findings: unknown;
   ts: string;
+  iat?: string;
+  expiresAt?: string;
 };
 
 export function createApprovalToken(): string {
@@ -46,7 +49,13 @@ export async function isWorkspaceApproved(repoPath: string, stepId: string, kind
 export async function writeApprovalRequest(runDir: string, request: ApprovalRequest): Promise<void> {
   const approvalsDir = path.join(runDir, "approvals");
   await ensureDir(approvalsDir);
-  await writeJson(path.join(approvalsDir, `${request.token}.json`), request);
+  const iat = request.iat ?? request.ts ?? new Date().toISOString();
+  const expiresAt = request.expiresAt ?? new Date(new Date(iat).getTime() + APPROVAL_TTL_HOURS * 60 * 60 * 1000).toISOString();
+  await writeJson(path.join(approvalsDir, `${request.token}.json`), {
+    ...request,
+    iat,
+    expiresAt
+  } satisfies ApprovalRequest);
 }
 
 export async function approveStep(runDir: string, stepId: string): Promise<void> {
@@ -58,6 +67,7 @@ export async function approveStep(runDir: string, stepId: string): Promise<void>
 export async function approveToken(runsDir: string, token: string): Promise<{ runId: string; stepId: string } | null> {
   const match = await findApprovalRequest(runsDir, token);
   if (!match) return null;
+  if (isApprovalExpired(match.request)) return null;
   await approveStep(match.runDir, match.request.stepId);
   return { runId: match.request.runId, stepId: match.request.stepId };
 }
@@ -70,11 +80,6 @@ export async function findApprovalRequest(
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(runsDir, entry.name);
-    const legacy = path.join(candidate, "approvals", `${token}.json`);
-    if (fsSync.existsSync(legacy)) {
-      const request = await readJsonIfExists<ApprovalRequest>(legacy);
-      if (request) return { runDir: candidate, request };
-    }
     const workspaceEntries = await fs.readdir(candidate, { withFileTypes: true }).catch(() => []);
     for (const runEntry of workspaceEntries) {
       if (!runEntry.isDirectory()) continue;
@@ -86,4 +91,11 @@ export async function findApprovalRequest(
     }
   }
   return null;
+}
+
+export function isApprovalExpired(request: Pick<ApprovalRequest, "expiresAt">, now = Date.now()): boolean {
+  if (!request.expiresAt) return false;
+  const expiry = Date.parse(request.expiresAt);
+  if (Number.isNaN(expiry)) return true;
+  return now > expiry;
 }

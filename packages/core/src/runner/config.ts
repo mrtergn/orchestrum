@@ -4,6 +4,7 @@ import { z } from "zod";
 import { ensureDir, writeJson } from "./fs.js";
 import { applyProfileToConfig, loadWorkspaceProfile } from "../profiles/index.js";
 import { getAppHome } from "../appHome.js";
+import { migrateOrchestrumConfig } from "../migrations/index.js";
 
 const ConcurrencySchema = z.union([
   z.number().int().min(1),
@@ -27,6 +28,7 @@ const PolicySchema = z.object({
 });
 
 const ConfigSchema = z.object({
+  version: z.literal(1).optional(),
   defaultWorkflow: z.string().optional(),
   concurrency: ConcurrencySchema.optional(),
   models: z.record(z.string()).optional(),
@@ -164,7 +166,7 @@ export function getGlobalConfigPath(): string {
 async function loadConfigFile(filePath: string): Promise<OrchestrumConfig | null> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
-    const data = JSON.parse(raw);
+    const data = migrateOrchestrumConfig(JSON.parse(raw));
     const parsed = ConfigSchema.safeParse(data);
     if (!parsed.success) {
       const message = parsed.error.issues.map((i) => i.message).join("; ");

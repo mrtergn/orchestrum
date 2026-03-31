@@ -5,6 +5,7 @@ import type { Workflow } from "../runner/workflow.js";
 import type { RunState } from "../runner/types.js";
 import type { RunAnalysis } from "../analytics/runAnalysis.js";
 import { writeJson, writeText } from "../runner/fs.js";
+import { MAX_PROMPT_VERSIONS } from "../constants.js";
 
 export type PromptHistoryFile = {
   prompts: Record<string, PromptRecord>;
@@ -84,6 +85,7 @@ export async function updatePromptHistory(options: {
         runId: options.runMeta.runId
       };
       record.versions.push(version);
+      record.versions = record.versions.slice(-MAX_PROMPT_VERSIONS);
       record.currentVersionId = version.id;
     }
 
@@ -132,6 +134,7 @@ export async function approvePromptSuggestion(options: {
       runId: suggestion.runId
     };
     record.versions.push(version);
+    record.versions = record.versions.slice(-MAX_PROMPT_VERSIONS);
     record.currentVersionId = version.id;
   }
   await savePromptHistory(options.workspacePath, history);

@@ -1,10 +1,19 @@
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import type { RunState } from "../runner/types.js";
 import { writeJson } from "../runner/fs.js";
 
 export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_CONFIG_VERSION = 1;
+
+export function migrateOrchestrumConfig(input: unknown): Record<string, unknown> {
+  const config = (input && typeof input === "object") ? { ...(input as Record<string, unknown>) } : {};
+  const version = typeof config.version === "number" ? config.version : 0;
+  if (version < CURRENT_CONFIG_VERSION) {
+    config.version = CURRENT_CONFIG_VERSION;
+  }
+  return config;
+}
 
 export async function migrateRuns(runsDir: string): Promise<{ migrated: number }> {
   let migrated = 0;
@@ -12,12 +21,6 @@ export async function migrateRuns(runsDir: string): Promise<{ migrated: number }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(runsDir, entry.name);
-    const legacyRun = path.join(candidate, "run.json");
-    if (fsSync.existsSync(legacyRun)) {
-      const updated = await migrateRun(candidate);
-      if (updated) migrated += 1;
-      continue;
-    }
     const workspaceRuns = await fs.readdir(candidate, { withFileTypes: true }).catch(() => []);
     for (const runEntry of workspaceRuns) {
       if (!runEntry.isDirectory()) continue;

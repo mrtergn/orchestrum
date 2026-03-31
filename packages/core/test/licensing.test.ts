@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { enforceFeature, getLicenseStatus, isFeatureAllowed } from "../src/licensing/index.js";
 
 test("open-source licensing allows every feature", async () => {

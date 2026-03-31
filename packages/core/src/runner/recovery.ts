@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import type { RunState } from "./types.js";
 import { writeJson } from "./fs.js";
@@ -10,11 +9,6 @@ export async function recoverInterruptedRuns(runsDir: string): Promise<{ recover
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(runsDir, entry.name);
-    const legacyRun = path.join(candidate, "run.json");
-    if (fsSync.existsSync(legacyRun)) {
-      if (await recoverRun(candidate)) recovered += 1;
-      continue;
-    }
     const workspaceRuns = await fs.readdir(candidate, { withFileTypes: true }).catch(() => []);
     for (const runEntry of workspaceRuns) {
       if (!runEntry.isDirectory()) continue;

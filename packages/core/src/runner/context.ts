@@ -1,5 +1,6 @@
 ﻿import fs from "node:fs/promises";
 import path from "node:path";
+import { MAX_FILE_CHARS, MAX_LIST_ENTRIES } from "../constants.js";
 
 export type RepoContextOptions = {
   repoPath: string;
@@ -9,9 +10,6 @@ export type RepoContextOptions = {
   index?: RepoIndex;
   memorySummaries?: string[];
 };
-
-const MAX_FILE_CHARS = 6000;
-const MAX_LIST_ENTRIES = 200;
 
 export type RepoIndex = {
   topLevel: string[];

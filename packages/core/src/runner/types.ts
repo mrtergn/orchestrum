@@ -1,4 +1,6 @@
-﻿export type AgentStatus = "active" | "idle" | "sleeping" | "failed" | "completed";
+﻿import type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus } from "../types/status.js";
+
+export type AgentStatus = "active" | "idle" | "sleeping" | "failed" | "completed";
 
 export type AgentState = {
   agentId: string;
@@ -6,17 +8,7 @@ export type AgentState = {
   currentStepId?: string;
 };
 
-export type StepStatus =
-  | "pending"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cached"
-  | "skipped"
-  | "cancelled"
-  | "waiting_input"
-  | "awaiting_approval"
-  | "blocked";
+export type StepStatus = CanonicalStepStatus | "completed" | "failed" | "cancelled" | "waiting_input" | "awaiting_approval" | "blocked";
 
 export type StepState = {
   stepId: string;
@@ -41,7 +33,7 @@ export type StepState = {
   } | null;
 };
 
-export type RunStatus = "running" | "finished" | "failed" | "cancelled" | "interrupted";
+export type RunStatus = CanonicalRunStatus | "finished";
 
 export type RunKind = "workflow" | "mission" | "qa" | "benchmark" | "canary" | "delivery";
 
@@ -60,6 +52,24 @@ export type GovernanceProfile = {
 
 export type RunState = {
   schemaVersion?: number;
+  meta?: {
+    id?: string;
+    workspaceId?: string;
+    workflowPath?: string;
+    startedAt?: string;
+    finishedAt?: string | null;
+  };
+  stats?: {
+    totalCost?: number;
+    totalTokens?: number;
+    totalSteps?: number;
+    riskScore?: number;
+  };
+  steps?: StepState[];
+  governance?: {
+    governanceEvents?: Array<Record<string, unknown>>;
+    approvalTokens?: string[];
+  };
   runId: string;
   kind?: RunKind;
   status: RunStatus;

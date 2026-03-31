@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, writeJson, readJsonIfExists } from "./fs.js";
 import { getAppHome } from "../appHome.js";
+import { SecretError } from "../errors.js";
 
 type EncryptedStore = {
   version: number;
@@ -30,7 +31,6 @@ export function getWorkspaceSecretsPath(repoPath: string): string {
 }
 
 const KEYCHAIN_SERVICE = "orchestrum";
-const LEGACY_KEYCHAIN_SERVICE = "orchestrum";
 
 export async function listSecrets(scope: SecretScope, repoPath?: string): Promise<string[]> {
   const store = await loadEncryptedStore(scope, repoPath);
@@ -46,15 +46,13 @@ export async function setSecret(options: {
   useKeychain?: boolean;
 }): Promise<void> {
   if (options.useKeychain) {
-    const keytar = await tryLoadKeytar();
-    if (keytar) {
-      await keytar.setPassword(KEYCHAIN_SERVICE, options.name, options.value);
-      return;
-    }
+    const keytar = await requireKeytar("set");
+    await keytar.setPassword(KEYCHAIN_SERVICE, options.name, options.value);
+    return;
   }
   const passphrase = options.passphrase ?? process.env.ORCHESTRUM_SECRETS_PASSPHRASE;
   if (!passphrase) {
-    throw new Error("ORCHESTRUM_SECRETS_PASSPHRASE is required to set encrypted secrets.");
+    throw new SecretError("ORCHESTRUM_SECRETS_PASSPHRASE is required to set encrypted secrets.", "secret.missing_passphrase");
   }
   const store = (await loadEncryptedStore(options.scope, options.repoPath, passphrase)) ?? {
     version: STORE_VERSION,
@@ -75,11 +73,8 @@ export async function unsetSecret(options: {
   useKeychain?: boolean;
 }): Promise<void> {
   if (options.useKeychain) {
-    const keytar = await tryLoadKeytar();
-    if (keytar) {
-      await keytar.deletePassword(KEYCHAIN_SERVICE, options.name);
-      await keytar.deletePassword(LEGACY_KEYCHAIN_SERVICE, options.name);
-    }
+    const keytar = await requireKeytar("unset");
+    await keytar.deletePassword(KEYCHAIN_SERVICE, options.name);
   }
   const passphrase = options.passphrase ?? process.env.ORCHESTRUM_SECRETS_PASSPHRASE;
   if (!passphrase) return;
@@ -99,13 +94,9 @@ export async function getSecret(options: {
   const envValue = process.env[options.name];
   if (envValue) return envValue;
   if (options.useKeychain) {
-    const keytar = await tryLoadKeytar();
-    if (keytar) {
-      const stored = await keytar.getPassword(KEYCHAIN_SERVICE, options.name);
-      if (stored) return stored;
-      const legacy = await keytar.getPassword(LEGACY_KEYCHAIN_SERVICE, options.name);
-      if (legacy) return legacy;
-    }
+    const keytar = await requireKeytar("get");
+    const stored = await keytar.getPassword(KEYCHAIN_SERVICE, options.name);
+    if (stored) return stored;
   }
   const passphrase = options.passphrase ?? process.env.ORCHESTRUM_SECRETS_PASSPHRASE;
   if (!passphrase) return null;
@@ -157,7 +148,7 @@ async function saveEncryptedStore(scope: SecretScope, repoPath: string | undefin
 
 function resolveSecretsPath(scope: SecretScope, repoPath?: string): string {
   if (scope === "workspace") {
-    if (!repoPath) throw new Error("repoPath required for workspace secrets");
+    if (!repoPath) throw new SecretError("repoPath required for workspace secrets", "secret.repo_path_required");
     return getWorkspaceSecretsPath(repoPath);
   }
   return getGlobalSecretsPath();
@@ -203,4 +194,14 @@ async function tryLoadKeytar(): Promise<any | null> {
   } catch {
     return null;
   }
+}
+
+async function requireKeytar(action: "set" | "unset" | "get"): Promise<any> {
+  const keytar = await tryLoadKeytar();
+  if (keytar) return keytar;
+  throw new SecretError(
+    `Cannot ${action} secret via keychain because keytar is unavailable. Install optional dependency "keytar" and system keychain libraries, or disable keychain mode and use ORCHESTRUM_SECRETS_PASSPHRASE.`,
+    "secret.keychain_unavailable",
+    { action }
+  );
 }

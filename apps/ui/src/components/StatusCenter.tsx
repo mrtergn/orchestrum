@@ -1,23 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppUi, type AppToast } from "@/components/AppUiProvider";
-
-type WorkspaceSummary = {
-  id: string;
-  name?: string;
-  path: string;
-  status?: string;
-  validation?: {
-    exists: boolean;
-    readable: boolean;
-    isDirectory: boolean;
-    isGitRepo: boolean;
-    error?: string;
-  };
-};
+import { useRuns } from "@/lib/queries/useRuns";
+import { useWorkspaces, type WorkspaceSummary } from "@/lib/queries/useWorkspaces";
+import { useAgents } from "@/lib/queries/useAgents";
+import { fetchJson } from "@/lib/queries/client";
+import { useEventSource } from "@/lib/hooks/useEventSource";
 
 type Banner = {
   id: string;
@@ -44,6 +36,7 @@ const LAST_FAILED_KEY = "orchestrum.status.lastFailedRun";
 
 export function StatusCenter() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const {
     selectedWorkspaceId,
     onboardingSkipped,
@@ -51,73 +44,67 @@ export function StatusCenter() {
     pushToast,
     dismissToast
   } = useAppUi();
-  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [hasProviderKey, setHasProviderKey] = useState(false);
-  const [agentCount, setAgentCount] = useState(0);
-  const [orgNodeCount, setOrgNodeCount] = useState(0);
-  const [platformError, setPlatformError] = useState<string>("");
+
+  const { data: workspaces = [] } = useWorkspaces();
+  const { data: agents = [] } = useAgents();
+  const { data: runs = [] } = useRuns(selectedWorkspaceId || undefined);
+
+  const { data: secretsData } = useQuery({
+    queryKey: ["secrets"],
+    queryFn: () => fetchJson<{ keys?: Record<string, string | null> }>("/api/secrets"),
+    staleTime: 5000
+  });
+
+  const { data: orgData } = useQuery({
+    queryKey: ["org"],
+    queryFn: () => fetchJson<{ nodes?: unknown[] }>("/api/org"),
+    staleTime: 5000
+  });
+
+  const { data: tasksData } = useQuery({
+    queryKey: ["tasks"],
+    queryFn: () => fetchJson<{ tasks?: PlatformTaskSummary[] }>("/api/tasks"),
+    staleTime: 5000
+  });
+
+  const handleSseMessage = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["runs"] });
+    void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    void queryClient.invalidateQueries({ queryKey: ["agents"] });
+    void queryClient.invalidateQueries({ queryKey: ["org"] });
+    void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+  }, [queryClient]);
+
+  useEventSource("/api/events", handleSseMessage);
 
   useEffect(() => {
-    const refresh = async () => {
-      const [workspaceRes, secretsRes, agentsRes, orgRes, tasksRes] = await Promise.all([
-        fetch("/api/workspaces", { cache: "no-store" }),
-        fetch("/api/secrets", { cache: "no-store" }),
-        fetch("/api/agents", { cache: "no-store" }),
-        fetch("/api/org", { cache: "no-store" }),
-        fetch("/api/tasks", { cache: "no-store" })
-      ]);
-      const workspaceData = workspaceRes.ok ? await workspaceRes.json() : { workspaces: [] };
-      const secretsData = secretsRes.ok ? await secretsRes.json() : { keys: {} };
-      const agentsData = agentsRes.ok ? await agentsRes.json() : { agents: [] };
-      const orgData = orgRes.ok ? await orgRes.json() : { nodes: [] };
-      const tasksData = tasksRes.ok ? await tasksRes.json() : { tasks: [] };
+    const latest = runs[0] as RunSummary | undefined;
+    if (!latest || latest.status !== "failed") return;
+    const lastSeen = localStorage.getItem(LAST_FAILED_KEY);
+    if (lastSeen === latest.runId) return;
+    localStorage.setItem(LAST_FAILED_KEY, latest.runId);
+    pushToast({
+      tone: "danger",
+      title: `Run ${latest.runId} failed`,
+      message: latest.error ?? "Review the run details and retry from the last step.",
+      actionLabel: "Retry from last step",
+      actionPayload: {
+        type: "retry-run",
+        runId: latest.runId,
+        workspaceId: latest.workspaceId ?? (selectedWorkspaceId || undefined)
+      }
+    });
+  }, [runs, pushToast, selectedWorkspaceId]);
 
-      const openAiOk = Boolean(secretsData.keys?.OPENAI_API_KEY);
-      const anthropicOk = Boolean(secretsData.keys?.ANTHROPIC_API_KEY);
-      const tasks = Array.isArray(tasksData.tasks) ? (tasksData.tasks as PlatformTaskSummary[]) : [];
-      const latestPlatformFailure = tasks.find((task) => task.status === "failed" && typeof task.resultSummary === "string" && task.resultSummary.trim());
-
-      setWorkspaces(workspaceData.workspaces ?? []);
-      setHasProviderKey(openAiOk || anthropicOk);
-      setAgentCount(Array.isArray(agentsData.agents) ? agentsData.agents.length : 0);
-      setOrgNodeCount(Array.isArray(orgData.nodes) ? orgData.nodes.length : 0);
-      setPlatformError(latestPlatformFailure?.resultSummary?.trim() ?? "");
-    };
-    void refresh();
-    const timer = setInterval(refresh, 8000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const checkFailedRun = async () => {
-      const query = selectedWorkspaceId ? `?workspace=${encodeURIComponent(selectedWorkspaceId)}` : "";
-      const runsRes = await fetch(`/api/runs${query}`, { cache: "no-store" });
-      if (!runsRes.ok) return;
-      const runs = (await runsRes.json()) as RunSummary[];
-      const latest = runs[0];
-      if (!latest || latest.status !== "failed") return;
-      const lastSeen = localStorage.getItem(LAST_FAILED_KEY);
-      if (lastSeen === latest.runId) return;
-      localStorage.setItem(LAST_FAILED_KEY, latest.runId);
-      pushToast({
-        tone: "danger",
-        title: `Run ${latest.runId} failed`,
-        message: latest.error ?? "Review the run details and retry from the last step.",
-        actionLabel: "Retry from last step",
-        actionPayload: {
-          type: "retry-run",
-          runId: latest.runId,
-          workspaceId: latest.workspaceId ?? (selectedWorkspaceId || undefined)
-        }
-      });
-    };
-    void checkFailedRun();
-    const timer = setInterval(checkFailedRun, 10000);
-    return () => clearInterval(timer);
-  }, [pushToast, selectedWorkspaceId]);
+  const hasProviderKey = Boolean(secretsData?.keys?.OPENAI_API_KEY || secretsData?.keys?.ANTHROPIC_API_KEY);
+  const agentCount = agents.length;
+  const orgNodeCount = Array.isArray(orgData?.nodes) ? orgData.nodes.length : 0;
+  const tasks = Array.isArray(tasksData?.tasks) ? tasksData.tasks : [];
+  const latestPlatformFailure = tasks.find((task) => task.status === "failed" && typeof task.resultSummary === "string" && task.resultSummary.trim());
+  const platformError = latestPlatformFailure?.resultSummary?.trim() ?? "";
 
   const selectedWorkspace = useMemo(
-    () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
+    () => (workspaces as WorkspaceSummary[]).find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
     [workspaces, selectedWorkspaceId]
   );
 

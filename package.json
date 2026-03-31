@@ -1,21 +1,21 @@
 {
   "name": "orchestrum-root",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.4.0",
   "type": "module",
   "bin": {
     "orchestrum": "packages/cli/bin/orchestrum.js",
     "orch": "packages/cli/bin/orchestrum.js"
   },
   "scripts": {
-    "bootstrap": "npm ci && npm install --no-package-lock --prefix packages/core && npm install --no-package-lock --prefix packages/service && npm ci --prefix apps/ui && npm install --no-package-lock --prefix apps/desktop",
+    "bootstrap": "npm ci && npm install --prefix packages/core && npm install --prefix packages/service && npm install --prefix apps/ui && npm install --prefix apps/desktop",
     "dev": "npm --prefix apps/ui run dev",
     "build": "npm run build:ui",
     "build:ui": "npm --prefix apps/ui run build",
     "build:service": "npm --prefix packages/service run build",
     "build:all": "npm run build:ui && npm run build:service",
     "lint": "npm --prefix apps/ui run lint",
-    "test": "npm run --prefix packages/core test",
+    "test": "vitest run --workspace vitest.workspace.ts",
     "typecheck": "npm run --prefix packages/core typecheck && npm run build:service",
     "verify": "npm run test && npm run typecheck && npm run lint && npm run build:desktop",
     "ui": "node packages/core/node_modules/tsx/dist/cli.mjs packages/core/src/cli.ts ui",
@@ -29,5 +29,8 @@
     "body-parser": "^2.2.2",
     "iconv-lite": "^0.7.2",
     "raw-body": "^3.0.2"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
   }
 }

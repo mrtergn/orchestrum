@@ -1,6 +1,6 @@
 {
   "name": "@orchestrum/ui",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.59.16",
+    "@tanstack/react-query-devtools": "^5.59.16",
     "@orchestrum/core": "file:../../packages/core",
     "dagre": "^0.8.5",
     "next": "^14.2.5",

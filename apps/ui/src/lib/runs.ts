@@ -163,12 +163,6 @@ export async function listRuns(workspaceId?: string): Promise<RunMeta[]> {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(runsDir, entry.name);
-    const legacyRun = path.join(candidate, "run.json");
-    if (fsSync.existsSync(legacyRun)) {
-      const meta = await readRunMeta(entry.name, "legacy");
-      if (meta) results.push(meta);
-      continue;
-    }
     const nested = await listRunsInDir(candidate, entry.name);
     results.push(...nested);
   }
@@ -306,15 +300,11 @@ export async function listArtifacts(runId: string, stepId: string, workspaceId?:
 
 async function resolveRunDir(runId: string, workspaceId?: string): Promise<{ runDir: string; workspaceId?: string } | null> {
   const runsDir = getRunsDir();
-  const legacy = path.join(runsDir, runId);
   if (workspaceId) {
     const candidate = path.join(runsDir, workspaceId, runId);
     if (fsSync.existsSync(candidate)) return { runDir: candidate, workspaceId };
-    if (fsSync.existsSync(legacy)) return { runDir: legacy, workspaceId: "legacy" };
     return null;
   }
-
-  if (fsSync.existsSync(legacy)) return { runDir: legacy, workspaceId: "legacy" };
 
   const entries = await fs.readdir(runsDir, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {

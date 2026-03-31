@@ -4,6 +4,7 @@ import path from "node:path";
 import { nowIso } from "../runner/utils.js";
 import type { LlmUsage } from "../runner/cost.js";
 import { writeJson } from "../runner/fs.js";
+import { ClusterTimeoutError } from "../errors.js";
 
 export type ClusterTask = {
   id: string;
@@ -59,7 +60,10 @@ export async function waitForResult(queueRoot: string, taskId: string, timeoutMs
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
-  return { id: taskId, ok: false, error: "Cluster timeout" };
+  throw new ClusterTimeoutError(`Worker timeout for task ${taskId}.`, "cluster.timeout", {
+    taskId,
+    timeoutMs
+  });
 }
 
 export function buildTask(options: {

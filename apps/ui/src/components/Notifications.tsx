@@ -21,14 +21,6 @@ export function Notifications() {
           });
         }
       }
-      const policyFlag = localStorage.getItem("orchestrum.notice.policy") === "1";
-      if (policyFlag) {
-        list.push({
-          id: "policy",
-          message: "Policy violation detected in the last run.",
-          tone: "danger"
-        });
-      }
       setNotices(list);
     };
     load();

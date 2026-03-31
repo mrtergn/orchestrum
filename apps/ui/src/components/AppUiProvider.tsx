@@ -1,6 +1,8 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 
 type ToastTone = "info" | "warning" | "danger" | "success";
 
@@ -68,6 +70,7 @@ const DEFAULT_FILTERS: RunFiltersState = {
 const AppUiContext = createContext<AppUiContextValue | null>(null);
 
 export function AppUiProvider({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(() => new QueryClient());
   const [selectedWorkspaceId, setSelectedWorkspaceIdState] = useState("");
   const [lastTemplate, setLastTemplateState] = useState("feature-dev");
   const [runFilters, setRunFiltersState] = useState<RunFiltersState>(DEFAULT_FILTERS);
@@ -204,7 +207,12 @@ export function AppUiProvider({ children }: { children: React.ReactNode }) {
     ]
   );
 
-  return <AppUiContext.Provider value={value}>{children}</AppUiContext.Provider>;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <AppUiContext.Provider value={value}>{children}</AppUiContext.Provider>
+      <ReactQueryDevtools initialIsOpen={false} />
+    </QueryClientProvider>
+  );
 }
 
 export function useAppUi() {

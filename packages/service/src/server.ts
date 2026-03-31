@@ -79,6 +79,7 @@ import {
   missionGraphToStepStates,
   loadMissionRun,
   discoverMissionProviders,
+  DEFAULT_SERVICE_PORT,
   type DeliveryTargetTool
 } from "@orchestrum/core";
 import { writeJson, writeText } from "@orchestrum/core";
@@ -105,7 +106,7 @@ export async function startService(options: ServiceOptions = {}) {
     path.join(rootDir, "runs");
   const port =
     options.port ??
-    Number(process.env.ORCHESTRUM_SERVICE_PORT ?? 4137);
+    Number(process.env.ORCHESTRUM_SERVICE_PORT ?? DEFAULT_SERVICE_PORT);
 
   await migrateRuns(runsDir);
   await recoverInterruptedRuns(runsDir);
@@ -725,6 +726,71 @@ export async function startService(options: ServiceOptions = {}) {
     await streamEvents(req, res, eventsPath, () => buildSnapshot(run.runDir));
   });
 
+  app.get("/events", async (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const seenStatuses = new Map<string, string>();
+    let closed = false;
+    req.on("close", () => {
+      closed = true;
+    });
+
+    const sendEvent = (name: string, payload: Record<string, unknown>) => {
+      if (closed) return;
+      res.write(`event: ${name}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const tick = async () => {
+      if (closed) return;
+      const runs = runIndex.list().slice(0, 100);
+      for (const run of runs) {
+        const key = `${run.workspaceId}:${run.runId}`;
+        const previous = seenStatuses.get(key);
+        if (!previous && run.status === "running") {
+          sendEvent("run:started", {
+            runId: run.runId,
+            workspaceId: run.workspaceId,
+            status: run.status,
+            ts: Date.now()
+          });
+        }
+        if (run.status === "running") {
+          sendEvent("run:step", {
+            runId: run.runId,
+            workspaceId: run.workspaceId,
+            status: run.status,
+            ts: Date.now()
+          });
+        }
+        if (previous === "running" && run.status !== "running") {
+          sendEvent("run:finished", {
+            runId: run.runId,
+            workspaceId: run.workspaceId,
+            status: run.status,
+            ts: Date.now()
+          });
+        }
+        seenStatuses.set(key, run.status);
+      }
+
+      sendEvent("agent:updated", {
+        queued: 0,
+        running: runs.filter((run) => run.status === "running").length,
+        ts: Date.now()
+      });
+    };
+
+    await tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, 2000);
+    req.on("close", () => clearInterval(timer));
+  });
+
   const resumeRunHandler = async (req: express.Request, res: express.Response) => {
     const runId = String(req.params.id ?? "");
     if (!runId) return res.status(400).json({ error: "run id required" });
@@ -734,7 +800,7 @@ export async function startService(options: ServiceOptions = {}) {
     if (isMissionRunMeta(run.meta)) {
       const result = await agentPlatform.resumeMission({
         runsDir,
-        workspaceId: run.workspaceId === "legacy" ? (workspaceId ?? "default") : run.workspaceId,
+        workspaceId: run.workspaceId,
         runId
       });
       return res.json({ ok: result.ok, fromStepId: inferMissionResumeNodeId(run.meta) ?? undefined });
@@ -746,7 +812,7 @@ export async function startService(options: ServiceOptions = {}) {
       runId,
       runsDir,
       fromStepId,
-      workspaceId: run.workspaceId === "legacy" ? workspaceId : run.workspaceId
+      workspaceId: run.workspaceId
     });
     res.json({ ok, fromStepId });
   };
@@ -1380,11 +1446,6 @@ class RunIndex {
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const candidate = path.join(this.runsDir, entry.name);
-      const legacy = path.join(candidate, "run.json");
-      if (fsSync.existsSync(legacy)) {
-        await this.upsert("legacy", candidate);
-        continue;
-      }
       const workspaceRuns = await fs.readdir(candidate, { withFileTypes: true }).catch(() => []);
       for (const runEntry of workspaceRuns) {
         if (!runEntry.isDirectory()) continue;
@@ -1405,12 +1466,14 @@ class RunIndex {
   private async refresh(filePath: string) {
     const runDir = path.dirname(filePath);
     const workspaceId = resolveWorkspaceIdFromRunDir(this.runsDir, runDir);
+    if (!workspaceId) return;
     await this.upsert(workspaceId, runDir);
   }
 
   private remove(filePath: string) {
     const runDir = path.dirname(filePath);
     const workspaceId = resolveWorkspaceIdFromRunDir(this.runsDir, runDir);
+    if (!workspaceId) return;
     const runId = path.basename(runDir);
     this.runs.delete(`${workspaceId}:${runId}`);
   }
@@ -1423,7 +1486,15 @@ class RunIndex {
       const meta = JSON.parse(raw);
       const runId = meta.runId ?? path.basename(runDir);
       const key = `${workspaceId}:${runId}`;
-      this.runs.set(key, { runId, runDir, workspaceId, meta });
+      this.runs.set(key, {
+        runId,
+        runDir,
+        workspaceId,
+        meta: {
+          ...meta,
+          workspaceId: meta.workspaceId ?? workspaceId
+        }
+      });
     } catch {
       // ignore
     }
@@ -1867,11 +1938,11 @@ async function listArtifacts(stepPath: string): Promise<string[]> {
   return results.sort();
 }
 
-function resolveWorkspaceIdFromRunDir(runsDir: string, runDir: string): string {
+function resolveWorkspaceIdFromRunDir(runsDir: string, runDir: string): string | null {
   const relative = path.relative(runsDir, runDir);
   const parts = relative.split(path.sep).filter(Boolean);
   if (parts.length >= 2) return parts[0]!;
-  return "legacy";
+  return null;
 }
 
 async function resolveWorkspacePath(rootDir: string, workspaceId?: string): Promise<string | null> {
@@ -1894,7 +1965,7 @@ async function recoverInterruptedRunsIndex(index: RunIndex) {
       run.status = "interrupted";
       run.interruptedAt = new Date().toISOString();
       run.end = run.end ?? run.interruptedAt;
-      const record = index.get(run.runId, run.workspaceId ?? "legacy");
+      const record = index.get(run.runId, run.workspaceId);
       if (record) {
         await writeJson(path.join(record.runDir, "run.json"), run);
         index.update(run.runId, record.workspaceId, run);

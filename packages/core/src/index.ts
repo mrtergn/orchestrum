@@ -1,6 +1,8 @@
 export { runWorkflow, runWorkflowDetailed, resumeWorkflow, cancelRun, replayRun } from "./runner/run.js";
 export { loadWorkflow } from "./runner/workflow.js";
 export { registerAgent } from "./agents/index.js";
+export * from "./constants.js";
+export type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus, ApprovalStatus } from "./types/status.js";
 export {
   runMissionDetailed,
   resumeMissionRun,
@@ -44,7 +46,6 @@ export {
   removeWorkspace,
   validateWorkspacePath,
   getWorkspacesPath,
-  getLegacyWorkspacesPath,
   findWorkspaceById,
   findWorkspaceByPath
 } from "./runner/workspaces.js";

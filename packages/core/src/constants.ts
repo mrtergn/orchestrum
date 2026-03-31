@@ -1,0 +1,12 @@
+export const DEFAULT_CONCURRENCY = 1;
+export const DEFAULT_LOOP_MAX_ROUNDS = 3;
+export const AUDIT_STEP_ID = "audit";
+export const DEFAULT_TEMPERATURE = 0.2;
+export const MAX_FILE_CHARS = 6000;
+export const MAX_LIST_ENTRIES = 200;
+export const APPROVAL_TTL_HOURS = 24;
+export const DEFAULT_SERVICE_PORT = 4137;
+export const DEFAULT_UI_PORT = 3000;
+export const COST_ALERT_THRESHOLD = 0.5;
+export const MAX_TREND_DAYS = 90;
+export const MAX_PROMPT_VERSIONS = 20;

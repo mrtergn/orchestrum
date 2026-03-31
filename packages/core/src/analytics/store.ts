@@ -3,6 +3,7 @@ import path from "node:path";
 import type { RunState } from "../runner/types.js";
 import type { RunAnalysis } from "./runAnalysis.js";
 import { writeJson } from "../runner/fs.js";
+import { MAX_TREND_DAYS } from "../constants.js";
 
 export type AnalyticsData = {
   runs: number;
@@ -99,10 +100,10 @@ export async function updateAnalytics(
   });
   analytics.trends.loops.push({ ts: timestamp, avg: analytics.loopCounts.avg });
   analytics.trends.reward.push({ ts: timestamp, reward: runMeta.reward ?? 0 });
-  analytics.trends.cost = analytics.trends.cost.slice(-50);
-  analytics.trends.successRate = analytics.trends.successRate.slice(-50);
-  analytics.trends.loops = analytics.trends.loops.slice(-50);
-  analytics.trends.reward = analytics.trends.reward.slice(-50);
+  analytics.trends.cost = analytics.trends.cost.slice(-MAX_TREND_DAYS);
+  analytics.trends.successRate = analytics.trends.successRate.slice(-MAX_TREND_DAYS);
+  analytics.trends.loops = analytics.trends.loops.slice(-MAX_TREND_DAYS);
+  analytics.trends.reward = analytics.trends.reward.slice(-MAX_TREND_DAYS);
 
   for (const [model, count] of Object.entries(runMeta.modelUsage ?? {})) {
     analytics.modelUsage[model] = (analytics.modelUsage[model] ?? 0) + count;

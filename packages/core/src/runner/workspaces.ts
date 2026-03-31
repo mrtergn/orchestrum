@@ -27,10 +27,6 @@ export function getWorkspacesPath(rootDir: string): string {
   return path.join(rootDir, "data", "workspaces.json");
 }
 
-export function getLegacyWorkspacesPath(rootDir: string): string {
-  return path.join(rootDir, "workspaces.json");
-}
-
 export async function loadWorkspaces(rootDir: string): Promise<Workspace[]> {
   const filePath = getWorkspacesPath(rootDir);
   try {
@@ -38,25 +34,10 @@ export async function loadWorkspaces(rootDir: string): Promise<Workspace[]> {
     const parsed = JSON.parse(raw) as WorkspaceFile;
     return normalizeWorkspaces(parsed.workspaces);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw err;
-    }
-  }
-
-  const legacyPath = getLegacyWorkspacesPath(rootDir);
-  try {
-    const raw = await fs.readFile(legacyPath, "utf8");
-    const parsed = JSON.parse(raw) as WorkspaceFile;
-    const normalized = normalizeWorkspaces(parsed.workspaces);
-    if (normalized.length > 0) {
-      await saveWorkspaces(rootDir, normalized);
-    }
-    return normalized;
-  } catch (legacyErr) {
-    if ((legacyErr as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return [];
     }
-    throw legacyErr;
+    throw err;
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@orchestrum/desktop",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Desktop shell for the local-first Orchestrum engineering OS.",
   "author": "Murat Ergin",

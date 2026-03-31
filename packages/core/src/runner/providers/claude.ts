@@ -1,27 +1,26 @@
 import type { LlmUsage } from "../cost.js";
+import { ProviderError } from "../../errors.js";
+import type { CompletionOptions, CompletionResult, IAgentProvider } from "./interface.js";
 
-export type ClaudeCompletionOptions = {
-  model: string;
-  prompt: string;
-};
+export type ClaudeCompletionOptions = CompletionOptions;
+export type ClaudeCompletionResult = CompletionResult;
 
-export type ClaudeCompletionResult = {
-  text: string;
-  usage?: LlmUsage;
-};
-
-export class ClaudeProvider {
+export class ClaudeProvider implements IAgentProvider {
   constructor(
     private apiKey: string,
     private baseUrl = "https://api.anthropic.com/v1"
   ) {}
 
-  async complete(options: ClaudeCompletionOptions): Promise<ClaudeCompletionResult> {
+  async complete(options: CompletionOptions): Promise<CompletionResult>;
+  async complete(prompt: string, options: CompletionOptions): Promise<CompletionResult>;
+  async complete(arg1: string | CompletionOptions, arg2?: CompletionOptions): Promise<CompletionResult> {
     if (!this.apiKey) {
-      throw new Error("ANTHROPIC_API_KEY is missing. Set it before running missions.");
+      throw new ProviderError("ANTHROPIC_API_KEY is missing. Set it before running missions.", "provider.claude.missing_key");
     }
 
-    const res = await fetch(`${this.baseUrl}/messages`, {
+    const resolved = normalizeCompletionArgs(arg1, arg2);
+
+    const res = await this.fetchWithRetry(`${this.baseUrl}/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -29,15 +28,17 @@ export class ClaudeProvider {
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: options.model,
+        model: resolved.model,
         max_tokens: 4096,
-        messages: [{ role: "user", content: options.prompt }]
+        messages: [{ role: "user", content: resolved.prompt }]
       })
     });
 
     if (!res.ok) {
       const body = await res.text();
-      throw new Error(`Claude error ${res.status}: ${body}`);
+      throw new ProviderError(`Claude error ${res.status}: ${body}`, "provider.claude.http_error", {
+        status: res.status
+      });
     }
 
     const data = (await res.json()) as {
@@ -49,7 +50,7 @@ export class ClaudeProvider {
     };
     const text = data.content?.find((item) => item.type === "text")?.text;
     if (!text || typeof text !== "string") {
-      throw new Error("Claude returned empty output.");
+      throw new ProviderError("Claude returned empty output.", "provider.claude.empty_output");
     }
 
     return {
@@ -57,6 +58,38 @@ export class ClaudeProvider {
       usage: normalizeUsage(data.usage)
     };
   }
+
+  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    const delays = [1000, 2000, 4000];
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+      try {
+        const response = await fetch(url, init);
+        if ((response.status === 429 || response.status >= 500) && attempt < delays.length) {
+          await sleep(delays[attempt] ?? 0);
+          continue;
+        }
+        return response;
+      } catch (err) {
+        lastError = err;
+        if (attempt >= delays.length) break;
+        await sleep(delays[attempt] ?? 0);
+      }
+    }
+    throw new ProviderError("Claude request failed after retries.", "provider.claude.retry_exhausted", {
+      cause: lastError instanceof Error ? lastError.message : String(lastError ?? "unknown")
+    });
+  }
+}
+
+function normalizeCompletionArgs(arg1: string | CompletionOptions, arg2?: CompletionOptions): CompletionOptions {
+  if (typeof arg1 === "string") {
+    return {
+      model: arg2?.model ?? "",
+      prompt: arg1
+    };
+  }
+  return arg1;
 }
 
 function normalizeUsage(raw: { input_tokens?: number; output_tokens?: number } | undefined): LlmUsage | undefined {
@@ -70,4 +103,8 @@ function normalizeUsage(raw: { input_tokens?: number; output_tokens?: number } |
     completion_tokens: completion,
     total_tokens: total
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

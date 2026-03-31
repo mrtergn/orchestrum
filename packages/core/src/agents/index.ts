@@ -37,7 +37,7 @@ export function registerBuiltInAgents() {
     registerAgent("openai", (options) => {
       const apiKey = options.env.OPENAI_API_KEY ?? "";
       const baseUrl =
-        options.env.OPENAI_API_BASE_URL ?? options.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+        firstNonEmptyEnv(options.env.OPENAI_API_BASE_URL, options.env.OPENAI_BASE_URL) ?? "https://api.openai.com/v1";
       const mode = (options.env.OPENAI_API_MODE as "responses" | "chat" | "auto") ?? "auto";
       const client = new OpenAIProvider(apiKey, baseUrl, mode);
       return {
@@ -48,7 +48,7 @@ export function registerBuiltInAgents() {
   if (!registry.has("ollama")) {
     registerAgent("ollama", (options) => {
       const endpoint =
-        options.env.ORCHESTRUM_LOCAL_LLM_ENDPOINT ??
+        firstNonEmptyEnv(options.env.ORCHESTRUM_LOCAL_LLM_ENDPOINT) ??
         "http://localhost:11434";
       const client = new OllamaProvider(endpoint);
       return {
@@ -61,7 +61,7 @@ export function registerBuiltInAgents() {
   }
   const llamaFactory = (options: AgentFactoryOptions) => {
     const endpoint =
-      options.env.ORCHESTRUM_LOCAL_LLM_ENDPOINT ??
+      firstNonEmptyEnv(options.env.ORCHESTRUM_LOCAL_LLM_ENDPOINT) ??
       "http://localhost:8080";
     const client = new LlamaCppProvider(endpoint);
     return {
@@ -80,11 +80,24 @@ export function registerBuiltInAgents() {
   if (!registry.has("claude")) {
     registerAgent("claude", (options) => {
       const apiKey = options.env.ANTHROPIC_API_KEY ?? "";
-      const baseUrl = options.env.ANTHROPIC_API_BASE_URL ?? "https://api.anthropic.com/v1";
+      const baseUrl = firstNonEmptyEnv(options.env.ANTHROPIC_API_BASE_URL) ?? "https://api.anthropic.com/v1";
       const client = new ClaudeProvider(apiKey, baseUrl);
       return {
         complete: (prompt: string) => client.complete({ model: options.model, prompt })
       };
     });
   }
+}
+
+function firstNonEmptyEnv(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      const normalized = value.trim();
+      if (normalized.toLowerCase() === "undefined" || normalized.toLowerCase() === "null") {
+        continue;
+      }
+      return normalized;
+    }
+  }
+  return undefined;
 }

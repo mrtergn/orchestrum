@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { getAppHome } from "../appHome.js";
@@ -473,11 +472,6 @@ async function scanRunDirs(runsDir: string): Promise<Array<{ workspaceId: string
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(runsDir, entry.name);
-    const legacyRun = path.join(candidate, "run.json");
-    if (fsSync.existsSync(legacyRun)) {
-      results.push({ workspaceId: "legacy", runId: entry.name, runDir: candidate });
-      continue;
-    }
     const nested = await fs.readdir(candidate, { withFileTypes: true }).catch(() => []);
     for (const nestedEntry of nested) {
       if (!nestedEntry.isDirectory()) continue;

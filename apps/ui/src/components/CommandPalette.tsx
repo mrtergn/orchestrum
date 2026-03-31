@@ -122,6 +122,7 @@ export function CommandPalette() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Type a command or search..."
+            aria-label="Command palette search"
             className="w-full bg-transparent text-sm text-slate-200 outline-none placeholder:text-slate-600"
           />
         </div>

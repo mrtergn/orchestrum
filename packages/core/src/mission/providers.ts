@@ -164,6 +164,13 @@ const PROVIDER_LABELS: Record<ProviderVendor, string> = {
   "llama.cpp": "llama.cpp"
 };
 
+const KNOWN_API_HOSTS: Record<"openai" | "claude", RegExp[]> = {
+  openai: [/^api\.openai\.com$/i],
+  claude: [/^api\.anthropic\.com$/i]
+};
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
 const PROVIDER_PROFILES: ProviderProfile[] = [
   {
     id: "codex-cli-balanced",
@@ -338,54 +345,16 @@ export function normalizeMissionProvider(input: unknown, role?: string): Provide
     };
   }
 
-  const legacyType = readString(provider.provider) ?? readString(provider.type) ?? roleVendorFallback(role);
-  const legacyModel = readString(provider.model) ?? undefined;
-  const legacyKey = readString(provider.apiKeyRef) ?? defaultApiKeyRef(normalizeCanonicalProvider(legacyType));
-
-  if (legacyType === "claude") {
-    return {
-      vendor: "claude",
-      transport: "cli",
-      profileId: "claude-cli-sonnet",
-      modelOverride: legacyModel,
-      auth: { kind: "cli" },
-      fallback: {
-        vendor: "claude",
-        transport: "api",
-        profileId: "claude-api-sonnet",
-        modelOverride: legacyModel,
-        auth: { kind: "api_key", secretRef: legacyKey ?? "ANTHROPIC_API_KEY" }
-      }
-    };
+  if (
+    provider.provider !== undefined ||
+    provider.type !== undefined ||
+    provider.model !== undefined ||
+    provider.apiKeyRef !== undefined
+  ) {
+    throw new Error("Legacy provider schema is not supported. Use vendor/transport/profileId/auth fields.");
   }
 
-  if (legacyType === "ollama") {
-    return {
-      vendor: "ollama",
-      transport: "local_http",
-      profileId: "ollama-local-default",
-      modelOverride: legacyModel,
-      auth: { kind: "none" }
-    };
-  }
-
-  if (legacyType === "llama.cpp" || legacyType === "local" || legacyType === "llama_cpp") {
-    return {
-      vendor: "llama.cpp",
-      transport: "local_http",
-      profileId: "llama-cpp-local-default",
-      modelOverride: legacyModel,
-      auth: { kind: "none" }
-    };
-  }
-
-  return {
-    vendor: "openai",
-    transport: "api",
-    profileId: "openai-api-gpt5",
-    modelOverride: legacyModel,
-    auth: { kind: "api_key", secretRef: legacyKey ?? "OPENAI_API_KEY" }
-  };
+  return defaultProviderForRole(role);
 }
 
 export async function discoverMissionProviders(options: {
@@ -435,7 +404,13 @@ export async function completeWithProvider(
 
   if (resolved.vendor === "claude" && resolved.transport === "api") {
     const keyRef = resolved.auth.secretRef ?? defaultApiKeyRef(resolved.vendor) ?? "ANTHROPIC_API_KEY";
-    const client = new ClaudeProvider(env[keyRef] ?? "", env.ANTHROPIC_API_BASE_URL ?? "https://api.anthropic.com/v1");
+    const configuredBaseUrl = firstNonEmptyEnv(env.ANTHROPIC_API_BASE_URL) ?? "https://api.anthropic.com/v1";
+    const baseUrl = validateApiBaseUrl(
+      configuredBaseUrl,
+      "claude",
+      configuredBaseUrl === "https://api.anthropic.com/v1" ? "default" : "ANTHROPIC_API_BASE_URL"
+    );
+    const client = new ClaudeProvider(env[keyRef] ?? "", baseUrl);
     const result = await client.complete({ model: resolved.model, prompt });
     return {
       ...result,
@@ -485,7 +460,12 @@ export async function completeWithProvider(
   }
 
   const keyRef = resolved.auth.secretRef ?? defaultApiKeyRef(resolved.vendor) ?? "OPENAI_API_KEY";
-  const baseUrl = env.OPENAI_API_BASE_URL ?? env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  const configuredOpenAiBaseUrl = firstNonEmptyEnv(env.OPENAI_API_BASE_URL, env.OPENAI_BASE_URL) ?? "https://api.openai.com/v1";
+  const baseUrl = validateApiBaseUrl(
+    configuredOpenAiBaseUrl,
+    "openai",
+    firstNonEmptyEnv(env.OPENAI_API_BASE_URL) ? "OPENAI_API_BASE_URL" : firstNonEmptyEnv(env.OPENAI_BASE_URL) ? "OPENAI_BASE_URL" : "default"
+  );
   const mode = (env.OPENAI_API_MODE as "responses" | "chat" | "auto") ?? "auto";
   const client = new OpenAIProvider(env[keyRef] ?? "", baseUrl, mode);
   const result = await client.complete({ model: resolved.model, prompt });
@@ -935,9 +915,67 @@ function roleVendorFallback(role?: string): ProviderVendor {
 
 function localHttpEndpointFor(vendor: ProviderVendor, env: NodeJS.ProcessEnv): string {
   if (vendor === "ollama") {
-    return env.ORCHESTRUM_OLLAMA_ENDPOINT ?? env.ORCHESTRUM_LOCAL_LLM_ENDPOINT ?? "http://localhost:11434";
+    const raw = firstNonEmptyEnv(env.ORCHESTRUM_OLLAMA_ENDPOINT, env.ORCHESTRUM_LOCAL_LLM_ENDPOINT) ?? "http://localhost:11434";
+    return validateLocalHttpEndpoint(raw, "ORCHESTRUM_OLLAMA_ENDPOINT");
   }
-  return env.ORCHESTRUM_LLAMA_CPP_ENDPOINT ?? env.ORCHESTRUM_LOCAL_LLM_ENDPOINT ?? "http://localhost:8080";
+  const raw = firstNonEmptyEnv(env.ORCHESTRUM_LLAMA_CPP_ENDPOINT, env.ORCHESTRUM_LOCAL_LLM_ENDPOINT) ?? "http://localhost:8080";
+  return validateLocalHttpEndpoint(raw, "ORCHESTRUM_LLAMA_CPP_ENDPOINT");
+}
+
+function validateApiBaseUrl(
+  input: string,
+  vendor: "openai" | "claude",
+  source: string
+): string {
+  const url = parseHttpUrl(input, source);
+  const host = url.hostname.toLowerCase();
+  const allowed = KNOWN_API_HOSTS[vendor].some((pattern) => pattern.test(host));
+  if (!allowed) {
+    throw new Error(`${source} host is not allowed: ${host}`);
+  }
+  return url.toString().replace(/\/$/, "");
+}
+
+function validateLocalHttpEndpoint(input: string, source: string): string {
+  const url = parseHttpUrl(input, source);
+  const host = url.hostname.toLowerCase();
+  if (!isLocalHost(host)) {
+    throw new Error(`${source} must target localhost/loopback. Received host: ${host}`);
+  }
+  return url.toString().replace(/\/$/, "");
+}
+
+function parseHttpUrl(input: string, source: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw new Error(`${source} must be a valid absolute URL.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${source} protocol must be http or https.`);
+  }
+  return parsed;
+}
+
+function isLocalHost(host: string): boolean {
+  if (LOCAL_HOSTS.has(host)) return true;
+  if (host.startsWith("127.")) return true;
+  if (host.startsWith("::ffff:127.")) return true;
+  return false;
+}
+
+function firstNonEmptyEnv(...values: Array<string | null | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      const normalized = value.trim();
+      if (normalized.toLowerCase() === "undefined" || normalized.toLowerCase() === "null") {
+        continue;
+      }
+      return normalized;
+    }
+  }
+  return undefined;
 }
 
 function shouldUseNativeWrite(role?: string, executor?: NodeExecutorKind): boolean {

@@ -3,7 +3,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { ensureDir, writeJson } from "./fs.js";
-import { loadWorkspaces, getWorkspacesPath, getLegacyWorkspacesPath } from "./workspaces.js";
+import { loadWorkspaces, getWorkspacesPath } from "./workspaces.js";
 import { getGlobalConfigPath } from "./config.js";
 
 export async function createBackup(options: {
@@ -22,11 +22,8 @@ export async function createBackup(options: {
   }
 
   const workspacesFile = getWorkspacesPath(options.rootDir);
-  const legacyWorkspacesFile = getLegacyWorkspacesPath(options.rootDir);
   if (fsSync.existsSync(workspacesFile)) {
     await fs.copyFile(workspacesFile, path.join(staging, "workspaces.json"));
-  } else if (fsSync.existsSync(legacyWorkspacesFile)) {
-    await fs.copyFile(legacyWorkspacesFile, path.join(staging, "workspaces.json"));
   }
 
   const globalConfig = getGlobalConfigPath();

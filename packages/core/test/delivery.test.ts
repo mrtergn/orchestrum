@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -14,7 +14,7 @@ import {
   saveTeamPreset,
   summarizeDeliverySessions,
   runDeliverySessionDetailed
-} from "../src/index.js";
+} from "../src/delivery/index.js";
 
 test("delivery preset scaffolds into the repo", async () => {
   const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-delivery-preset-"));
