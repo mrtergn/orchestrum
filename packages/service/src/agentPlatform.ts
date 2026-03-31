@@ -3,10 +3,8 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
 import type express from "express";
 import {
-  completeWithProvider,
   defaultProviderForRole,
   normalizeMissionProvider,
   loadWorkspaces,
@@ -15,13 +13,19 @@ import {
   resumeMissionRun,
   importMissionNodeInput,
   loadMissionRun,
+  loadMissionTemplate,
   type MissionAgent,
   type MissionRun,
-  type MissionProviderSpec
+  type MissionProviderSpec,
+  type ChangeState,
+  type PauseReason,
+  type RunStartOptions,
+  type RunVerdict,
+  type ValidationState
 } from "@orchestrum/core";
 
 type AgentState = "idle" | "active" | "sleeping" | "error";
-type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+type TaskStatus = "queued" | "running" | "paused" | "blocked" | "succeeded" | "failed" | "cancelled";
 type TaskType = "spec" | "implement" | "audit" | "generic";
 
 type AgentRecord = {
@@ -67,6 +71,12 @@ type MissionRecord = {
   activeNodeIds: string[];
 };
 
+const TASK_MISSION_TEMPLATES = {
+  spec: "spec-only",
+  implement: "feature-dev",
+  audit: "audit-only"
+} as const;
+
 type TaskRecord = {
   id: string;
   title: string;
@@ -82,6 +92,12 @@ type TaskRecord = {
   maxAttempts: number;
   artifactsPath: string;
   logsPath: string;
+  linkedRunId?: string;
+  linkedTemplateId?: string;
+  pauseReason?: PauseReason | null;
+  change?: ChangeState | null;
+  validation?: ValidationState | null;
+  verdict?: RunVerdict | null;
   resultSummary?: string;
 };
 
@@ -144,7 +160,8 @@ export class AgentPlatform {
     await fs.mkdir(this.dataDir, { recursive: true });
     await fs.mkdir(this.tasksDir, { recursive: true });
     await fs.mkdir(path.dirname(this.eventsPath), { recursive: true });
-    this.tasks = await this.readJson<TaskRecord[]>(this.tasksPath, []);
+    const storedTasks = await this.readJson<unknown[]>(this.tasksPath, []);
+    this.tasks = Array.isArray(storedTasks) ? storedTasks.map((task) => this.normalizeTaskRecord(task)) : [];
     this.messages = await this.readJson<MessageRecord[]>(this.messagesPath, []);
     await this.refreshWorkspaceState();
     this.startRuntime();
@@ -390,11 +407,12 @@ export class AgentPlatform {
       app.post(route, async (req, res) => {
         const task = this.tasks.find((item) => item.id === req.params.id);
         if (!task) return res.status(404).json({ error: "Task not found" });
-        if (task.status === "succeeded" || task.status === "failed") {
+        if (task.status === "succeeded" || task.status === "failed" || task.status === "cancelled") {
           return res.status(400).json({ error: "Task already completed" });
         }
         task.status = "cancelled";
         task.finishedAt = new Date().toISOString();
+        task.verdict = "failed";
         await this.persistTasks();
         await this.appendLog(task, "Task cancelled by user");
         await this.emit({ t: "task.cancelled", ts: Date.now(), taskId: task.id });
@@ -411,6 +429,12 @@ export class AgentPlatform {
         task.status = "queued";
         task.startedAt = undefined;
         task.finishedAt = undefined;
+        task.pauseReason = null;
+        task.change = null;
+        task.validation = null;
+        task.verdict = null;
+        task.linkedRunId = undefined;
+        task.linkedTemplateId = undefined;
         task.resultSummary = undefined;
         await this.persistTasks();
         await this.appendLog(task, "Task moved back to queue");
@@ -483,6 +507,7 @@ export class AgentPlatform {
     templateId: string;
     goal: string;
     runId?: string;
+    runOptions?: Omit<RunStartOptions, "sandbox" | "passphrase">;
   }): Promise<{ ok: boolean; runId: string }> {
     const agents = await this.loadAgentsForWorkspaceId(options.workspaceId);
     if (agents.length === 0) {
@@ -518,6 +543,7 @@ export class AgentPlatform {
       goal: options.goal,
       runId,
       agents: agents.map((agent) => this.toMissionAgent(agent)),
+      runOptions: options.runOptions,
       onEvent: (event) => this.handleMissionEvent(event)
     })
       .then(async (result) => {
@@ -652,9 +678,11 @@ export class AgentPlatform {
           const message = err instanceof Error ? err.message : "Task execution failed";
           task.status = "failed";
           task.finishedAt = new Date().toISOString();
+          task.verdict = "failed";
           task.resultSummary = message;
           await this.appendLog(task, `Task failed: ${message}`);
-          await this.emit({ t: "task.failed", ts: Date.now(), taskId: task.id, error: message });
+          await this.persistTasks();
+          await this.emitTaskStateEvent(task);
         })
         .finally(async () => {
           agent.status.state = "idle";
@@ -696,150 +724,199 @@ export class AgentPlatform {
 
   private async executeTask(task: TaskRecord, agent: AgentRecord) {
     await this.appendLog(task, `Executing ${task.type} task with ${this.describeProvider(agent.provider)}`);
-    const prompt = this.buildPrompt(task, agent);
-    const modelOutput = await this.invokeProvider(agent, prompt);
-    const artifactsDir = task.artifactsPath;
+    if (task.type === "generic") {
+      await this.executeManualTask(task, agent);
+      return;
+    }
+    await this.executeMissionBackedTask(task, agent);
+  }
 
-    if (task.type === "spec") {
-      const specPath = path.join(artifactsDir, "spec.md");
-      await fs.writeFile(specPath, modelOutput, "utf8");
-      task.resultSummary = "Specification created";
-      await this.notifyRole("dev", agent.id, "acceptance.criteria", {
-        taskId: task.id,
-        title: task.title,
-        acceptanceCriteria: modelOutput.slice(0, 3000)
-      });
-    } else if (task.type === "implement") {
-      const patchText = this.ensureUnifiedDiff(modelOutput, task);
-      const patchPath = path.join(artifactsDir, "changes.diff");
-      await fs.writeFile(patchPath, patchText, "utf8");
-      const repoPath = typeof task.payload.repoPath === "string" ? task.payload.repoPath : "";
-      if (repoPath) {
-        const apply = await this.applyPatch(repoPath, patchText);
-        await this.appendLog(task, `Patch apply result: ${apply.ok ? "ok" : "failed"}`);
-        if (!apply.ok) {
-          await this.appendLog(task, apply.error ?? "Patch apply failed");
-          throw new Error(`Patch apply failed: ${apply.error ?? "unknown error"}`);
-        }
-      }
-      task.resultSummary = "Implementation diff generated";
-    } else if (task.type === "audit") {
-      const report = {
-        summary: modelOutput.slice(0, 6000),
-        score: 0.7,
-        generatedAt: new Date().toISOString()
-      };
-      const reportPath = path.join(artifactsDir, "audit-report.json");
-      await fs.writeFile(reportPath, JSON.stringify(report, null, 2), "utf8");
-      task.resultSummary = "Audit report generated";
-      await this.notifyRole("dev", agent.id, "audit.issues", {
-        taskId: task.id,
-        title: task.title,
-        reportSummary: report.summary
-      });
-    } else {
-      const outputPath = path.join(artifactsDir, "output.md");
-      await fs.writeFile(outputPath, modelOutput, "utf8");
-      task.resultSummary = "Generic output generated";
+  private async executeMissionBackedTask(task: TaskRecord, agent: AgentRecord) {
+    if (task.type === "generic") {
+      throw new Error("Generic tasks cannot use mission-backed execution.");
+    }
+    const templateId = TASK_MISSION_TEMPLATES[task.type];
+    const workspaceId = agent.workspaceId;
+    if (!workspaceId) {
+      throw new Error("Assigned agent must belong to a workspace for mission-backed execution.");
+    }
+    const workspacePath = await this.resolveWorkspacePath(workspaceId);
+    if (!workspacePath || !fsSync.existsSync(workspacePath)) {
+      throw new Error(`Workspace ${workspaceId} is missing or unreadable.`);
     }
 
+    const missionAgents = await this.buildTaskMissionAgents(templateId, agent, workspacePath);
+    const runId = `task-${task.id.slice(0, 8)}-${Date.now()}`;
+    task.linkedRunId = runId;
+    task.linkedTemplateId = templateId;
+    task.resultSummary = `Mission ${templateId} launched.`;
+    await this.persistTasks();
+    await this.writeTaskArtifact(task, "linked-run.json", {
+      taskId: task.id,
+      workspaceId,
+      templateId,
+      runId,
+      repoPath: workspacePath,
+      startedAt: new Date().toISOString()
+    });
+    await this.appendLog(task, `Launching mission ${templateId} in ${workspacePath}`);
+
+    const result = await runMissionDetailed({
+      templateId,
+      repoPath: workspacePath,
+      runsDir: path.join(this.options.rootDir, "runs"),
+      workspaceId,
+      goal: this.buildMissionGoal(task),
+      runId,
+      agents: missionAgents,
+      onEvent: (event) => this.handleMissionEvent(event)
+    });
+
+    this.upsertMissionFromRun(result.run);
+    await this.syncTaskFromMissionRun(task, result.run);
+    await this.writeTaskArtifact(task, "run-result.json", {
+      runId: result.run.runId,
+      status: result.run.status,
+      verdict: result.run.verdict ?? null,
+      pauseReason: result.run.pauseReason ?? null,
+      change: result.run.change ?? null,
+      validation: result.run.validation ?? null
+    });
+    await this.emitTaskStateEvent(task);
+  }
+
+  private async executeManualTask(task: TaskRecord, agent: AgentRecord) {
+    const payloadText = JSON.stringify(task.payload ?? {}, null, 2);
+    const note = [
+      "# Manual coordination task",
+      "",
+      `Task: ${task.title}`,
+      `Assigned agent: ${agent.name} (${agent.role})`,
+      "",
+      "Description:",
+      task.description || "(none)",
+      "",
+      "Payload:",
+      payloadText
+    ].join("\n");
+    await this.writeTaskArtifact(task, "manual-task.md", note);
     task.status = "succeeded";
     task.finishedAt = new Date().toISOString();
-    await this.appendLog(task, `Task succeeded: ${task.resultSummary ?? "completed"}`);
-    await this.emit({ t: "task.completed", ts: Date.now(), taskId: task.id, resultSummary: task.resultSummary });
-    await this.emit({ t: "task.succeeded", ts: Date.now(), taskId: task.id, resultSummary: task.resultSummary });
+    task.verdict = "needs_human_review";
+    task.resultSummary = "Manual coordination recorded. No repo execution was performed.";
+    await this.persistTasks();
+    await this.appendLog(task, task.resultSummary);
+    await this.emitTaskStateEvent(task);
   }
 
-  private buildPrompt(task: TaskRecord, agent: AgentRecord): string {
+  private async buildTaskMissionAgents(templateId: string, assignedAgent: AgentRecord, workspacePath: string): Promise<MissionAgent[]> {
+    const workspaceAgents = await this.loadAgentsForWorkspacePath(workspacePath);
+    const missionAgents = workspaceAgents.map((agent) => this.toMissionAgent(agent));
+    const template = loadMissionTemplate(templateId);
+    for (const role of template.recommendedRoles ?? []) {
+      if (missionAgents.some((agent) => this.roleMatches(agent.role, role))) continue;
+      missionAgents.push({
+        ...this.toMissionAgent(assignedAgent),
+        id: `${assignedAgent.id}:${role}`,
+        name: `${assignedAgent.name} (${role})`,
+        role
+      });
+    }
+    return missionAgents;
+  }
+
+  private async syncTaskFromMissionRun(task: TaskRecord, run: MissionRun) {
+    task.linkedRunId = run.runId;
+    task.linkedTemplateId = run.missionTemplateId;
+    task.pauseReason = run.pauseReason ?? null;
+    task.change = run.change ?? null;
+    task.validation = run.validation ?? null;
+    task.verdict = run.verdict ?? null;
+    task.finishedAt = run.end ?? new Date().toISOString();
+    task.status = this.mapRunStatusToTaskStatus(run.status);
+    task.resultSummary = this.summarizeMissionOutcome(run);
+    await this.persistTasks();
+    await this.appendLog(task, `Mission ${run.runId} ${run.status}: ${task.resultSummary}`);
+  }
+
+  private mapRunStatusToTaskStatus(status: MissionRun["status"]): TaskStatus {
+    if (status === "completed") return "succeeded";
+    if (status === "paused") return "paused";
+    if (status === "blocked") return "blocked";
+    if (status === "cancelled") return "cancelled";
+    if (status === "failed" || status === "interrupted") return "failed";
+    return "running";
+  }
+
+  private summarizeMissionOutcome(run: MissionRun): string {
+    if (run.status === "completed") {
+      const validation = run.validation?.status ?? "not_requested";
+      const change = run.change?.status ?? "none";
+      return `Mission completed with change=${change} and validation=${validation}.`;
+    }
+    if (run.status === "paused") {
+      return run.pauseReason === "awaiting_approval"
+        ? "Mission paused awaiting approval."
+        : "Mission paused awaiting external input.";
+    }
+    if (run.status === "blocked") {
+      return run.error ?? "Mission blocked and needs operator intervention.";
+    }
+    if (run.status === "failed") {
+      return run.error ?? "Mission failed.";
+    }
+    if (run.status === "cancelled") {
+      return "Mission cancelled.";
+    }
+    return `Mission ended with status ${run.status}.`;
+  }
+
+  private buildMissionGoal(task: TaskRecord): string {
     const payloadText = JSON.stringify(task.payload ?? {}, null, 2);
     return [
-      `You are ${agent.name} (${agent.role}).`,
-      `Task type: ${task.type}`,
-      `Title: ${task.title}`,
-      `Description: ${task.description}`,
+      `Task title: ${task.title}`,
+      "",
+      task.description.trim(),
+      "",
       "Payload:",
-      payloadText,
-      "Produce concise, actionable output."
-    ].join("\n");
+      payloadText
+    ].join("\n").trim();
   }
 
-  private async invokeProvider(agent: AgentRecord, prompt: string): Promise<string> {
-    try {
-      const repoPath = agent.workspaceId ? await this.resolveWorkspacePath(agent.workspaceId) : null;
-      const execution = await completeWithProvider(agent.provider, prompt, process.env, {
-        repoPath: repoPath ?? this.options.rootDir,
-        role: agent.role,
-        executor: this.executorForRole(agent.role)
-      });
-      return execution.text?.trim() || "No output produced.";
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return `# Provider request failed\n\n${message}\n\nPrompt:\n\n${prompt}`;
-    }
+  private async writeTaskArtifact(task: TaskRecord, fileName: string, payload: unknown) {
+    const artifactPath = path.join(task.artifactsPath, fileName);
+    const content = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    await fs.writeFile(artifactPath, content, "utf8");
   }
 
-  private ensureUnifiedDiff(output: string, task: TaskRecord): string {
-    if (output.includes("--- ") && output.includes("+++ ") && output.includes("@@")) {
-      return output;
-    }
-    const safeTitle = task.title.replace(/[^a-z0-9-_]/gi, "-").toLowerCase();
-    return [
-      `--- a/NOTES.md`,
-      `+++ b/NOTES.md`,
-      `@@ -0,0 +1,6 @@`,
-      `+# ${safeTitle || "task"}`,
-      `+`,
-      `+${output.replace(/\r?\n/g, "\n+").slice(0, 8000)}`
-    ].join("\n");
-  }
-
-  private async applyPatch(repoPath: string, patchText: string): Promise<{ ok: boolean; error?: string }> {
-    if (!repoPath || !fsSync.existsSync(repoPath)) {
-      return { ok: false, error: "repoPath does not exist" };
-    }
-    const dangerous = ["rm -rf", "rmdir", "del /f", "format c:"];
-    const lower = patchText.toLowerCase();
-    if (dangerous.some((entry) => lower.includes(entry))) {
-      return { ok: false, error: "Patch rejected by safety guard" };
-    }
-
-    return await new Promise((resolve) => {
-      const child = spawn("git", ["apply", "--whitespace=nowarn", "-"], {
-        cwd: repoPath,
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
-      let stderr = "";
-      child.stderr.on("data", (chunk) => {
-        stderr += String(chunk);
-      });
-      child.on("error", (err) => {
-        resolve({ ok: false, error: err.message });
-      });
-      child.stdin.write(patchText);
-      child.stdin.end();
-      child.on("exit", (code) => {
-        if (code === 0) resolve({ ok: true });
-        else resolve({ ok: false, error: stderr.trim() || `git apply exited with ${code ?? -1}` });
-      });
+  private async emitTaskStateEvent(task: TaskRecord) {
+    const eventType = task.status === "succeeded"
+      ? "task.succeeded"
+      : task.status === "paused"
+        ? "task.paused"
+        : task.status === "blocked"
+          ? "task.blocked"
+          : task.status === "cancelled"
+            ? "task.cancelled"
+            : task.status === "failed"
+              ? "task.failed"
+              : "task.updated";
+    await this.emit({
+      t: eventType,
+      ts: Date.now(),
+      taskId: task.id,
+      linkedRunId: task.linkedRunId,
+      status: task.status,
+      resultSummary: task.resultSummary,
+      pauseReason: task.pauseReason ?? undefined,
+      verdict: task.verdict ?? undefined
     });
   }
 
-  private async notifyRole(roleNeedle: string, fromAgentId: string, topic: string, payload: Record<string, unknown>) {
-    const to = this.agents.find((agent) => agent.role.toLowerCase().includes(roleNeedle));
-    if (!to) return;
-    const message: MessageRecord = {
-      id: crypto.randomUUID(),
-      fromAgentId,
-      toAgentId: to.id,
-      topic,
-      payload,
-      ts: new Date().toISOString()
-    };
-    this.messages.push(message);
-    await this.persistMessages();
-    await this.emit({ t: "message.created", ts: Date.now(), message });
-    await this.emit({ t: "message.sent", ts: Date.now(), message });
+  private roleMatches(role: string, requiredRole: string): boolean {
+    const normalizedRole = role.trim().toLowerCase();
+    const normalizedRequired = requiredRole.trim().toLowerCase();
+    return normalizedRole === normalizedRequired || normalizedRole.includes(normalizedRequired) || normalizedRequired.includes(normalizedRole);
   }
 
   private buildSnapshot() {
@@ -1064,13 +1141,6 @@ export class AgentPlatform {
     return `${normalized.vendor}/${normalized.transport}/${model}`;
   }
 
-  private executorForRole(role: string): "prompt" | "patch" | "audit" {
-    const normalized = role.trim().toLowerCase();
-    if (normalized.includes("audit")) return "audit";
-    if (normalized.includes("dev")) return "patch";
-    return "prompt";
-  }
-
   private async handleMissionEvent(event: Record<string, unknown>) {
     await this.emit({
       ...event,
@@ -1084,7 +1154,54 @@ export class AgentPlatform {
     const run = await loadMissionRun(runDir).catch(() => null);
     if (run) {
       this.upsertMissionFromRun(run);
+      const linkedTasks = this.tasks.filter((task) => task.linkedRunId === run.runId);
+      if (linkedTasks.length > 0) {
+        for (const task of linkedTasks) {
+          task.pauseReason = run.pauseReason ?? null;
+          task.change = run.change ?? null;
+          task.validation = run.validation ?? null;
+          task.verdict = run.verdict ?? null;
+          if (run.status !== "running") {
+            task.status = this.mapRunStatusToTaskStatus(run.status);
+            task.finishedAt = run.end ?? task.finishedAt ?? new Date().toISOString();
+            task.resultSummary = this.summarizeMissionOutcome(run);
+          }
+        }
+        await this.persistTasks();
+      }
     }
+  }
+
+  private normalizeTaskRecord(input: unknown): TaskRecord {
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const now = new Date().toISOString();
+    const statusRaw = typeof record.status === "string" ? record.status.trim().toLowerCase() : "";
+    const status: TaskStatus = statusRaw === "running" || statusRaw === "paused" || statusRaw === "blocked" || statusRaw === "succeeded" || statusRaw === "failed" || statusRaw === "cancelled"
+      ? statusRaw
+      : "queued";
+    return {
+      id: typeof record.id === "string" && record.id.trim() ? record.id : crypto.randomUUID(),
+      title: typeof record.title === "string" ? record.title : "Untitled Task",
+      description: typeof record.description === "string" ? record.description : "",
+      type: this.normalizeTaskType(record.type),
+      payload: record.payload && typeof record.payload === "object" ? record.payload as Record<string, unknown> : {},
+      assignedToAgentId: typeof record.assignedToAgentId === "string" ? record.assignedToAgentId : "",
+      status,
+      createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
+      startedAt: typeof record.startedAt === "string" ? record.startedAt : undefined,
+      finishedAt: typeof record.finishedAt === "string" ? record.finishedAt : undefined,
+      attempts: typeof record.attempts === "number" && record.attempts >= 0 ? Math.floor(record.attempts) : 0,
+      maxAttempts: typeof record.maxAttempts === "number" && record.maxAttempts > 0 ? Math.floor(record.maxAttempts) : 2,
+      artifactsPath: typeof record.artifactsPath === "string" ? record.artifactsPath : path.join(this.tasksDir, crypto.randomUUID(), "artifacts"),
+      logsPath: typeof record.logsPath === "string" ? record.logsPath : path.join(this.tasksDir, crypto.randomUUID(), "logs.ndjson"),
+      linkedRunId: typeof record.linkedRunId === "string" ? record.linkedRunId : undefined,
+      linkedTemplateId: typeof record.linkedTemplateId === "string" ? record.linkedTemplateId : undefined,
+      pauseReason: record.pauseReason === "awaiting_input" || record.pauseReason === "awaiting_approval" ? record.pauseReason : null,
+      change: record.change && typeof record.change === "object" ? record.change as ChangeState : null,
+      validation: record.validation && typeof record.validation === "object" ? record.validation as ValidationState : null,
+      verdict: typeof record.verdict === "string" ? record.verdict as RunVerdict : null,
+      resultSummary: typeof record.resultSummary === "string" ? record.resultSummary : undefined
+    };
   }
 
   private upsertMissionRecord(record: MissionRecord) {

@@ -46,6 +46,10 @@ export type IndexedRunRecord = {
   repoPath: string;
   readinessScore: number | null;
   readinessBlocking: string[];
+  pauseReason: string | null;
+  changeStatus: string | null;
+  validationStatus: string | null;
+  verdict: string | null;
 };
 
 export type IndexedDeliverySessionRecord = {
@@ -140,8 +144,8 @@ export class StateIndex {
     await this.health();
     if (!this.db) return [];
     const statement = workspaceId
-      ? this.db.prepare("SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking FROM runs WHERE workspace_id = ? ORDER BY start DESC")
-      : this.db.prepare("SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking FROM runs ORDER BY start DESC");
+      ? this.db.prepare("SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict FROM runs WHERE workspace_id = ? ORDER BY start DESC")
+      : this.db.prepare("SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict FROM runs ORDER BY start DESC");
     const rows: IndexedRunRecord[] = [];
     if (workspaceId) {
       statement.bind([workspaceId]);
@@ -157,7 +161,11 @@ export class StateIndex {
         end: row.end ? String(row.end) : null,
         repoPath: String(row.repo_path ?? ""),
         readinessScore: row.readiness_score == null ? null : Number(row.readiness_score),
-        readinessBlocking: parseJsonArray(row.readiness_blocking)
+        readinessBlocking: parseJsonArray(row.readiness_blocking),
+        pauseReason: row.pause_reason == null ? null : String(row.pause_reason),
+        changeStatus: row.change_status == null ? null : String(row.change_status),
+        validationStatus: row.validation_status == null ? null : String(row.validation_status),
+        verdict: row.verdict == null ? null : String(row.verdict)
       });
     }
     statement.free();
@@ -299,7 +307,7 @@ export class StateIndex {
       const runMeta = await readJsonIfExists<any>(path.join(record.runDir, "run.json"));
       if (!runMeta) continue;
       this.db.run(
-        "INSERT OR REPLACE INTO runs (workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO runs (workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           record.workspaceId,
           runMeta.runId ?? record.runId,
@@ -309,44 +317,46 @@ export class StateIndex {
           runMeta.end ?? null,
           runMeta.repoPath ?? "",
           runMeta.readiness?.score ?? null,
-          JSON.stringify(runMeta.readiness?.blocking ?? [])
+          JSON.stringify(runMeta.readiness?.blocking ?? []),
+          runMeta.pauseReason ?? null,
+          runMeta.change?.status ?? null,
+          runMeta.validation?.status ?? null,
+          runMeta.verdict ?? null
         ]
       );
 
-      if (runMeta.kind === "delivery") {
-        const deliveryRaw = await readJsonIfExists<unknown>(path.join(record.runDir, "delivery", "session.json"));
-        const deliverySession = deliveryRaw ? DeliverySessionStateSchema.parse(deliveryRaw) : null;
-        if (deliverySession) {
-          const packetStatusCounts = countPacketStatuses(deliverySession.packets);
-          const toolUsage = countToolUsage(deliverySession.exports);
-          const importConfidenceCounts = countImportConfidenceCounts(deliverySession.imports);
-          const findingCategoryCounts = countFindingCategoryCounts(deliverySession.findings);
-          const findingSeverityCounts = countFindingSeverityCounts(deliverySession.findings);
-          const remediationPriorityCounts = countRemediationPriorityCounts(deliverySession.remediations);
-          const latestImport = toDeliverySummaryLatestImport(deliverySession.imports[0], deliverySession.runId);
-          this.db.run(
-            "INSERT OR REPLACE INTO delivery_sessions (workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-              record.workspaceId,
-              deliverySession.runId,
-              deliverySession.status,
-              deliverySession.updatedAt,
-              deliverySession.findings.filter((finding) => finding.status === "open").length,
-              deliverySession.findings.filter((finding) => finding.status === "resolved").length,
-              deliverySession.remediations.filter((task) => task.status !== "done").length,
-              deliverySession.remediations.filter((task) => task.status === "done").length,
-              deliverySession.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed").length,
-              deliverySession.imports.filter((item) => item.matchStatus !== "matched").length,
-              JSON.stringify(packetStatusCounts),
-              JSON.stringify(toolUsage),
-              JSON.stringify(importConfidenceCounts),
-              JSON.stringify(findingCategoryCounts),
-              JSON.stringify(findingSeverityCounts),
-              JSON.stringify(remediationPriorityCounts),
-              latestImport ? JSON.stringify(latestImport) : null
-            ]
-          );
-        }
+      const deliveryRaw = await readJsonIfExists<unknown>(path.join(record.runDir, "delivery", "session.json"));
+      const deliverySession = deliveryRaw ? DeliverySessionStateSchema.parse(deliveryRaw) : null;
+      if (deliverySession) {
+        const packetStatusCounts = countPacketStatuses(deliverySession.packets);
+        const toolUsage = countToolUsage(deliverySession.exports);
+        const importConfidenceCounts = countImportConfidenceCounts(deliverySession.imports);
+        const findingCategoryCounts = countFindingCategoryCounts(deliverySession.findings);
+        const findingSeverityCounts = countFindingSeverityCounts(deliverySession.findings);
+        const remediationPriorityCounts = countRemediationPriorityCounts(deliverySession.remediations);
+        const latestImport = toDeliverySummaryLatestImport(deliverySession.imports[0], deliverySession.runId);
+        this.db.run(
+          "INSERT OR REPLACE INTO delivery_sessions (workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            record.workspaceId,
+            deliverySession.runId,
+            deliverySession.status,
+            deliverySession.updatedAt,
+            deliverySession.findings.filter((finding) => finding.status === "open").length,
+            deliverySession.findings.filter((finding) => finding.status === "resolved").length,
+            deliverySession.remediations.filter((task) => task.status !== "done").length,
+            deliverySession.remediations.filter((task) => task.status === "done").length,
+            deliverySession.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed").length,
+            deliverySession.imports.filter((item) => item.matchStatus !== "matched").length,
+            JSON.stringify(packetStatusCounts),
+            JSON.stringify(toolUsage),
+            JSON.stringify(importConfidenceCounts),
+            JSON.stringify(findingCategoryCounts),
+            JSON.stringify(findingSeverityCounts),
+            JSON.stringify(remediationPriorityCounts),
+            latestImport ? JSON.stringify(latestImport) : null
+          ]
+        );
       }
 
       const approvalsDir = path.join(record.runDir, "approvals");
@@ -418,9 +428,25 @@ export class StateIndex {
         repo_path TEXT,
         readiness_score REAL,
         readiness_blocking TEXT,
+        pause_reason TEXT,
+        change_status TEXT,
+        validation_status TEXT,
+        verdict TEXT,
         PRIMARY KEY (workspace_id, run_id)
       );
     `);
+    for (const column of [
+      "ALTER TABLE runs ADD COLUMN pause_reason TEXT",
+      "ALTER TABLE runs ADD COLUMN change_status TEXT",
+      "ALTER TABLE runs ADD COLUMN validation_status TEXT",
+      "ALTER TABLE runs ADD COLUMN verdict TEXT"
+    ]) {
+      try {
+        this.db.run(column);
+      } catch {
+        // ignore existing columns for local rebuilds
+      }
+    }
     this.db.run(`
       CREATE TABLE IF NOT EXISTS approvals (
         token TEXT PRIMARY KEY,

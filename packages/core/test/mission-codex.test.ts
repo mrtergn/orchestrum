@@ -10,6 +10,7 @@ import {
   buildAgents,
   createMissionSandbox,
   createMockCliSuite,
+  enablePassingValidationScripts,
   mockProviderFetch,
   singleLineDiff,
   wrapDiff
@@ -46,6 +47,7 @@ test("codex CLI adapter runs non-interactively", async () => {
 
 test("feature-dev mission completes with OpenAI-backed agents", async () => {
   const sandbox = await createMissionSandbox("mission-openai");
+  await enablePassingValidationScripts(sandbox.repoPath);
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "test-openai-key";
@@ -66,7 +68,7 @@ test("feature-dev mission completes with OpenAI-backed agents", async () => {
     });
 
     assert.equal(result.ok, true);
-    assert.equal(result.run.status, "finished");
+    assert.equal(result.run.status, "completed");
     assert.equal(result.run.graph.category, "implementation");
     assert.equal(result.run.graph.defaultGoalHint, "Describe the feature change, target files, and any constraints.");
     assert.equal(result.run.graph.nodes.find((node) => node.id === "implement")?.phase, "implement");

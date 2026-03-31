@@ -70,6 +70,11 @@ function statusColor(status: string) {
   switch (status) {
     case "running":
       return "text-amber-300";
+    case "paused":
+      return "text-cyan-300";
+    case "blocked":
+      return "text-fuchsia-300";
+    case "completed":
     case "finished":
       return "text-emerald-300";
     case "failed":
@@ -396,7 +401,7 @@ export default function HomePage() {
               <div className="text-[10px] uppercase tracking-[0.2em] text-cyan-300/80">Recommended Later</div>
               <div className="mt-2 text-sm font-semibold text-white">Build the org chart after your first run</div>
               <div className="mt-1 text-sm text-slate-400">
-                Core setup is already complete. Add reporting lines once your first agent loop is working and you want clearer routing.
+                Core setup is already complete. Add reporting lines later if you want coordination metadata around the mission workflow.
               </div>
             </div>
             <Link
@@ -416,7 +421,7 @@ export default function HomePage() {
         >
           <div className="text-lg text-amber-300/80">▶</div>
           <div className="mt-2 text-sm font-semibold text-white">New Run</div>
-          <div className="mt-1 text-xs text-slate-500">Start an autonomous mission from a built-in template or custom goal.</div>
+          <div className="mt-1 text-xs text-slate-500">Start a mission-backed run from a built-in template or custom goal.</div>
         </button>
         <Link
           href="/tasks"

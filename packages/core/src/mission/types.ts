@@ -1,5 +1,6 @@
 import type { LlmUsage } from "../runner/cost.js";
-import type { RunState } from "../runner/types.js";
+import type { ChangeState, RunState, ValidationState } from "../runner/types.js";
+import type { PauseReason, RunVerdict } from "../types/status.js";
 
 export const PROVIDER_VENDORS = ["codex", "copilot", "claude", "cursor", "openai", "ollama", "llama.cpp"] as const;
 export type ProviderVendor = typeof PROVIDER_VENDORS[number];
@@ -95,7 +96,7 @@ export type MissionTemplateCategory = typeof MISSION_TEMPLATE_CATEGORIES[number]
 export const MISSION_NODE_PHASES = ["plan", "implement", "verify", "review", "handoff"] as const;
 export type MissionNodePhase = typeof MISSION_NODE_PHASES[number];
 
-export type NodeExecutorKind = "prompt" | "patch" | "audit" | "delivery.export" | "delivery.wait";
+export type NodeExecutorKind = "prompt" | "patch" | "audit" | "validate" | "delivery.export" | "delivery.wait";
 
 export type MissionInputRef =
   | "goal"
@@ -187,6 +188,10 @@ export type MissionNode = {
   start?: string;
   end?: string;
   error?: string | null;
+  pauseReason?: PauseReason | null;
+  change?: ChangeState | null;
+  validation?: ValidationState | null;
+  verdict?: RunVerdict | null;
 };
 
 export type MissionGraph = {
@@ -214,6 +219,7 @@ export type NodeExecutorResult = {
   artifacts?: NodeArtifactRef[];
   waitingForInput?: boolean;
   blocked?: boolean;
+  pauseReason?: PauseReason;
   findingCount?: number;
   approval?: MissionApprovalGate | null;
   provider?: CanonicalProvider;
@@ -224,6 +230,10 @@ export type NodeExecutorResult = {
   authSource?: string | null;
   exitCode?: number | null;
   usage?: LlmUsage | null;
+  change?: ChangeState | null;
+  validation?: ValidationState | null;
+  verdict?: RunVerdict | null;
+  failureMessage?: string | null;
 };
 
 export type MissionRunResult = {

@@ -101,7 +101,7 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 
 <p><strong><code>delivery</code></strong></p>
 
-<p>Work-packet export/import, findings, remediations, and evidence tracking in one local session.</p>
+<p>Mission-backed work-packet export/import, findings, remediations, and evidence tracking in one local run.</p>
 
 <p><code>orchestrum delivery run --repo /path/to/repo ...</code></p>
 
@@ -301,9 +301,9 @@ orchestrum cancel mission-123 --workspace demo
 orchestrum delivery doctor --repo /path/to/repo --workspace demo
 orchestrum delivery init-preset --repo /path/to/repo --workspace demo
 orchestrum delivery run --repo /path/to/repo --workspace demo --goal "Sprint 12"
-orchestrum delivery export packet-1 --run delivery-123 --workspace demo --target chatgpt
-orchestrum delivery import --run delivery-123 --workspace demo --target chatgpt --file response.txt
-orchestrum delivery findings --run delivery-123 --workspace demo
+orchestrum delivery export packet-1 --run mission-123 --workspace demo --target chatgpt
+orchestrum delivery import --run mission-123 --workspace demo --target chatgpt --file response.txt
+orchestrum delivery findings --run mission-123 --workspace demo
 orchestrum delivery summary --workspace demo
 
 orchestrum qa --repo /path/to/repo --workspace demo --base-url http://localhost:3000

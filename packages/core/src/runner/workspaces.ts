@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { ensureDir, writeJson } from "./fs.js";
+import { getAppHome } from "../appHome.js";
 
 export type Workspace = {
   id: string;
@@ -24,7 +25,8 @@ export type WorkspacePathValidation = {
 };
 
 export function getWorkspacesPath(rootDir: string): string {
-  return path.join(rootDir, "data", "workspaces.json");
+  void rootDir;
+  return path.join(getAppHome(), "workspaces.json");
 }
 
 export async function loadWorkspaces(rootDir: string): Promise<Workspace[]> {

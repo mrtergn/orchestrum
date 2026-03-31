@@ -83,14 +83,14 @@ export async function buildRunLearnings(options: {
 
   entries.push(
     createLearning({
-      category: options.runMeta.status === "finished" ? "success_pattern" : "run_outcome",
+      category: options.runMeta.status === "completed" ? "success_pattern" : "run_outcome",
       insight:
-        options.runMeta.status === "finished"
-          ? `Run ${options.runMeta.runId} finished successfully with ${options.runMeta.completedSteps ?? 0} completed steps.`
+        options.runMeta.status === "completed"
+          ? `Run ${options.runMeta.runId} completed successfully with ${options.runMeta.completedSteps ?? 0} completed steps.`
           : `Run ${options.runMeta.runId} ended with status ${options.runMeta.status}.`,
       relatedFiles: Array.from(relatedFiles).slice(0, 10),
       sourceRunId: options.runMeta.runId,
-      confidence: options.runMeta.status === "finished" ? 0.7 : 0.55
+      confidence: options.runMeta.status === "completed" ? 0.7 : 0.55
     })
   );
 

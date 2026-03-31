@@ -64,7 +64,7 @@ function applyMigrations(meta: RunState, version: number): RunState {
 function migrateV1ToV2(meta: RunState): RunState {
   const updated: RunState = { ...meta };
   if (!updated.status) {
-    updated.status = updated.end ? "finished" : "interrupted";
+    updated.status = updated.end ? "completed" : "interrupted";
   }
   if (!updated.tags) updated.tags = [];
   if (!updated.pinned) updated.pinned = false;

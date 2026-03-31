@@ -127,11 +127,11 @@ export async function scanStaleWorktrees(runsDir: string): Promise<StaleWorktree
       try {
         const runMeta = JSON.parse(runMetaRaw) as { status?: string; end?: string | null };
         const status = String(runMeta.status ?? "");
-        if (status === "finished") {
+        if (status === "completed") {
           results.push({ workspaceId, runId, worktreePath, reason: "Completed run still has a worktree." });
           continue;
         }
-        if (status === "failed" || status === "cancelled" || status === "interrupted") {
+        if (status === "failed" || status === "blocked" || status === "cancelled" || status === "interrupted") {
           const endTs = runMeta.end ? Date.parse(runMeta.end) : 0;
           if (endTs > 0 && Date.now() - endTs > 6 * 60 * 60 * 1000) {
             results.push({ workspaceId, runId, worktreePath, reason: `Inactive ${status} worktree older than 6 hours.` });

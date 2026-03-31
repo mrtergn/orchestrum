@@ -143,13 +143,13 @@ export async function runBrowserRunDetailed(options: BrowserRunInput): Promise<{
       }
     }
 
-    runMeta.status = alerts > 0 || failures > 0 ? "failed" : "finished";
+    runMeta.status = alerts > 0 || failures > 0 ? "failed" : "completed";
     runMeta.end = nowIso();
     runMeta.readiness = buildBrowserReadiness(options.kind, alerts + failures, runMeta.status);
     await writeJson(runMetaPath, runMeta);
-    events.emit({ t: "run.finished", runId, ok: runMeta.status === "finished", ts: nowTs() });
-    await logger.info("browser.run.finished", { runId, kind: options.kind, alerts, ok: runMeta.status === "finished" });
-    return { ok: runMeta.status === "finished", runId, runDir };
+    events.emit({ t: "run.finished", runId, ok: runMeta.status === "completed", ts: nowTs() });
+    await logger.info("browser.run.finished", { runId, kind: options.kind, alerts, ok: runMeta.status === "completed" });
+    return { ok: runMeta.status === "completed", runId, runDir };
   } catch (err) {
     runMeta.status = "failed";
     runMeta.end = nowIso();
@@ -270,7 +270,7 @@ function resolveBaseUrl(options: BrowserRunInput, profileBaseUrl?: string): stri
 function buildBrowserReadiness(kind: BrowserRunKind, alerts: number, status: RunState["status"]): RunReadiness {
   const blocking: string[] = [];
   let score = 100;
-  if (status !== "finished") {
+  if (status !== "completed") {
     score -= 35;
     blocking.push(`${kind} run did not finish cleanly.`);
   }

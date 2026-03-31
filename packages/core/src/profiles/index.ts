@@ -3,6 +3,22 @@ import path from "node:path";
 import { z } from "zod";
 import { writeJson, readJsonIfExists, ensureDir } from "../runner/fs.js";
 import type { OrchestrumConfig } from "../runner/config.js";
+import type { RepoExecutionProfile } from "../runner/types.js";
+
+const RepoExecutionProfileSchema: z.ZodType<RepoExecutionProfile> = z.object({
+  package_manager: z.enum(["npm", "pnpm", "yarn"]).optional(),
+  commands: z.object({
+    lint: z.string().min(1).optional(),
+    typecheck: z.string().min(1).optional(),
+    test: z.string().min(1).optional(),
+    build: z.string().min(1).optional(),
+    smoke: z.string().min(1).optional(),
+    dev: z.string().min(1).optional()
+  }).optional(),
+  protected_paths: z.array(z.string().min(1)).optional(),
+  risky_commands: z.array(z.string().min(1)).optional(),
+  readiness_requirements: z.array(z.string().min(1)).optional()
+});
 
 const ProfileSchema = z.object({
   risk_tolerance: z.enum(["low", "medium", "high"]).optional(),
@@ -16,7 +32,8 @@ const ProfileSchema = z.object({
     dangerous_command_guard: z.boolean().optional(),
     config_protection: z.boolean().optional(),
     quality_gate: z.boolean().optional()
-  }).optional()
+  }).optional(),
+  repo_execution: RepoExecutionProfileSchema.optional()
 });
 
 export type WorkspaceProfile = z.infer<typeof ProfileSchema>;
@@ -85,6 +102,16 @@ export function applyProfileToConfig(profile: WorkspaceProfile | null, config: O
     merged.governance = {
       ...(merged.governance ?? {}),
       ...profile.governance
+    };
+  }
+  if (profile.repo_execution) {
+    merged.repo_execution = {
+      ...(merged.repo_execution ?? {}),
+      ...profile.repo_execution,
+      commands: {
+        ...(merged.repo_execution?.commands ?? {}),
+        ...(profile.repo_execution.commands ?? {})
+      }
     };
   }
   return merged;

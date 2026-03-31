@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { resumeMissionRun, runMissionDetailed } from "../src/mission/runtime.js";
 import { ClaudeProvider } from "../src/runner/providers/claude.js";
-import { buildAgents, createMissionSandbox, mockProviderFetch } from "./missionTestUtils.js";
+import { buildAgents, createMissionSandbox, enablePassingValidationScripts, mockProviderFetch } from "./missionTestUtils.js";
 
 test("claude provider normalizes usage", async () => {
   const originalFetch = globalThis.fetch;
@@ -50,6 +50,7 @@ test("feature-dev mission pauses for approval and resumes with Claude-backed age
     relativePath: path.join(".github", "workflows", "ci.yml"),
     initialContent: "name: ci\n"
   });
+  await enablePassingValidationScripts(sandbox.repoPath);
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
@@ -89,7 +90,7 @@ test("feature-dev mission pauses for approval and resumes with Claude-backed age
     });
 
     assert.equal(resumed.ok, true);
-    assert.equal(resumed.run.status, "finished");
+    assert.equal(resumed.run.status, "completed");
     assert.match(await fs.readFile(path.join(sandbox.repoPath, ".github", "workflows", "ci.yml"), "utf8"), /OPENAI_API_KEY/);
   } finally {
     globalThis.fetch = originalFetch;

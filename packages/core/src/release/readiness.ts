@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ReleaseReadiness } from "../contracts/service.js";
 import { loadDocsSyncState } from "../docs/sync.js";
-import { loadGovernanceEvents } from "../runner/governance.js";
 import { readJsonIfExists } from "../runner/fs.js";
+import { loadGovernanceEvents } from "../runner/governance.js";
 
 export async function computeReleaseReadiness(options: {
   workspacePath: string;
@@ -12,16 +12,46 @@ export async function computeReleaseReadiness(options: {
 }): Promise<ReleaseReadiness> {
   const workspaceId = options.workspaceId;
   const latestRun = workspaceId ? await loadLatestRun(options.runsDir, workspaceId) : null;
-  const latestRunId = latestRun?.runId;
   const blocking: string[] = [];
   let score = 100;
   let pendingApprovals = 0;
   let governanceAlerts = 0;
   let qualityGateOk = true;
+  let docsFresh = false;
+  let blockingFindings = 0;
 
-  if (latestRun?.status && latestRun.status !== "finished") {
+  const validationStatus = latestRun?.meta?.validation?.status ?? "not_requested";
+  const changeStatus = latestRun?.meta?.change?.status ?? "none";
+  const verdict = latestRun?.meta?.verdict ?? null;
+  const readinessRequirements = normalizeRequirements(latestRun?.meta?.profile?.repo_execution?.readiness_requirements);
+
+  if (latestRun?.status && latestRun.status !== "completed") {
     score -= 25;
     blocking.push(`Latest run ${latestRun.runId} ended with status ${latestRun.status}.`);
+  }
+  if (verdict === "failed" || verdict === "blocked") {
+    score -= 20;
+    blocking.push(`Latest run verdict is ${verdict}.`);
+  }
+  if (changeStatus === "apply_failed") {
+    score -= 20;
+    blocking.push("Latest run contains a patch that failed to apply.");
+  }
+  if (validationStatus === "failed") {
+    score -= 25;
+    blocking.push("Latest validation run failed.");
+  }
+  if ((changeStatus === "generated" || changeStatus === "applied" || changeStatus === "validation_failed") && validationStatus !== "passed") {
+    score -= 20;
+    blocking.push(`Latest change state is ${changeStatus} but validation did not pass.`);
+  }
+  if (readinessRequirements.length > 0) {
+    const results = Array.isArray(latestRun?.meta?.validation?.results) ? latestRun.meta.validation.results : [];
+    const missingRequirements = readinessRequirements.filter((requirement) => !hasPassedRequirement(results, requirement));
+    if (missingRequirements.length > 0) {
+      score -= Math.min(20, missingRequirements.length * 5);
+      blocking.push(`Required validations did not pass: ${missingRequirements.join(", ")}.`);
+    }
   }
 
   if (latestRun?.runDir) {
@@ -57,18 +87,27 @@ export async function computeReleaseReadiness(options: {
       score -= 15;
       blocking.push("Latest quality gate did not pass.");
     }
+
+    const deliverySession = await readJsonIfExists<{ findings?: Array<{ status?: string; severity?: string }> }>(
+      path.join(latestRun.runDir, "delivery", "session.json")
+    );
+    const findings = Array.isArray(deliverySession?.findings) ? deliverySession.findings : [];
+    blockingFindings = findings.filter((finding) => finding.status === "open" && finding.severity !== "low").length;
+    if (blockingFindings > 0) {
+      score -= Math.min(20, blockingFindings * 5);
+      blocking.push(`${blockingFindings} open delivery finding(s) still block readiness.`);
+    }
   }
 
   const docsState = await loadDocsSyncState(options.workspacePath);
-  const docsFresh = Boolean(docsState?.syncedAt) && !(docsState?.updatedFiles?.length === 0 && docsState?.changedFiles?.length);
+  docsFresh = Boolean(docsState?.syncedAt) && !(docsState?.updatedFiles?.length === 0 && docsState?.changedFiles?.length);
   if (!docsFresh) {
-    score -= 15;
-    blocking.push("Documentation sync is stale or has not been run.");
+    score -= 5;
   }
 
   return {
     workspaceId,
-    latestRunId,
+    latestRunId: latestRun?.runId,
     score: Math.max(0, score),
     blocking,
     updatedAt: new Date().toISOString(),
@@ -76,7 +115,12 @@ export async function computeReleaseReadiness(options: {
       pendingApprovals,
       governanceAlerts,
       docsFresh,
-      qualityGateOk
+      qualityGateOk,
+      validationStatus,
+      changeStatus,
+      verdict,
+      readinessRequirements,
+      blockingFindings
     }
   };
 }
@@ -85,14 +129,15 @@ async function loadLatestRun(runsDir: string, workspaceId: string): Promise<{
   runId: string;
   runDir: string;
   status?: string;
+  meta?: any;
 } | null> {
   const workspaceDir = path.join(runsDir, workspaceId);
   const entries = await fs.readdir(workspaceDir, { withFileTypes: true }).catch(() => []);
-  let latest: { runId: string; runDir: string; startTs: number; status?: string } | null = null;
+  let latest: { runId: string; runDir: string; startTs: number; status?: string; meta?: any } | null = null;
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const runDir = path.join(workspaceDir, entry.name);
-    const runMeta = await readJsonIfExists<{ runId?: string; start?: string; status?: string }>(path.join(runDir, "run.json"));
+    const runMeta = await readJsonIfExists<{ runId?: string; start?: string; status?: string } & Record<string, unknown>>(path.join(runDir, "run.json"));
     if (!runMeta) continue;
     const startTs = runMeta.start ? Date.parse(runMeta.start) : 0;
     if (!latest || startTs >= latest.startTs) {
@@ -100,11 +145,12 @@ async function loadLatestRun(runsDir: string, workspaceId: string): Promise<{
         runId: runMeta.runId ?? entry.name,
         runDir,
         startTs,
-        status: runMeta.status
+        status: runMeta.status,
+        meta: runMeta
       };
     }
   }
-  return latest ? { runId: latest.runId, runDir: latest.runDir, status: latest.status } : null;
+  return latest ? { runId: latest.runId, runDir: latest.runDir, status: latest.status, meta: latest.meta } : null;
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -114,4 +160,22 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function normalizeRequirements(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === "string" ? item.trim().toLowerCase() : ""))
+    .filter(Boolean);
+}
+
+function hasPassedRequirement(
+  results: Array<{ command?: string | null; ok?: boolean | null; summary?: string | null }>,
+  requirement: string
+): boolean {
+  return results.some((result) => {
+    if (!result?.ok) return false;
+    const haystack = `${result.command ?? ""} ${result.summary ?? ""}`.toLowerCase();
+    return haystack.includes(requirement);
+  });
 }

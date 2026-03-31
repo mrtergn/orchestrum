@@ -35,7 +35,6 @@ import {
   syncWorkspaceDocs,
   discoverDeliverySetup,
   initTeamPreset,
-  runDeliverySessionDetailed,
   exportDeliveryPacket,
   analyzeDeliveryImport,
   importDeliveryPacketResponse,
@@ -343,20 +342,32 @@ deliveryCmd
       const repoPath = path.resolve(options.repo);
       const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
       const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
-      const result = await runDeliverySessionDetailed({
+      const workspaces = await loadWorkspaces(process.cwd());
+      const workspace = findWorkspaceById(workspaces, workspaceId);
+      if (!workspace) {
+        throw new Error(`Workspace ${workspaceId} not found. Use orchestrum workspace add.`);
+      }
+      const agents = await loadWorkspaceMissionAgents(workspace.path);
+      const goal = [
+        String(options.goal),
+        options.sprint ? `Sprint: ${String(options.sprint)}` : "",
+        options.notes ? `Notes: ${String(options.notes)}` : "",
+        Array.isArray(options.path) && options.path.length > 0 ? `Selected paths: ${options.path.map((item: string) => String(item)).join(", ")}` : ""
+      ].filter(Boolean).join("\n");
+      const result = await runMissionDetailed({
+        templateId: "delivery-sprint",
         repoPath,
         runsDir,
         workspaceId,
-        goal: String(options.goal),
-        sprintName: options.sprint ? String(options.sprint) : undefined,
-        notes: options.notes ? String(options.notes) : undefined,
-        selectedPaths: Array.isArray(options.path) ? options.path.map((item: string) => String(item)) : []
+        goal,
+        agents
       });
       console.log(JSON.stringify({
         ok: result.ok,
         runId: result.runId,
-        summary: result.session.summary,
-        status: result.session.status
+        status: result.run.status,
+        paused: result.paused ?? false,
+        verdict: result.run.verdict ?? null
       }, null, 2));
     } catch (err) {
       await handleFatal(err);

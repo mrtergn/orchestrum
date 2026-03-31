@@ -16,6 +16,7 @@ import "./mission-claude.test.ts";
 import "./mission-cursor.test.ts";
 import "./mission-fallback.test.ts";
 import "./mission-discovery.test.ts";
+import "./mission-truth.test.ts";
 import "./updates.test.ts";
 import "./licensing.test.ts";
 import "./tailer.test.ts";

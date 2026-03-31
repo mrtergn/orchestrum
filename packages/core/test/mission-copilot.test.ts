@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { completeWithProvider } from "../src/mission/providers.js";
 import { runMissionDetailed } from "../src/mission/runtime.js";
-import { buildCliFeatureAgents, createMissionSandbox, createMockCliSuite } from "./missionTestUtils.js";
+import { buildCliFeatureAgents, createMissionSandbox, createMockCliSuite, enablePassingValidationScripts } from "./missionTestUtils.js";
 
 test("copilot CLI adapter runs in read-only mode with an explicit profile", async () => {
   const sandbox = await createMissionSandbox("mission-copilot-cli-readonly");
@@ -65,6 +65,7 @@ test("copilot CLI adapter can use the CLI default model without env-based discov
 
 test("feature-dev mission completes with default Copilot-backed developer agent", async () => {
   const sandbox = await createMissionSandbox("mission-copilot");
+  await enablePassingValidationScripts(sandbox.repoPath);
   const cli = await createMockCliSuite();
   const originalEnv = {
     ORCHESTRUM_CLAUDE_BIN: process.env.ORCHESTRUM_CLAUDE_BIN,
@@ -89,7 +90,7 @@ test("feature-dev mission completes with default Copilot-backed developer agent"
     });
 
     assert.equal(result.ok, true);
-    assert.equal(result.run.status, "finished");
+    assert.equal(result.run.status, "completed");
     assert.match(await fs.readFile(path.join(sandbox.repoPath, "src", "index.ts"), "utf8"), /false/);
     assert.equal(result.run.graph.nodes.find((node) => node.id === "spec")?.transport, "cli");
     assert.equal(result.run.graph.nodes.find((node) => node.id === "implement")?.transport, "cli");

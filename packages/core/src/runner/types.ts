@@ -1,4 +1,11 @@
-import type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus } from "../types/status.js";
+import type {
+  ChangeStatus,
+  PauseReason,
+  RunStatus as CanonicalRunStatus,
+  RunVerdict,
+  StepStatus as CanonicalStepStatus,
+  ValidationStatus
+} from "../types/status.js";
 
 export type AgentStatus = "active" | "idle" | "sleeping" | "failed" | "completed";
 
@@ -8,7 +15,32 @@ export type AgentState = {
   currentStepId?: string;
 };
 
-export type StepStatus = CanonicalStepStatus | "completed" | "failed" | "cancelled" | "waiting_input" | "awaiting_approval" | "blocked";
+export type ValidationCommandResult = {
+  command: string;
+  ok: boolean;
+  exitCode: number | null;
+  logPath?: string | null;
+  summary?: string | null;
+};
+
+export type ValidationState = {
+  status: ValidationStatus;
+  commands: string[];
+  results: ValidationCommandResult[];
+  summary?: string | null;
+  attemptedAt?: string | null;
+  completedAt?: string | null;
+};
+
+export type ChangeState = {
+  status: ChangeStatus;
+  diffArtifact?: string | null;
+  applyError?: string | null;
+  appliedAt?: string | null;
+  source?: "provider" | "external";
+};
+
+export type StepStatus = CanonicalStepStatus;
 
 export type StepState = {
   stepId: string;
@@ -31,9 +63,28 @@ export type StepState = {
     confidence?: number | null;
     decisionPath?: string[] | null;
   } | null;
+  pauseReason?: PauseReason | null;
+  change?: ChangeState | null;
+  validation?: ValidationState | null;
+  verdict?: RunVerdict | null;
 };
 
-export type RunStatus = CanonicalRunStatus | "finished";
+export type RepoExecutionProfile = {
+  package_manager?: "npm" | "pnpm" | "yarn";
+  commands?: {
+    lint?: string;
+    typecheck?: string;
+    test?: string;
+    build?: string;
+    smoke?: string;
+    dev?: string;
+  };
+  protected_paths?: string[];
+  risky_commands?: string[];
+  readiness_requirements?: string[];
+};
+
+export type RunStatus = CanonicalRunStatus;
 
 export type RunKind = "mission" | "qa" | "benchmark" | "canary" | "delivery";
 
@@ -115,6 +166,10 @@ export type RunState = {
   repoPath?: string;
   missionTemplateId?: string;
   readiness?: RunReadiness | null;
+  pauseReason?: PauseReason | null;
+  change?: ChangeState | null;
+  validation?: ValidationState | null;
+  verdict?: RunVerdict | null;
   profile?: {
     risk_tolerance?: string;
     max_cost_per_run?: number;
@@ -123,6 +178,7 @@ export type RunState = {
     execution_mode?: "inline" | "worktree";
     browser_base_url?: string;
     governance?: GovernanceProfile;
+    repo_execution?: RepoExecutionProfile;
   } | null;
   error?: string;
 };

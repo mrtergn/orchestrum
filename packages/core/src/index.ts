@@ -1,7 +1,15 @@
 export { cancelRun } from "./runner/run.js";
 export { registerAgent } from "./agents/index.js";
 export * from "./constants.js";
-export type { RunStatus as CanonicalRunStatus, StepStatus as CanonicalStepStatus, ApprovalStatus } from "./types/status.js";
+export type {
+  RunStatus as CanonicalRunStatus,
+  StepStatus as CanonicalStepStatus,
+  ApprovalStatus,
+  PauseReason,
+  ChangeStatus,
+  ValidationStatus,
+  RunVerdict
+} from "./types/status.js";
 export {
   runMissionDetailed,
   resumeMissionRun,
@@ -28,6 +36,7 @@ export { runBinary, lookupBinary } from "./runner/bin.js";
 export { Logger } from "./runner/logger.js";
 export { readAppendedLines, readTailLines } from "./runner/tailer.js";
 export { recoverInterruptedRuns } from "./runner/recovery.js";
+export { detectPackageManager, loadRepoExecutionProfile, resolveValidationCommands, runValidationSuite } from "./runner/repoExecution.js";
 export {
   loadConfig,
   loadGlobalConfig,

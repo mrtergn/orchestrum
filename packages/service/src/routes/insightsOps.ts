@@ -15,6 +15,11 @@ type InsightsAgentPlatform = {
     templateId: string;
     goal: string;
     runId?: string;
+    runOptions?: {
+      concurrency?: number;
+      modelOverrides?: Record<string, string>;
+      strategyMode?: string;
+    };
   }): Promise<Record<string, unknown>>;
 };
 
@@ -42,7 +47,7 @@ export function registerInsightsOpsRoutes(
       const runs = await options.stateIndex.queryRuns(workspaceId).catch(() => []);
       analytics = {
         runs: runs.length,
-        successes: runs.filter((run) => run.status === "finished").length,
+        successes: runs.filter((run) => run.status === "completed").length,
         failures: runs.filter((run) => run.status === "failed").length,
         totalCost: 0,
         costPerFeature: 0,

@@ -203,7 +203,7 @@ export function registerRunRoutes(
           });
         }
         if (previous === "running" && run.status !== "running") {
-          sendEvent("run:finished", {
+          sendEvent("run:updated", {
             runId: run.runId,
             workspaceId: run.workspaceId,
             status: run.status,
@@ -521,6 +521,11 @@ async function buildRunDetail(run: RunRecordLike) {
   if (isMissionRunMeta(run.meta)) {
     const missionRun = await loadMissionRun(run.runDir).catch(() => null);
     const graph = missionRun?.graph ?? run.meta.graph ?? null;
+    const delivery = await loadDeliverySession({
+      runsDir: path.resolve(run.runDir, "..", ".."),
+      runId: run.runId,
+      workspaceId: run.workspaceId
+    }).catch(() => null);
     const steps = graph ? missionGraphToStepStates(graph) : [];
     return {
       run: missionRun ?? run.meta,
@@ -537,7 +542,7 @@ async function buildRunDetail(run: RunRecordLike) {
             nodes: graph.nodes
           }
         : null,
-      delivery: null
+      delivery
     };
   }
   if (run.meta?.kind === "delivery") {

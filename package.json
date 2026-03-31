@@ -10,7 +10,7 @@
   "scripts": {
     "bootstrap": "npm ci && npm install --prefix packages/core && npm install --prefix packages/service && npm install --prefix apps/ui && npm install --prefix apps/desktop",
     "dev": "npm --prefix apps/ui run dev",
-    "build": "npm run build:ui",
+    "build": "npm run build:ui && npm run build:service",
     "build:ui": "npm --prefix apps/ui run build",
     "build:service": "npm --prefix packages/service run build",
     "build:all": "npm run build:ui && npm run build:service",

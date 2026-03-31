@@ -931,7 +931,7 @@ export default function SettingsPage() {
             <div className="rounded-2xl border border-slate-800 bg-slate-900/20 p-5">
               <h3 className="text-sm font-semibold text-white">What this tab controls</h3>
               <p className="mt-1 text-xs text-slate-400">
-                Profile settings define how autonomous a workspace should feel: its safety posture, budget ceiling, editing style, and delivery defaults.
+                Profile settings define how a workspace should execute: its safety posture, budget ceiling, editing style, and delivery defaults.
               </p>
               <div className="mt-3 text-[11px] text-slate-500">
                 The upper section changes agent behavior for this workspace. The lower sections control delivery presets and suggested tool routing.

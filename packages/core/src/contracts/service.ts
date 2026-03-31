@@ -1,4 +1,12 @@
-import type { GovernanceProfile, RunKind, RunReadiness, RunState, StepState } from "../runner/types.js";
+import type {
+  GovernanceProfile,
+  RepoExecutionProfile,
+  RunKind,
+  RunReadiness,
+  RunState,
+  StepState
+} from "../runner/types.js";
+import type { ChangeStatus, PauseReason, RunVerdict, ValidationStatus } from "../types/status.js";
 import type {
   CapabilityDiscoveryResult,
   DeliveryImportAnalysis,
@@ -23,6 +31,8 @@ import type { MissionGraph, MissionNode } from "../mission/types.js";
 export const TASK_RUNTIME_STATUSES = [
   "queued",
   "running",
+  "paused",
+  "blocked",
   "succeeded",
   "failed",
   "cancelled"
@@ -91,11 +101,33 @@ export type RunProgressSnapshot = {
 };
 
 export type RunStartOptions = {
-  sandbox?: boolean;
   concurrency?: number;
   modelOverrides?: Record<string, string>;
   strategyMode?: string;
   passphrase?: string;
+};
+
+export type ChangeTruth = {
+  status: ChangeStatus;
+  diffArtifact?: string | null;
+  applyError?: string | null;
+  appliedAt?: string | null;
+  source?: "provider" | "external";
+};
+
+export type ValidationTruth = {
+  status: ValidationStatus;
+  commands: string[];
+  results: Array<{
+    command: string;
+    ok: boolean;
+    exitCode: number | null;
+    logPath?: string | null;
+    summary?: string | null;
+  }>;
+  summary?: string | null;
+  attemptedAt?: string | null;
+  completedAt?: string | null;
 };
 
 export type BrowserRunOptions = {
@@ -233,6 +265,11 @@ export type ReleaseReadiness = RunReadiness & {
     governanceAlerts: number;
     docsFresh: boolean;
     qualityGateOk: boolean;
+    validationStatus?: string;
+    changeStatus?: string;
+    verdict?: string | null;
+    readinessRequirements?: string[];
+    blockingFindings?: number;
   };
 };
 
@@ -244,6 +281,7 @@ export type WorkspaceProfileShape = {
   execution_mode?: "inline" | "worktree";
   browser_base_url?: string;
   governance?: GovernanceProfile;
+  repo_execution?: RepoExecutionProfile;
 };
 
 export type {
@@ -273,6 +311,10 @@ export function normalizeTaskStatus(status: string | null | undefined): TaskRunt
     case "success":
     case "succeeded":
       return "succeeded";
+    case "paused":
+      return "paused";
+    case "blocked":
+      return "blocked";
     case "failed":
     case "error":
       return "failed";
@@ -305,3 +347,8 @@ export function normalizeAgentRuntimeState(state: string | null | undefined): Ag
 export function isAgentRuntimeBusy(state: string | null | undefined): boolean {
   return normalizeAgentRuntimeState(state) === "active";
 }
+
+export type {
+  PauseReason,
+  RunVerdict
+};

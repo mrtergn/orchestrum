@@ -71,7 +71,7 @@ function waitForUrl(url, timeoutMs = 20000) {
         .get(url, () => resolve(true))
         .on("error", () => {
           if (Date.now() - start > timeoutMs) {
-            reject(new Error("Timed out waiting for UI"));
+            reject(new Error(`Timed out waiting for ${url}. Check local runtime prerequisites, ports, and provider/auth setup.`));
           } else {
             setTimeout(poll, 500);
           }
@@ -88,8 +88,7 @@ function startService(paths) {
   ensurePathExists(serviceEntry, "Service entry");
   const tsxBin = resolveTsxBin(paths.serviceRoot);
   serviceProcess = spawnNode(tsxBin, [serviceEntry], paths.rootDir, {
-    ORCHESTRUM_SERVICE_PORT: String(SERVICE_PORT),
-    ORCHESTRUM_USE_KEYCHAIN: "1"
+    ORCHESTRUM_SERVICE_PORT: String(SERVICE_PORT)
   });
   bindChildLifecycle(serviceProcess, "Service");
 }

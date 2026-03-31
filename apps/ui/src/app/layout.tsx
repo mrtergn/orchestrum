@@ -12,10 +12,10 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 export const metadata: Metadata = {
   title: {
-    default: "Orchestrum — AI Engineering OS",
+    default: "Orchestrum — Local-First AI Control Plane",
     template: "%s | Orchestrum",
   },
-  description: "Local-first AI Engineering OS. Define agents, wire org charts, and let AI plan, build, audit, and deploy — all without sending code to third parties.",
+  description: "Local-first AI engineering control plane. Run missions, validate changes, coordinate handoffs, and inspect evidence on your machine.",
   keywords: ["ai", "agents", "engineering", "automation", "local-first", "open-source", "orchestration"],
   authors: [{ name: "Orchestrum Contributors" }],
   icons: {
@@ -23,8 +23,8 @@ export const metadata: Metadata = {
     apple: "/apple-touch-icon.svg",
   },
   openGraph: {
-    title: "Orchestrum — AI Engineering OS",
-    description: "Local-first AI Engineering OS. Define agents, wire org charts, and let AI plan, build, audit, and deploy.",
+    title: "Orchestrum — Local-First AI Control Plane",
+    description: "Local-first AI engineering control plane with mission runs, validation, handoff tracking, and evidence.",
     type: "website",
     siteName: "Orchestrum",
   },

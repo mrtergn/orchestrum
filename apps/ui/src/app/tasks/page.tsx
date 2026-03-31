@@ -16,11 +16,19 @@ type Task = {
   attempts: number;
   maxAttempts: number;
   createdAt: string;
+  linkedRunId?: string;
+  linkedTemplateId?: string;
+  pauseReason?: string | null;
+  change?: { status?: string | null } | null;
+  validation?: { status?: string | null } | null;
+  verdict?: string | null;
   resultSummary?: string;
 };
 
 const STATUS: Record<string, { bg: string; text: string; icon: string; ring: string }> = {
   running:   { bg: "bg-amber-400/15",   text: "text-amber-300",   icon: "↻", ring: "border-amber-400/40" },
+  paused:    { bg: "bg-cyan-400/15",    text: "text-cyan-300",    icon: "⏸", ring: "border-cyan-400/40" },
+  blocked:   { bg: "bg-fuchsia-400/15", text: "text-fuchsia-300", icon: "!", ring: "border-fuchsia-400/40" },
   succeeded: { bg: "bg-emerald-400/15",  text: "text-emerald-300", icon: "✓", ring: "border-emerald-400/40" },
   failed:    { bg: "bg-rose-400/15",     text: "text-rose-300",    icon: "✗", ring: "border-rose-400/40" },
   cancelled: { bg: "bg-slate-400/15",    text: "text-slate-400",   icon: "⊘", ring: "border-slate-500/40" },
@@ -44,7 +52,6 @@ export default function TasksPage() {
   const [description, setDescription] = useState("");
   const [taskType, setTaskType] = useState<Task["type"]>("generic");
   const [assignedToAgentId, setAssignedToAgentId] = useState("");
-  const [repoPath, setRepoPath] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [taskLogs, setTaskLogs] = useState("");
   const [artifacts, setArtifacts] = useState<string[]>([]);
@@ -80,13 +87,11 @@ export default function TasksPage() {
         title,
         description,
         type: taskType,
-        assignedToAgentId,
-        payload: { repoPath: repoPath || undefined }
+        assignedToAgentId
       })
     });
     setTitle("");
     setDescription("");
-    setRepoPath("");
     setShowForm(false);
     pushToast({ tone: "success", title: "Task queued", message: title });
     await load();
@@ -117,6 +122,10 @@ export default function TasksPage() {
 
   /* ---- Summary stats ---- */
   const running = tasks.filter((t) => normalizeTaskStatus(t.status) === "running").length;
+  const paused = tasks.filter((t) => {
+    const status = normalizeTaskStatus(t.status);
+    return status === "paused" || status === "blocked";
+  }).length;
   const completed = tasks.filter((t) => normalizeTaskStatus(t.status) === "succeeded").length;
   const failed = tasks.filter((t) => normalizeTaskStatus(t.status) === "failed").length;
 
@@ -129,7 +138,7 @@ export default function TasksPage() {
           <p className="text-sm text-slate-400">
             {tasks.length > 0
               ? `${tasks.length} task${tasks.length !== 1 ? "s" : ""} · ${running} running`
-              : "Assign work to your agents and track execution."}
+              : "Route manual or mission-backed work through the agent layer."}
           </p>
         </div>
         {agents.length > 0 && (
@@ -144,11 +153,12 @@ export default function TasksPage() {
 
       {/* Quick stats bar */}
       {tasks.length > 0 && (
-        <section className="grid grid-cols-3 gap-3">
+        <section className="grid grid-cols-4 gap-3">
           {[
             { label: "Running", value: running, icon: "▶", accent: "border-amber-400/30 text-amber-300" },
+            { label: "Paused/Blocked", value: paused, icon: "⏸", accent: "border-cyan-400/30 text-cyan-300" },
             { label: "Completed", value: completed, icon: "✓", accent: "border-emerald-400/30 text-emerald-300" },
-            { label: "Failed", value: failed, icon: "✗", accent: "border-rose-400/30 text-rose-300" },
+            { label: "Failed", value: failed, icon: "✗", accent: "border-rose-400/30 text-rose-300" }
           ].map((s) => (
             <div key={s.label} className={`flex items-center gap-3 rounded-xl border bg-slate-950/40 p-3 ${s.accent.split(" ")[0]}`}>
               <div className={`flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 text-sm ${s.accent.split(" ")[1]}`}>{s.icon}</div>
@@ -223,12 +233,6 @@ export default function TasksPage() {
                 ))}
               </select>
             </div>
-            <input
-              value={repoPath}
-              onChange={(event) => setRepoPath(event.target.value)}
-              placeholder="Repo path (optional)"
-              className="w-full rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-amber-400/40 focus:outline-none transition-colors"
-            />
             <button
               type="submit"
               className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-amber-200 transition-colors hover:bg-amber-400/20"
@@ -294,6 +298,9 @@ export default function TasksPage() {
                       {task.resultSummary && (
                         <div className="mt-1.5 truncate text-[10px] text-slate-600">{task.resultSummary}</div>
                       )}
+                      {task.linkedRunId && (
+                        <div className="mt-1 text-[10px] text-slate-500">Mission run: {task.linkedRunId}</div>
+                      )}
                     </div>
                   </div>
                 </button>
@@ -318,6 +325,12 @@ export default function TasksPage() {
                         <span className="capitalize">{selectedTask.type}</span>
                         <span className="text-slate-700">·</span>
                         <span>{agentNameById.get(selectedTask.assignedToAgentId) ?? "?"}</span>
+                        {selectedTask.linkedTemplateId && (
+                          <>
+                            <span className="text-slate-700">·</span>
+                            <span>{selectedTask.linkedTemplateId}</span>
+                          </>
+                        )}
                         <span className="text-slate-700">·</span>
                         <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-px ${st.bg} ${st.text}`}>
                           {st.icon} {normalizedStatus}
@@ -334,7 +347,7 @@ export default function TasksPage() {
                         Cancel
                       </button>
                     )}
-                    {(normalizedStatus === "failed" || normalizedStatus === "cancelled") && (
+                    {(normalizedStatus === "failed" || normalizedStatus === "cancelled" || normalizedStatus === "paused" || normalizedStatus === "blocked") && (
                       <button
                         onClick={() => void retryTask(selectedTask.id)}
                         className="rounded-md border border-emerald-500/40 bg-emerald-500/5 px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.15em] text-emerald-200 transition-colors hover:bg-emerald-500/10"
@@ -354,6 +367,25 @@ export default function TasksPage() {
                     />
                   </div>
                   <span className="text-[10px] text-slate-500">{selectedTask.attempts}/{selectedTask.maxAttempts}</span>
+                </div>
+
+                <div className="mt-4 grid gap-2 text-[10px] text-slate-400 md:grid-cols-2">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Change</div>
+                    <div className="mt-1 text-slate-200">{selectedTask.change?.status ?? "none"}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Validation</div>
+                    <div className="mt-1 text-slate-200">{selectedTask.validation?.status ?? "not_requested"}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Verdict</div>
+                    <div className="mt-1 text-slate-200">{selectedTask.verdict ?? "running"}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Pause reason</div>
+                    <div className="mt-1 text-slate-200">{selectedTask.pauseReason ?? "none"}</div>
+                  </div>
                 </div>
 
                 {/* Artifacts */}

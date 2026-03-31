@@ -2,10 +2,11 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { runMissionDetailed } from "../src/mission/runtime.js";
-import { buildCursorFeatureAgents, createMissionSandbox, createMockCliSuite } from "./missionTestUtils.js";
+import { buildCursorFeatureAgents, createMissionSandbox, createMockCliSuite, enablePassingValidationScripts } from "./missionTestUtils.js";
 
 test("feature-dev mission completes with CLI-backed agents", async () => {
   const sandbox = await createMissionSandbox("mission-cli");
+  await enablePassingValidationScripts(sandbox.repoPath);
   const cli = await createMockCliSuite();
   const originalEnv = {
     ORCHESTRUM_CLAUDE_BIN: process.env.ORCHESTRUM_CLAUDE_BIN,
@@ -30,7 +31,7 @@ test("feature-dev mission completes with CLI-backed agents", async () => {
     });
 
     assert.equal(result.ok, true);
-    assert.equal(result.run.status, "finished");
+    assert.equal(result.run.status, "completed");
     assert.match(await fs.readFile(`${sandbox.repoPath}/src/index.ts`, "utf8"), /false/);
     assert.equal(result.run.graph.nodes.find((node) => node.id === "spec")?.transport, "cli");
     assert.equal(result.run.graph.nodes.find((node) => node.id === "implement")?.transport, "cli");

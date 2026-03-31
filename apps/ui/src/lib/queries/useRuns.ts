@@ -6,6 +6,10 @@ export type RunSummary = {
   status: string;
   workspaceId?: string;
   error?: string | null;
+  pauseReason?: string | null;
+  change?: { status?: string | null } | null;
+  validation?: { status?: string | null } | null;
+  verdict?: string | null;
 };
 
 export function useRuns(workspaceId?: string) {

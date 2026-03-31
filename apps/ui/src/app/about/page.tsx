@@ -97,12 +97,12 @@ export default function AboutPage() {
           </div>
           <div>
             <h2 className="text-2xl font-bold text-white">Orchestrum</h2>
-            <p className="text-sm text-slate-400">Local-first AI Engineering OS</p>
+            <p className="text-sm text-slate-400">Local-first AI engineering control plane</p>
           </div>
         </div>
         <p className="relative mt-4 max-w-xl text-sm leading-relaxed text-slate-300">
-          Orchestrum turns your local machine into an autonomous engineering department. Define agents, wire org charts,
-          and let AI plan, build, audit, and deploy — all without sending code to third parties.
+          Orchestrum runs local mission workflows, delivery handoffs, browser smoke checks, and evidence capture on your machine.
+          Agent and org surfaces are coordination tools around that mission spine, not a claim of fully autonomous delivery.
         </p>
       </section>
 

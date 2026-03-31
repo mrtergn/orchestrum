@@ -102,6 +102,22 @@ export function auditNode(options: PromptNodeOptions): MissionNodeTemplate {
   });
 }
 
+export function validationNode(options: NodeBaseOptions & { phase?: Extract<MissionNodePhase, "verify"> }): MissionNodeTemplate {
+  return createNode({
+    id: options.id,
+    title: options.title,
+    role: options.role,
+    executor: "validate",
+    phase: options.phase ?? "verify",
+    dependsOn: options.dependsOn,
+    inputs: options.inputs,
+    acceptanceCriteria: mergeAcceptanceCriteria([
+      "Run explicit workspace validation commands and record the actual results.",
+      "Do not mark validation as passed unless the underlying commands succeeded."
+    ], options.acceptanceCriteria)
+  });
+}
+
 export function handoffExportNode(options: HandoffNodeOptions): MissionNodeTemplate {
   return createNode({
     id: options.id,

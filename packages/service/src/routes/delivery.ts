@@ -22,12 +22,6 @@ export function registerDeliveryRoutes(
     void options.stateIndex.rebuild().catch(() => undefined);
   };
 
-  app.post("/delivery/start", async (_req, res) => {
-    res.status(410).json({
-      error: "Standalone delivery sessions were removed. Start the delivery-sprint mission with POST /missions/start."
-    });
-  });
-
   app.get("/delivery/summary", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
     await options.stateIndex.health();

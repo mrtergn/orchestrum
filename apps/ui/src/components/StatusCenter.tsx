@@ -25,6 +25,10 @@ type RunSummary = {
   status: string;
   workspaceId?: string;
   error?: string | null;
+  pauseReason?: string | null;
+  change?: { status?: string | null } | null;
+  validation?: { status?: string | null } | null;
+  verdict?: string | null;
 };
 
 type PlatformTaskSummary = {
@@ -171,7 +175,7 @@ export function StatusCenter() {
       list.push({
         id: "no-org",
         tone: "info",
-        message: "Org structure is empty. Build your command map to unlock clear routing.",
+        message: "Org structure is optional coordination metadata. Mission execution works without it.",
         actionLabel: "Open Org",
         actionHref: "/org"
       });

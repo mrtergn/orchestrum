@@ -14,9 +14,12 @@ import { StateIndex } from "../src/state/index.js";
 test("state index rebuilds from workspace and run files", async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-state-root-"));
   const runsDir = path.join(rootDir, "runs");
-  await fs.mkdir(path.join(rootDir, "data"), { recursive: true });
+  const appHome = path.join(rootDir, "app-home");
+  const originalHome = process.env.ORCHESTRUM_HOME;
+  process.env.ORCHESTRUM_HOME = appHome;
+  await fs.mkdir(appHome, { recursive: true });
   await fs.writeFile(
-    path.join(rootDir, "data", "workspaces.json"),
+    path.join(appHome, "workspaces.json"),
     JSON.stringify({ workspaces: [{ id: "demo", path: path.join(rootDir, "repo"), name: "Demo" }] }, null, 2),
     "utf8"
   );
@@ -28,7 +31,7 @@ test("state index rebuilds from workspace and run files", async () => {
     JSON.stringify({
       runId: "run-1",
       kind: "mission",
-      status: "finished",
+      status: "completed",
       start: new Date().toISOString(),
       end: new Date().toISOString(),
       repoPath: path.join(rootDir, "repo"),
@@ -43,13 +46,17 @@ test("state index rebuilds from workspace and run files", async () => {
     runsDir,
     dbPath: path.join(rootDir, "state-index.sqlite")
   });
-  const health = await index.rebuild();
-  assert.equal(health.ok, true);
+  try {
+    const health = await index.rebuild();
+    assert.equal(health.ok, true);
 
-  const runs = await index.queryRuns("demo");
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0]!.runId, "run-1");
-  assert.equal(runs[0]!.readinessScore, 80);
+    const runs = await index.queryRuns("demo");
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0]!.runId, "run-1");
+    assert.equal(runs[0]!.readinessScore, 80);
+  } finally {
+    process.env.ORCHESTRUM_HOME = originalHome;
+  }
 });
 
 test("state index SQL statements avoid template interpolation", async () => {
@@ -63,9 +70,12 @@ test("state index exposes latest delivery import analysis in summary", async () 
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-state-delivery-"));
   const runsDir = path.join(rootDir, "runs");
   const repoPath = path.join(rootDir, "repo");
-  await fs.mkdir(path.join(rootDir, "data"), { recursive: true });
+  const appHome = path.join(rootDir, "app-home");
+  const originalHome = process.env.ORCHESTRUM_HOME;
+  process.env.ORCHESTRUM_HOME = appHome;
+  await fs.mkdir(appHome, { recursive: true });
   await fs.writeFile(
-    path.join(rootDir, "data", "workspaces.json"),
+    path.join(appHome, "workspaces.json"),
     JSON.stringify({ workspaces: [{ id: "demo", path: repoPath, name: "Demo" }] }, null, 2),
     "utf8"
   );
@@ -101,12 +111,16 @@ test("state index exposes latest delivery import analysis in summary", async () 
     runsDir,
     dbPath: path.join(rootDir, "state-index.sqlite")
   });
-  await index.rebuild();
+  try {
+    await index.rebuild();
 
-  const summary = await index.getDeliverySummary("demo");
-  assert.equal(summary.importConfidenceCounts.high, 1);
-  assert.equal(summary.latestImport?.runId, session.runId);
-  assert.equal(summary.latestImport?.matchStatus, "matched");
-  assert.equal(summary.latestImport?.confidence, "high");
-  assert.ok((summary.latestImport?.matchReasons ?? []).some((reason) => reason.includes("Requested packet")));
+    const summary = await index.getDeliverySummary("demo");
+    assert.equal(summary.importConfidenceCounts.high, 1);
+    assert.equal(summary.latestImport?.runId, session.runId);
+    assert.equal(summary.latestImport?.matchStatus, "matched");
+    assert.equal(summary.latestImport?.confidence, "high");
+    assert.ok((summary.latestImport?.matchReasons ?? []).some((reason) => reason.includes("Requested packet")));
+  } finally {
+    process.env.ORCHESTRUM_HOME = originalHome;
+  }
 });

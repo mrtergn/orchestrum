@@ -33,6 +33,21 @@ export async function createMissionSandbox(prefix: string, fileOverride?: {
   return { rootDir, repoPath, runsDir };
 }
 
+export async function enablePassingValidationScripts(repoPath: string) {
+  await fs.writeFile(
+    path.join(repoPath, "package.json"),
+    JSON.stringify({
+      name: path.basename(repoPath),
+      version: "1.0.0",
+      scripts: {
+        typecheck: "node -e \"process.exit(0)\"",
+        test: "node -e \"process.exit(0)\""
+      }
+    }, null, 2),
+    "utf8"
+  );
+}
+
 export function buildAgents(provider: "openai" | "claude"): MissionAgent[] {
   return [
     missionAgent("pm", providerSpec(provider)),

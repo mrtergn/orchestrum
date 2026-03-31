@@ -54,7 +54,7 @@ export default function TemplatesPage() {
       <section className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">Mission Templates</h2>
-          <p className="text-sm text-slate-400">Built-in graph templates for autonomous PM, dev, audit, and delivery missions.</p>
+          <p className="text-sm text-slate-400">Built-in graph templates for mission-backed planning, implementation, audit, and delivery workflows.</p>
         </div>
         <select
           value={workspaceId}

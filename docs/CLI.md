@@ -34,13 +34,14 @@ Notes:
 orchestrum delivery doctor --repo /path/to/repo --workspace demo
 orchestrum delivery init-preset --repo /path/to/repo --workspace demo
 orchestrum delivery run --repo /path/to/repo --workspace demo --goal "Sprint 12"
-orchestrum delivery export packet-1 --run delivery-123 --workspace demo --target chatgpt
-orchestrum delivery import --run delivery-123 --workspace demo --target chatgpt --file response.txt
-orchestrum delivery findings --run delivery-123 --workspace demo
+orchestrum delivery export packet-1 --run mission-123 --workspace demo --target chatgpt
+orchestrum delivery import --run mission-123 --workspace demo --target chatgpt --file response.txt
+orchestrum delivery findings --run mission-123 --workspace demo
 orchestrum delivery summary --workspace demo
 ```
 
 Notes:
+- `delivery run` starts the `delivery-sprint` mission template and returns a mission run id.
 - `delivery export` supports `--format text|markdown|json`.
 - `delivery import` exits non-zero when packet matching fails.
 - `delivery doctor` inspects repo setup, tools, and preset readiness.

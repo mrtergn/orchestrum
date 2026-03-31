@@ -6,7 +6,8 @@ import {
   handoffExportNode,
   handoffWaitNode,
   patchNode,
-  planNode
+  planNode,
+  validationNode
 } from "./templateHelpers.js";
 import type { MissionTemplate } from "./types.js";
 
@@ -24,6 +25,41 @@ const promptPaths = {
 };
 
 const BUILTIN_TEMPLATES: MissionTemplate[] = [
+  createTemplate({
+    id: "spec-only",
+    name: "Spec Only",
+    description: "Produce a scoped, repo-aware plan without mutating the repository.",
+    category: "implementation",
+    defaultGoalHint: "Describe the feature, bug, or audit scope that needs a concrete execution plan.",
+    recommendedRoles: ["pm"],
+    outcomes: ["Implementation plan artifact"],
+    nodes: [
+      planNode({
+        id: "spec",
+        title: "Plan work",
+        role: "pm",
+        promptPath: promptPaths.spec
+      })
+    ]
+  }),
+  createTemplate({
+    id: "audit-only",
+    name: "Audit Only",
+    description: "Audit the current repo state or diff without producing code changes.",
+    category: "hardening",
+    defaultGoalHint: "Describe what should be audited and which risks or regressions should be prioritized.",
+    recommendedRoles: ["audit"],
+    outcomes: ["Audit findings artifact"],
+    nodes: [
+      auditNode({
+        id: "audit",
+        title: "Audit work",
+        role: "audit",
+        promptPath: promptPaths.audit,
+        inputs: ["goal", "repo_context", "git_diff"]
+      })
+    ]
+  }),
   createTemplate({
     id: "feature-dev",
     name: "Feature Dev Loop",
@@ -51,13 +87,20 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
         promptPath: promptPaths.implement,
         inputs: ["artifact:spec:output.md", "repo_context"]
       }),
+      validationNode({
+        id: "validate",
+        title: "Run validation",
+        role: "dev",
+        dependsOn: ["implement"],
+        inputs: ["artifact:spec:output.md", "git_diff"]
+      }),
       auditNode({
         id: "audit",
         title: "Audit implementation",
         role: "audit",
-        dependsOn: ["implement"],
+        dependsOn: ["validate"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:spec:output.md", "git_diff"]
+        inputs: ["artifact:spec:output.md", "git_diff", "artifact:validate:validation/summary.json"]
       })
     ]
   }),
@@ -96,13 +139,20 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
           "Call out any unresolved edge cases explicitly."
         ]
       }),
+      validationNode({
+        id: "validate",
+        title: "Run hotfix validation",
+        role: "dev",
+        dependsOn: ["hotpatch"],
+        inputs: ["artifact:diagnose:output.md", "git_diff"]
+      }),
       auditNode({
         id: "regression_audit",
         title: "Audit regression surface",
         role: "audit",
-        dependsOn: ["hotpatch"],
+        dependsOn: ["validate"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:diagnose:output.md", "git_diff"],
+        inputs: ["artifact:diagnose:output.md", "git_diff", "artifact:validate:validation/summary.json"],
         acceptanceCriteria: [
           "Prioritize regressions, unsafe shortcuts, and missing validation."
         ]
@@ -138,13 +188,20 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
         inputs: ["artifact:spec:output.md", "repo_context"],
         acceptanceCriteria: ["Keep the refactor behavior-preserving unless the plan explicitly says otherwise."]
       }),
+      validationNode({
+        id: "validate",
+        title: "Run refactor validation",
+        role: "dev",
+        dependsOn: ["refactor"],
+        inputs: ["artifact:spec:output.md", "git_diff"]
+      }),
       auditNode({
         id: "audit",
         title: "Audit refactor",
         role: "audit",
-        dependsOn: ["refactor"],
+        dependsOn: ["validate"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:spec:output.md", "git_diff"],
+        inputs: ["artifact:spec:output.md", "git_diff", "artifact:validate:validation/summary.json"],
         acceptanceCriteria: ["Focus on architectural regressions, hidden coupling, and missing validation."]
       })
     ]
@@ -183,25 +240,23 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
           "Reduce release risk without widening scope into new features."
         ]
       }),
-      patchNode({
-        id: "verification_pass",
-        title: "Add release verification",
+      validationNode({
+        id: "validation_pass",
+        title: "Run release validation",
         role: "dev",
-        phase: "verify",
         dependsOn: ["hardening_patch"],
-        promptPath: promptPaths.implement,
         inputs: ["artifact:readiness_plan:output.md", "git_diff"],
         acceptanceCriteria: [
-          "Document or add the checks that prove release readiness."
+          "Run the configured readiness checks and capture the actual result."
         ]
       }),
       auditNode({
         id: "release_audit",
         title: "Audit release readiness",
         role: "audit",
-        dependsOn: ["verification_pass"],
+        dependsOn: ["validation_pass"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:readiness_plan:output.md", "git_diff"],
+        inputs: ["artifact:readiness_plan:output.md", "git_diff", "artifact:validation_pass:validation/summary.json"],
         acceptanceCriteria: [
           "Call out remaining blockers, missing checks, and rollback risks."
         ]
@@ -247,13 +302,20 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
         inputs: ["artifact:spec:output.md", "git_diff"],
         acceptanceCriteria: ["Add or update validation that proves the intended behavior." ]
       }),
+      validationNode({
+        id: "validation_pass",
+        title: "Run hardening validation",
+        role: "dev",
+        dependsOn: ["test_generation"],
+        inputs: ["artifact:spec:output.md", "git_diff"]
+      }),
       auditNode({
         id: "audit",
         title: "Audit test hardening",
         role: "audit",
-        dependsOn: ["test_generation"],
+        dependsOn: ["validation_pass"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:spec:output.md", "git_diff"],
+        inputs: ["artifact:spec:output.md", "git_diff", "artifact:validation_pass:validation/summary.json"],
         acceptanceCriteria: ["Confirm the added validation covers the planned risk area."]
       })
     ]
@@ -335,22 +397,29 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
         inputs: ["artifact:spec:output.md", "repo_context"],
         acceptanceCriteria: ["Preserve security invariants and avoid widening scope unnecessarily."]
       }),
+      validationNode({
+        id: "validate",
+        title: "Run security validation",
+        role: "dev",
+        dependsOn: ["implement"],
+        inputs: ["artifact:spec:output.md", "git_diff"]
+      }),
       auditNode({
         id: "audit",
         title: "Audit patch",
         role: "audit",
-        dependsOn: ["implement"],
+        dependsOn: ["validate"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:spec:output.md", "git_diff"],
+        inputs: ["artifact:spec:output.md", "git_diff", "artifact:validate:validation/summary.json"],
         acceptanceCriteria: ["Check for regressions, unsafe assumptions, and missing tests."]
       }),
       auditNode({
         id: "red_team",
         title: "Red team review",
         role: "security",
-        dependsOn: ["implement"],
+        dependsOn: ["validate"],
         promptPath: promptPaths.audit,
-        inputs: ["artifact:spec:output.md", "git_diff"],
+        inputs: ["artifact:spec:output.md", "git_diff", "artifact:validate:validation/summary.json"],
         acceptanceCriteria: ["Actively look for exploit paths, bypasses, and residual exposure."]
       })
     ]

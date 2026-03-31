@@ -43,7 +43,6 @@ type RunConfigState = {
   iterations: string;
   intervalMs: string;
   advancedOpen: boolean;
-  sandboxEnabled: boolean;
   concurrency: string;
   pmModel: string;
   devModel: string;
@@ -64,7 +63,6 @@ type RunConfigAction =
   | { type: "setIterations"; iterations: string }
   | { type: "setIntervalMs"; intervalMs: string }
   | { type: "toggleAdvanced" }
-  | { type: "setSandboxEnabled"; sandboxEnabled: boolean }
   | { type: "setConcurrency"; concurrency: string }
   | { type: "setPmModel"; pmModel: string }
   | { type: "setDevModel"; devModel: string }
@@ -84,7 +82,6 @@ const INITIAL_STATE: RunConfigState = {
   iterations: "3",
   intervalMs: "3000",
   advancedOpen: false,
-  sandboxEnabled: true,
   concurrency: "",
   pmModel: "",
   devModel: "",
@@ -107,7 +104,6 @@ function runConfigReducer(state: RunConfigState, action: RunConfigAction): RunCo
         iterations: "3",
         intervalMs: "3000",
         advancedOpen: false,
-        sandboxEnabled: true,
         concurrency: "",
         pmModel: "",
         devModel: "",
@@ -139,8 +135,6 @@ function runConfigReducer(state: RunConfigState, action: RunConfigAction): RunCo
       return { ...state, intervalMs: action.intervalMs };
     case "toggleAdvanced":
       return { ...state, advancedOpen: !state.advancedOpen };
-    case "setSandboxEnabled":
-      return { ...state, sandboxEnabled: action.sandboxEnabled };
     case "setConcurrency":
       return { ...state, concurrency: action.concurrency };
     case "setPmModel":
@@ -273,7 +267,6 @@ export function RunConfigModal() {
               missionTemplateId: state.missionTemplateId,
               userGoal: state.goal.trim(),
               options: {
-                sandbox: state.sandboxEnabled,
                 concurrency: concurrencyValue,
                 modelOverrides
               }
@@ -485,15 +478,6 @@ export function RunConfigModal() {
             </button>
             {state.advancedOpen && (
               <div className="mt-4 grid gap-3">
-                <label className="flex items-center gap-3 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={state.sandboxEnabled}
-                    onChange={(event) => dispatch({ type: "setSandboxEnabled", sandboxEnabled: event.target.checked })}
-                    className="rounded border-slate-700 bg-slate-900"
-                  />
-                  Enable sandbox
-                </label>
                 <div>
                   <label className="text-xs text-slate-400">Concurrency</label>
                   <input

@@ -5,6 +5,7 @@ import { ensureDir, writeJson } from "./fs.js";
 import { applyProfileToConfig, loadWorkspaceProfile } from "../profiles/index.js";
 import { getAppHome } from "../appHome.js";
 import { migrateOrchestrumConfig } from "../migrations/index.js";
+import type { RepoExecutionProfile } from "./types.js";
 
 const ConcurrencySchema = z.union([
   z.number().int().min(1),
@@ -25,6 +26,21 @@ const PolicySchema = z.object({
   forbidden_paths: z.array(z.string()).optional(),
   max_cost_usd: z.number().min(0).optional(),
   risk_tolerance: z.enum(["low", "medium", "high"]).optional()
+});
+
+const RepoExecutionSchema: z.ZodType<RepoExecutionProfile> = z.object({
+  package_manager: z.enum(["npm", "pnpm", "yarn"]).optional(),
+  commands: z.object({
+    lint: z.string().min(1).optional(),
+    typecheck: z.string().min(1).optional(),
+    test: z.string().min(1).optional(),
+    build: z.string().min(1).optional(),
+    smoke: z.string().min(1).optional(),
+    dev: z.string().min(1).optional()
+  }).optional(),
+  protected_paths: z.array(z.string().min(1)).optional(),
+  risky_commands: z.array(z.string().min(1)).optional(),
+  readiness_requirements: z.array(z.string().min(1)).optional()
 });
 
 const ConfigSchema = z.object({
@@ -95,6 +111,7 @@ const ConfigSchema = z.object({
     })
     .optional(),
   policy: PolicySchema.optional(),
+  repo_execution: RepoExecutionSchema.optional(),
   plugins: z.array(z.string()).optional(),
   pricing: PricingSchema.optional(),
   shell_allowlist: z.array(z.string()).optional(),

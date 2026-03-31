@@ -7,11 +7,13 @@ import {
   buildDeliveryAgents,
   createMissionSandbox,
   createMockCliSuite,
+  enablePassingValidationScripts,
   mockProviderFetch
 } from "./missionTestUtils.js";
 
 test("feature-dev mission falls back from Claude CLI to Claude API", async () => {
   const sandbox = await createMissionSandbox("mission-cli-fallback");
+  await enablePassingValidationScripts(sandbox.repoPath);
   const cli = await createMockCliSuite();
   const originalFetch = globalThis.fetch;
   const originalEnv = {
@@ -106,7 +108,7 @@ test("delivery-sprint mission waits for import and resumes after completed hando
     });
 
     assert.equal(resumed.ok, true);
-    assert.equal(resumed.run.status, "finished");
+    assert.equal(resumed.run.status, "completed");
     const persisted = await loadMissionRun(firstPass.runDir);
     assert.equal(persisted?.graph.nodes.find((node) => node.id === "handoff_wait")?.findingCount, 1);
   } finally {
@@ -115,7 +117,7 @@ test("delivery-sprint mission waits for import and resumes after completed hando
   }
 });
 
-test("delivery-sprint mission fails when imported handoff is blocked", async () => {
+test("delivery-sprint mission blocks when imported handoff is blocked", async () => {
   const sandbox = await createMissionSandbox("mission-delivery-blocked");
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.OPENAI_API_KEY;
@@ -147,7 +149,7 @@ test("delivery-sprint mission fails when imported handoff is blocked", async () 
       targetTool: "claude"
     });
 
-    assert.equal(afterImport.status, "failed");
+    assert.equal(afterImport.status, "blocked");
     const waitNode = afterImport.graph.nodes.find((node) => node.id === "handoff_wait");
     assert.equal(waitNode?.status, "blocked");
     assert.equal(waitNode?.findingCount, 1);

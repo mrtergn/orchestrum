@@ -1052,7 +1052,7 @@ async function writeRunMeta(runDir: string, session: DeliverySessionState, optio
     kind: "delivery",
     status:
       session.status === "completed"
-        ? "finished"
+        ? "completed"
         : session.status === "failed"
           ? "failed"
           : "running",

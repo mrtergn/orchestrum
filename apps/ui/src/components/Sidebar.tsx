@@ -59,7 +59,7 @@ export function Sidebar() {
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-amber-400/20 to-cyan-400/20 text-xs text-amber-300">◉</div>
           <div>
             <div className="text-sm font-semibold text-white leading-tight">Orchestrum</div>
-            <div className="text-[10px] text-slate-500">AI Engineering OS</div>
+            <div className="text-[10px] text-slate-500">Local-First Control Plane</div>
           </div>
         </div>
       </div>

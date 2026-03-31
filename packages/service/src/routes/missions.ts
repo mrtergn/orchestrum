@@ -14,6 +14,11 @@ type MissionAgentPlatform = {
     templateId: string;
     goal: string;
     runId: string;
+    runOptions?: {
+      concurrency?: number;
+      modelOverrides?: Record<string, string>;
+      strategyMode?: string;
+    };
   }): Promise<Record<string, unknown>>;
 };
 
@@ -70,7 +75,12 @@ export function registerMissionRoutes(
         repoPath: workspacePath,
         templateId: missionTemplateId,
         goal,
-        runId
+        runId,
+        runOptions: {
+          concurrency: startOptions.concurrency,
+          modelOverrides: startOptions.modelOverrides,
+          strategyMode: startOptions.strategyMode
+        }
       });
       rebuildStateIndex();
       void options.logger.info("mission.start.accepted", { runId: result.runId, workspaceId, missionTemplateId });
@@ -124,14 +134,12 @@ export function registerMissionRoutes(
 }
 
 function normalizeRunStartOptions(raw: unknown): {
-  sandboxEnabled: boolean;
   concurrency?: number;
   modelOverrides?: Record<string, string>;
   strategyMode?: string;
   passphrase?: string;
 } {
   const parsed = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const sandboxEnabled = parsed.sandbox !== false;
   const concurrencyRaw = typeof parsed.concurrency === "number" ? parsed.concurrency : Number(parsed.concurrency ?? NaN);
   const concurrency = Number.isFinite(concurrencyRaw) && concurrencyRaw > 0
     ? Math.max(1, Math.floor(concurrencyRaw))
@@ -151,7 +159,6 @@ function normalizeRunStartOptions(raw: unknown): {
     }
   }
   return {
-    sandboxEnabled,
     concurrency,
     modelOverrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
     strategyMode,
