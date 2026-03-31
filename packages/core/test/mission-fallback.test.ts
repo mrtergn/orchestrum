@@ -16,15 +16,15 @@ test("feature-dev mission falls back from Claude CLI to Claude API", async () =>
   const originalFetch = globalThis.fetch;
   const originalEnv = {
     ORCHESTRUM_CLAUDE_BIN: process.env.ORCHESTRUM_CLAUDE_BIN,
-    ORCHESTRUM_CURSOR_BIN: process.env.ORCHESTRUM_CURSOR_BIN,
+    ORCHESTRUM_COPILOT_BIN: process.env.ORCHESTRUM_COPILOT_BIN,
     MOCK_CLAUDE_AUTH: process.env.MOCK_CLAUDE_AUTH,
-    MOCK_CURSOR_AUTH: process.env.MOCK_CURSOR_AUTH,
+    MOCK_COPILOT_AUTH: process.env.MOCK_COPILOT_AUTH,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
   };
   process.env.ORCHESTRUM_CLAUDE_BIN = cli.claude;
-  process.env.ORCHESTRUM_CURSOR_BIN = cli.cursor;
+  process.env.ORCHESTRUM_COPILOT_BIN = cli.copilot;
   process.env.MOCK_CLAUDE_AUTH = "0";
-  process.env.MOCK_CURSOR_AUTH = "1";
+  process.env.MOCK_COPILOT_AUTH = "1";
   process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
   globalThis.fetch = mockProviderFetch("claude", [
     { text: "Implementation plan ready via Claude API." },
@@ -48,9 +48,9 @@ test("feature-dev mission falls back from Claude CLI to Claude API", async () =>
   } finally {
     globalThis.fetch = originalFetch;
     process.env.ORCHESTRUM_CLAUDE_BIN = originalEnv.ORCHESTRUM_CLAUDE_BIN;
-    process.env.ORCHESTRUM_CURSOR_BIN = originalEnv.ORCHESTRUM_CURSOR_BIN;
+    process.env.ORCHESTRUM_COPILOT_BIN = originalEnv.ORCHESTRUM_COPILOT_BIN;
     process.env.MOCK_CLAUDE_AUTH = originalEnv.MOCK_CLAUDE_AUTH;
-    process.env.MOCK_CURSOR_AUTH = originalEnv.MOCK_CURSOR_AUTH;
+    process.env.MOCK_COPILOT_AUTH = originalEnv.MOCK_COPILOT_AUTH;
     process.env.ANTHROPIC_API_KEY = originalEnv.ANTHROPIC_API_KEY;
   }
 });

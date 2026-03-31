@@ -11,6 +11,7 @@ import "./docs.test.ts";
 import "./state.test.ts";
 import "./delivery.test.ts";
 import "./mission-codex.test.ts";
+import "./mission-copilot.test.ts";
 import "./mission-claude.test.ts";
 import "./mission-cursor.test.ts";
 import "./mission-fallback.test.ts";

@@ -1,7 +1,7 @@
 import type { LlmUsage } from "../runner/cost.js";
 import type { RunState } from "../runner/types.js";
 
-export const PROVIDER_VENDORS = ["codex", "claude", "cursor", "openai", "ollama", "llama.cpp"] as const;
+export const PROVIDER_VENDORS = ["codex", "copilot", "claude", "cursor", "openai", "ollama", "llama.cpp"] as const;
 export type ProviderVendor = typeof PROVIDER_VENDORS[number];
 export type CanonicalProvider = ProviderVendor;
 

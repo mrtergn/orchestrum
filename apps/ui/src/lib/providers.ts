@@ -1,4 +1,4 @@
-export type ProviderVendor = "codex" | "claude" | "cursor" | "openai" | "ollama" | "llama.cpp";
+export type ProviderVendor = "codex" | "copilot" | "claude" | "cursor" | "openai" | "ollama" | "llama.cpp";
 export type ProviderTransport = "cli" | "api" | "local_http";
 export type ProviderEffort = "low" | "medium" | "high" | "max";
 
@@ -61,6 +61,7 @@ export type ProviderDiscoveryState = "connected" | "detected" | "missing";
 
 export const PROVIDER_DISCOVERY_ORDER: ProviderVendor[] = [
   "codex",
+  "copilot",
   "claude",
   "cursor",
   "openai",
@@ -72,6 +73,8 @@ export function vendorLabel(vendor: ProviderVendor): string {
   switch (vendor) {
     case "codex":
       return "Codex";
+    case "copilot":
+      return "GitHub Copilot";
     case "claude":
       return "Claude";
     case "cursor":
@@ -109,9 +112,9 @@ export function defaultProviderForRole(role: string): ProviderSpec {
   }
   if (normalized.includes("dev")) {
     return {
-      vendor: "cursor",
+      vendor: "copilot",
       transport: "cli",
-      profileId: "cursor-cli-sonnet",
+      profileId: "copilot-cli-gpt54",
       auth: { kind: "cli" },
       fallback: {
         vendor: "codex",
@@ -121,16 +124,30 @@ export function defaultProviderForRole(role: string): ProviderSpec {
       }
     };
   }
+  if (normalized.includes("pm") || normalized.includes("plan")) {
+    return {
+      vendor: "claude",
+      transport: "cli",
+      profileId: "claude-cli-sonnet",
+      auth: { kind: "cli" },
+      fallback: {
+        vendor: "openai",
+        transport: "api",
+        profileId: "openai-api-gpt5",
+        auth: { kind: "api_key", secretRef: "OPENAI_API_KEY" }
+      }
+    };
+  }
   return {
-    vendor: "claude",
+    vendor: "copilot",
     transport: "cli",
-    profileId: "claude-cli-sonnet",
+    profileId: "copilot-cli-gpt54-mini",
     auth: { kind: "cli" },
     fallback: {
-      vendor: "openai",
-      transport: "api",
-      profileId: "openai-api-gpt5",
-      auth: { kind: "api_key", secretRef: "OPENAI_API_KEY" }
+      vendor: "codex",
+      transport: "cli",
+      profileId: "codex-cli-balanced",
+      auth: { kind: "cli" }
     }
   };
 }

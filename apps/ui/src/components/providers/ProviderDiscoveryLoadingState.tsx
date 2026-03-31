@@ -11,16 +11,16 @@ type PhaseId = "bootstrap" | "cli_probe" | "local_probe" | "finalize";
 
 const PHASES: Array<{ id: PhaseId; label: string; detail: string; atMs: number }> = [
   { id: "bootstrap", label: "Loading local config", detail: "Reading provider config and saved runtime hints.", atMs: 0 },
-  { id: "cli_probe", label: "Checking CLI sessions", detail: "Looking for Codex, Claude, and Cursor auth state.", atMs: 600 },
+  { id: "cli_probe", label: "Checking CLI sessions", detail: "Looking for Codex, Copilot, Claude, and Cursor availability.", atMs: 600 },
   { id: "local_probe", label: "Probing local transports", detail: "Checking Ollama and llama.cpp HTTP endpoints.", atMs: 1600 },
   { id: "finalize", label: "Preparing provider cards", detail: "Turning discovery results into transport summaries.", atMs: 2600 }
 ];
 
 const ACTIVE_VENDORS_BY_PHASE: Record<PhaseId, ProviderVendor[]> = {
-  bootstrap: ["codex", "claude"],
-  cli_probe: ["codex", "claude", "cursor"],
+  bootstrap: ["codex", "copilot", "claude"],
+  cli_probe: ["codex", "copilot", "claude", "cursor"],
   local_probe: ["ollama", "llama.cpp"],
-  finalize: ["openai", "codex", "claude", "cursor", "ollama", "llama.cpp"]
+  finalize: ["openai", "codex", "copilot", "claude", "cursor", "ollama", "llama.cpp"]
 };
 
 function cx(...values: Array<string | false | null | undefined>) {

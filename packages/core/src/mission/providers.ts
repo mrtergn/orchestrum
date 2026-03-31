@@ -63,12 +63,14 @@ type ResolvedProviderExecution = {
 
 const CLI_VENDOR_BINARIES: Partial<Record<ProviderVendor, string>> = {
   codex: "codex",
+  copilot: "copilot",
   claude: "claude",
   cursor: "cursor"
 };
 
 const CLI_ENV_BINARIES: Partial<Record<ProviderVendor, string>> = {
   codex: "ORCHESTRUM_CODEX_BIN",
+  copilot: "ORCHESTRUM_COPILOT_BIN",
   claude: "ORCHESTRUM_CLAUDE_BIN",
   cursor: "ORCHESTRUM_CURSOR_BIN"
 };
@@ -79,6 +81,17 @@ const PROVIDER_CAPABILITIES: Record<ProviderVendor, SupportedTransport[]> = {
     capabilities: {
       supportsTools: true,
       supportsEffort: false,
+      supportsReadOnlyMode: true,
+      supportsJsonOutput: true,
+      supportsModelDiscovery: false,
+      supportsAuthProbe: true
+    }
+  }],
+  copilot: [{
+    transport: "cli",
+    capabilities: {
+      supportsTools: true,
+      supportsEffort: true,
       supportsReadOnlyMode: true,
       supportsJsonOutput: true,
       supportsModelDiscovery: false,
@@ -157,6 +170,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderVendor, SupportedTransport[]> = {
 
 const PROVIDER_LABELS: Record<ProviderVendor, string> = {
   codex: "Codex",
+  copilot: "GitHub Copilot",
   claude: "Claude",
   cursor: "Cursor",
   openai: "OpenAI",
@@ -170,6 +184,10 @@ const KNOWN_API_HOSTS: Record<"openai" | "claude", RegExp[]> = {
 };
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const COPILOT_GITHUB_AUTH_ENV_KEYS = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] as const;
+const COPILOT_BYOK_AUTH_ENV_KEYS = ["COPILOT_PROVIDER_BEARER_TOKEN", "COPILOT_PROVIDER_API_KEY"] as const;
+const COPILOT_READ_ONLY_TOOLS = "view,glob,rg";
+const COPILOT_WRITE_TOOLS = "view,glob,rg,edit,create,bash,read_bash,write_bash,stop_bash,list_bash";
 
 const PROVIDER_PROFILES: ProviderProfile[] = [
   {
@@ -181,6 +199,52 @@ const PROVIDER_PROFILES: ProviderProfile[] = [
     model: "gpt-5",
     recommended: true,
     roleHints: ["pm", "dev", "audit"]
+  },
+  {
+    id: "copilot-cli-gpt54",
+    vendor: "copilot",
+    transport: "cli",
+    label: "GPT-5.4",
+    description: "General-purpose Copilot CLI profile for implementation work.",
+    model: "gpt-5.4",
+    recommended: true,
+    roleHints: ["dev"]
+  },
+  {
+    id: "copilot-cli-gpt54-mini",
+    vendor: "copilot",
+    transport: "cli",
+    label: "GPT-5.4 Mini",
+    description: "Lighter Copilot CLI profile for general-purpose tasks.",
+    model: "gpt-5.4-mini",
+    roleHints: ["general", "custom"]
+  },
+  {
+    id: "copilot-cli-gpt53-codex",
+    vendor: "copilot",
+    transport: "cli",
+    label: "GPT-5.3 Codex",
+    description: "Code-heavy Copilot CLI profile tuned for patch work.",
+    model: "gpt-5.3-codex",
+    roleHints: ["dev"]
+  },
+  {
+    id: "copilot-cli-sonnet46",
+    vendor: "copilot",
+    transport: "cli",
+    label: "Claude Sonnet 4.6",
+    description: "Copilot CLI profile optimized for planning and reviews.",
+    model: "claude-sonnet-4.6",
+    roleHints: ["pm", "audit"]
+  },
+  {
+    id: "copilot-cli-opus46",
+    vendor: "copilot",
+    transport: "cli",
+    label: "Claude Opus 4.6",
+    description: "Higher-depth Copilot CLI profile for complex review work.",
+    model: "claude-opus-4.6",
+    roleHints: ["pm", "audit"]
   },
   {
     id: "claude-cli-sonnet",
@@ -249,6 +313,7 @@ const PROFILE_MAP = new Map(PROVIDER_PROFILES.map((profile) => [profile.id, prof
 export function normalizeCanonicalProvider(input: string | null | undefined): CanonicalProvider {
   const normalized = (input ?? "").trim().toLowerCase();
   if (normalized === "codex") return "codex";
+  if (normalized === "copilot") return "copilot";
   if (normalized === "claude") return "claude";
   if (normalized === "cursor") return "cursor";
   if (normalized === "ollama") return "ollama";
@@ -295,9 +360,9 @@ export function defaultProviderForRole(role?: string): ProviderSpec {
   }
   if (normalizedRole.includes("dev")) {
     return {
-      vendor: "cursor",
+      vendor: "copilot",
       transport: "cli",
-      profileId: "cursor-cli-sonnet",
+      profileId: "copilot-cli-gpt54",
       auth: { kind: "cli" },
       fallback: {
         vendor: "codex",
@@ -322,10 +387,16 @@ export function defaultProviderForRole(role?: string): ProviderSpec {
     };
   }
   return {
-    vendor: "codex",
+    vendor: "copilot",
     transport: "cli",
-    profileId: "codex-cli-balanced",
-    auth: { kind: "cli" }
+    profileId: "copilot-cli-gpt54-mini",
+    auth: { kind: "cli" },
+    fallback: {
+      vendor: "codex",
+      transport: "cli",
+      profileId: "codex-cli-balanced",
+      auth: { kind: "cli" }
+    }
   };
 }
 
@@ -528,11 +599,11 @@ async function resolveCandidate(
   const transport = spec.transport;
   const providerRecord = discovery.find((entry) => entry.vendor === vendor);
   const transportRecord = providerRecord?.transports.find((entry) => entry.transport === transport);
-  if (!transportRecord?.available || !transportRecord.configured) return null;
+  if (!transportRecord?.available || !canExecuteTransport(vendor, transportRecord)) return null;
 
   const profile = resolveProfile(spec, role);
   const model = spec.modelOverride?.trim() || profile?.model || "";
-  if (!model) {
+  if (!model && vendor !== "copilot") {
     throw new Error(`Provider ${vendor}/${transport} requires a model or profile.`);
   }
 
@@ -589,11 +660,53 @@ async function completeWithCli(
       allowNonZeroExit: true
     });
     if (result.exitCode !== 0) {
-      throw new Error(result.stderr.trim() || `Codex exited with code ${result.exitCode}.`);
+      throw new Error(extractCliError(result.stdout, result.stderr) || `Codex exited with code ${result.exitCode}.`);
     }
     const output = await fs.readFile(outputPath, "utf8").catch(() => "");
     return {
       text: output.trim() || extractTextFromCliOutput(result.stdout),
+      usage: extractUsageFromCliOutput(result.stdout),
+      vendor: spec.vendor,
+      transport: spec.transport,
+      profileId: spec.profileId,
+      model: spec.model,
+      effort: spec.effort,
+      authSource: spec.authSource ?? "cli_session",
+      exitCode: result.exitCode,
+      binaryPath: spec.binaryPath,
+      nativeWrite: spec.nativeWrite
+    };
+  }
+
+  if (spec.vendor === "copilot") {
+    const args = [
+      "--output-format",
+      "json",
+      "--no-ask-user",
+      "--allow-all-tools",
+      "--add-dir",
+      repoPath,
+      "--available-tools",
+      spec.nativeWrite ? COPILOT_WRITE_TOOLS : COPILOT_READ_ONLY_TOOLS
+    ];
+    if (spec.model) {
+      args.push("--model", spec.model);
+    }
+    if (spec.effort) {
+      args.push("--reasoning-effort", mapCopilotEffort(spec.effort));
+    }
+    args.push("-p", prompt);
+    const result = await runBinary(spec.binaryPath, args, {
+      cwd: repoPath,
+      env,
+      timeoutMs,
+      allowNonZeroExit: true
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(extractCliError(result.stdout, result.stderr) || `GitHub Copilot CLI exited with code ${result.exitCode}.`);
+    }
+    return {
+      text: extractTextFromCliOutput(result.stdout),
       usage: extractUsageFromCliOutput(result.stdout),
       vendor: spec.vendor,
       transport: spec.transport,
@@ -632,7 +745,7 @@ async function completeWithCli(
       allowNonZeroExit: true
     });
     if (result.exitCode !== 0) {
-      throw new Error(result.stderr.trim() || `Claude CLI exited with code ${result.exitCode}.`);
+      throw new Error(extractCliError(result.stdout, result.stderr) || `Claude CLI exited with code ${result.exitCode}.`);
     }
     return {
       text: extractTextFromCliOutput(result.stdout),
@@ -669,7 +782,7 @@ async function completeWithCli(
     allowNonZeroExit: true
   });
   if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || `Cursor Agent exited with code ${result.exitCode}.`);
+    throw new Error(extractCliError(result.stdout, result.stderr) || `Cursor Agent exited with code ${result.exitCode}.`);
   }
   return {
     text: extractTextFromCliOutput(result.stdout),
@@ -718,7 +831,7 @@ async function discoverCliTransport(
     reason: authProbe.ok ? undefined : authProbe.reason,
     binaryPath,
     version,
-    authSource: authProbe.ok ? "cli_session" : null,
+    authSource: authProbe.authSource ?? (authProbe.ok ? "cli_session" : null),
     models: models.length > 0 ? models : undefined,
     profiles: models.length > 0
       ? injectDiscoveredModels(listProviderProfiles(vendor, "cli"), vendor, "cli", models)
@@ -779,7 +892,7 @@ async function resolveCliBinary(vendor: ProviderVendor, env: NodeJS.ProcessEnv):
 }
 
 async function probeCliVersion(vendor: ProviderVendor, binaryPath: string, cwd: string | undefined, env: NodeJS.ProcessEnv): Promise<string | undefined> {
-  const args = vendor === "codex" ? ["--version"] : ["-v"];
+  const args = vendor === "codex" || vendor === "copilot" ? ["--version"] : ["-v"];
   const result = await runBinary(binaryPath, args, {
     cwd,
     env,
@@ -795,7 +908,10 @@ async function probeCliAuth(
   binaryPath: string,
   cwd: string | undefined,
   env: NodeJS.ProcessEnv
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; authSource?: string | null }> {
+  if (vendor === "copilot") {
+    return detectCopilotCliAuth(env);
+  }
   const args =
     vendor === "codex"
       ? ["login", "status"]
@@ -815,11 +931,13 @@ async function probeCliAuth(
     const authStatus = readString((json as Record<string, unknown> | null)?.status)?.toLowerCase();
     const authenticated = readBoolean((json as Record<string, unknown> | null)?.authenticated);
     const loggedIn = readBoolean((json as Record<string, unknown> | null)?.loggedIn);
-    if (authenticated === true || loggedIn === true || authStatus === "authenticated") return { ok: true };
+    if (authenticated === true || loggedIn === true || authStatus === "authenticated") {
+      return { ok: true, authSource: "cli_session" };
+    }
     return { ok: false, reason: "Claude CLI is installed but not authenticated." };
   }
   if (result.exitCode === 0 && !/(not logged|not authenticated|logged out|unauthenticated)/.test(text)) {
-    return { ok: true };
+    return { ok: true, authSource: "cli_session" };
   }
   return { ok: false, reason: `${PROVIDER_LABELS[vendor]} CLI is installed but not authenticated.` };
 }
@@ -858,6 +976,31 @@ async function probeLocalHttpEndpoint(vendor: ProviderVendor, endpoint: string):
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function canExecuteTransport(vendor: ProviderVendor, transport: ProviderDiscoveryTransport): boolean {
+  if (!transport.available) return false;
+  if (transport.configured) return true;
+  return vendor === "copilot" && transport.transport === "cli";
+}
+
+function detectCopilotCliAuth(env: NodeJS.ProcessEnv): { ok: boolean; reason?: string; authSource?: string | null } {
+  for (const key of COPILOT_GITHUB_AUTH_ENV_KEYS) {
+    if (firstNonEmptyEnv(env[key])) {
+      return { ok: true, authSource: `env:${key}` };
+    }
+  }
+  if (firstNonEmptyEnv(env.COPILOT_PROVIDER_BASE_URL)) {
+    const authKey = COPILOT_BYOK_AUTH_ENV_KEYS.find((key) => Boolean(firstNonEmptyEnv(env[key])));
+    return {
+      ok: true,
+      authSource: authKey ? `env:${authKey}` : "env:COPILOT_PROVIDER_BASE_URL"
+    };
+  }
+  return {
+    ok: false,
+    reason: "Copilot CLI was found, but discovery only treats env-based auth or BYOK as connected. Interactive login is verified at first run."
+  };
 }
 
 function resolveProfile(spec: Omit<ProviderSpec, "fallback">, role?: string): ProviderProfile | undefined {
@@ -995,6 +1138,11 @@ function normalizeEffort(input: string | null | undefined): ProviderEffort | nul
   return null;
 }
 
+function mapCopilotEffort(effort: ProviderEffort): "low" | "medium" | "high" | "xhigh" {
+  if (effort === "max") return "xhigh";
+  return effort;
+}
+
 function injectDiscoveredModels(
   profiles: ProviderProfile[],
   vendor: ProviderVendor,
@@ -1039,6 +1187,12 @@ function extractUsageFromCliOutput(stdout: string): AgentResult["usage"] | undef
   };
 }
 
+function extractCliError(stdout: string, stderr: string): string {
+  const structured = parseStructuredCliOutput(stdout);
+  const structuredMessage = extractErrorValue(structured);
+  return structuredMessage || stderr.trim() || stdout.trim();
+}
+
 function parseStructuredCliOutput(stdout: string): unknown {
   const direct = parseJsonLoose(stdout);
   if (direct != null) return direct;
@@ -1071,6 +1225,7 @@ function extractTextValue(value: unknown): string {
     readString(record.output) ??
     readString(record.output_text) ??
     readString(record.response) ??
+    readString(record.content) ??
     readString(record.message) ??
     readString(record.final);
   if (direct) return direct.trim();
@@ -1085,6 +1240,35 @@ function extractTextValue(value: unknown): string {
   if (record.data && typeof record.data === "object") {
     const text = extractTextValue(record.data);
     if (text) return text;
+  }
+  return "";
+}
+
+function extractErrorValue(value: unknown): string {
+  if (typeof value === "string") return "";
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const error = extractErrorValue(value[index]);
+      if (error) return error;
+    }
+    return "";
+  }
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const direct =
+    readString(record.error) ??
+    readString(record.message) ??
+    readString(record.summary);
+  if (direct && /error|quota|failed|denied|unauthorized|auth/i.test(direct)) {
+    return direct;
+  }
+  if (readString(record.type) === "session.error" && record.data && typeof record.data === "object") {
+    const dataMessage = readString((record.data as Record<string, unknown>).message);
+    if (dataMessage) return dataMessage;
+  }
+  if (record.data && typeof record.data === "object") {
+    const error = extractErrorValue(record.data);
+    if (error) return error;
   }
   return "";
 }

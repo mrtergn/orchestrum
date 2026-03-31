@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useAppUi } from "@/components/AppUiProvider";
 import { useConfirm } from "@/components/ConfirmDialog";
 
@@ -33,6 +34,7 @@ declare global {
 }
 
 export default function WorkspacesPage() {
+  const searchParams = useSearchParams();
   const { selectedWorkspaceId, setSelectedWorkspaceId, pushToast } = useAppUi();
   const confirm = useConfirm();
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
@@ -42,6 +44,8 @@ export default function WorkspacesPage() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [editingName, setEditingName] = useState<Record<string, string>>({});
+  const pathInputRef = useRef<HTMLInputElement | null>(null);
+  const highlightAddWorkspace = searchParams.get("intent") === "add";
 
   const selected = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -58,6 +62,14 @@ export default function WorkspacesPage() {
   useEffect(() => {
     void loadWorkspaces();
   }, []);
+
+  useEffect(() => {
+    if (!highlightAddWorkspace) return;
+    const timer = window.setTimeout(() => {
+      pathInputRef.current?.focus();
+    }, 50);
+    return () => window.clearTimeout(timer);
+  }, [highlightAddWorkspace]);
 
   const addWorkspace = async () => {
     setMessage("");
@@ -179,10 +191,14 @@ export default function WorkspacesPage() {
       </section>
 
       {/* Add workspace */}
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
+      <section className={`rounded-2xl border bg-slate-950/40 p-5 ${highlightAddWorkspace ? "border-amber-400/30" : "border-slate-800"}`}>
         <div className="text-xs font-medium uppercase tracking-[0.15em] text-slate-500">Add Workspace</div>
+        {highlightAddWorkspace && (
+          <div className="mt-2 text-xs text-amber-200">Add the local repository you want to use for your first mission.</div>
+        )}
         <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto]">
           <input
+            ref={pathInputRef}
             value={pathInput}
             onChange={(event) => setPathInput(event.target.value)}
             placeholder="D:\\projects\\my-app"

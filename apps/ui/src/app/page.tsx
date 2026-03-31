@@ -1,18 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 import { AgentOnboarding } from "@/components/AgentOnboarding";
 import { useAppUi } from "@/components/AppUiProvider";
+import { preferredTransport, type ProviderDiscoveryRecord } from "@/lib/providers";
 import { normalizeAgentRuntimeState } from "@/lib/runtime";
 
 type SetupStatus = {
-  hasProvider: boolean;
-  agentCount: number;
-  orgNodeCount: number;
+  hasRunnableProvider: boolean;
   workspaceCount: number;
   taskCount: number;
-  runCount: number;
+  totalRunCount: number;
+  orgNodeCount: number;
+  guideWorkspaceId: string;
+  guideWorkspaceName: string;
+  guideAgentCount: number;
+  guideRunCount: number;
 };
 
 type RecentRun = {
@@ -25,20 +30,88 @@ type RecentRun = {
 
 type AgentSummary = {
   id: string;
+  workspaceId?: string;
   name: string;
   role: string;
   status: { state: string };
 };
 
+type WorkspaceSummary = {
+  id: string;
+  name?: string;
+  path: string;
+};
+
+type ProviderDiscoveryPayload = {
+  providers?: ProviderDiscoveryRecord[];
+};
+
+type StepId = "workspace" | "provider" | "agents" | "run";
+
+type SetupStep = {
+  id: StepId;
+  title: string;
+  description: string;
+  success: string;
+  done: boolean;
+  actionLabel: string;
+  href?: string;
+  onSelect?: () => void;
+};
+
+function hasConfiguredProvider(records: ProviderDiscoveryRecord[]) {
+  return records.some((record) => {
+    const transport = preferredTransport(record);
+    return Boolean(transport?.configured && (transport.transport === "cli" || transport.transport === "local_http"));
+  });
+}
+
+function statusColor(status: string) {
+  switch (status) {
+    case "running":
+      return "text-amber-300";
+    case "finished":
+      return "text-emerald-300";
+    case "failed":
+    case "cancelled":
+      return "text-rose-300";
+    default:
+      return "text-slate-400";
+  }
+}
+
+function nextActionReason(stepId: StepId) {
+  if (stepId === "workspace") {
+    return "Everything else in Orchestrum is workspace-scoped. Without a repo, there is nowhere to save agents or run missions.";
+  }
+  if (stepId === "provider") {
+    return "Before the first run, confirm there is at least one usable local CLI path or API fallback.";
+  }
+  if (stepId === "agents") {
+    return "Missions need at least one workspace agent so Orchestrum knows who should do the work.";
+  }
+  return "The fastest way to validate setup is a small real mission, not another settings screen.";
+}
+
 export default function HomePage() {
-  const { openRunConfig } = useAppUi();
+  const router = useRouter();
+  const {
+    openRunConfig,
+    selectedWorkspaceId,
+    setSelectedWorkspaceId,
+    onboardingSkipped,
+    setOnboardingSkipped
+  } = useAppUi();
   const [setup, setSetup] = useState<SetupStatus>({
-    hasProvider: false,
-    agentCount: 0,
-    orgNodeCount: 0,
+    hasRunnableProvider: false,
     workspaceCount: 0,
     taskCount: 0,
-    runCount: 0,
+    totalRunCount: 0,
+    orgNodeCount: 0,
+    guideWorkspaceId: "",
+    guideWorkspaceName: "",
+    guideAgentCount: 0,
+    guideRunCount: 0
   });
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
@@ -46,78 +119,157 @@ export default function HomePage() {
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+
     const load = async () => {
-      const [secretsRes, agentsRes, orgRes, workspacesRes, tasksRes, runsRes] = await Promise.all([
-        fetch("/api/secrets", { cache: "no-store" }),
-        fetch("/api/agents", { cache: "no-store" }),
-        fetch("/api/org", { cache: "no-store" }),
-        fetch("/api/workspaces", { cache: "no-store" }),
-        fetch("/api/tasks", { cache: "no-store" }),
-        fetch("/api/runs", { cache: "no-store" }),
-      ]);
-      const secretsData = secretsRes.ok ? await secretsRes.json() : { keys: {} };
-      const agentsData = agentsRes.ok ? await agentsRes.json() : { agents: [] };
-      const orgData = orgRes.ok ? await orgRes.json() : { nodes: [] };
-      const workspacesData = workspacesRes.ok ? await workspacesRes.json() : { workspaces: [] };
-      const tasksData = tasksRes.ok ? await tasksRes.json() : { tasks: [] };
-      const runsData = runsRes.ok ? await runsRes.json() : [];
+      try {
+        const [workspacesRes, tasksRes, orgRes, runsRes, agentsRes, secretsRes] = await Promise.all([
+          fetch("/api/workspaces", { cache: "no-store" }),
+          fetch("/api/tasks", { cache: "no-store" }),
+          fetch("/api/org", { cache: "no-store" }),
+          fetch("/api/runs", { cache: "no-store" }),
+          fetch("/api/agents", { cache: "no-store" }),
+          fetch("/api/secrets", { cache: "no-store" })
+        ]);
 
-      const agentList = Array.isArray(agentsData.agents) ? agentsData.agents : [];
-      const runList = Array.isArray(runsData) ? runsData : [];
+        const workspacesData = workspacesRes.ok ? await workspacesRes.json() : { workspaces: [] };
+        const tasksData = tasksRes.ok ? await tasksRes.json() : { tasks: [] };
+        const orgData = orgRes.ok ? await orgRes.json() : { nodes: [] };
+        const runsData = runsRes.ok ? await runsRes.json() : [];
+        const agentsData = agentsRes.ok ? await agentsRes.json() : { agents: [] };
+        const secretsData = secretsRes.ok ? await secretsRes.json() : { keys: {} };
 
-      setSetup({
-        hasProvider: Boolean(secretsData.keys?.OPENAI_API_KEY || secretsData.keys?.ANTHROPIC_API_KEY),
-        agentCount: agentList.length,
-        orgNodeCount: Array.isArray(orgData.nodes) ? orgData.nodes.length : 0,
-        workspaceCount: Array.isArray(workspacesData.workspaces) ? workspacesData.workspaces.length : 0,
-        taskCount: Array.isArray(tasksData.tasks) ? tasksData.tasks.length : 0,
-        runCount: runList.length,
-      });
-      setAgents(agentList.slice(0, 6));
-      setRecentRuns(runList.slice(0, 5));
-      setLoading(false);
+        const workspaceList = Array.isArray(workspacesData.workspaces)
+          ? (workspacesData.workspaces as WorkspaceSummary[])
+          : [];
+        const allRuns = Array.isArray(runsData) ? (runsData as RecentRun[]) : [];
+        const allAgents = Array.isArray(agentsData.agents) ? (agentsData.agents as AgentSummary[]) : [];
+        const guideWorkspace = workspaceList.find((workspace) => workspace.id === selectedWorkspaceId) ?? workspaceList[0] ?? null;
+        const guideWorkspaceId = guideWorkspace?.id ?? "";
+        const guideWorkspaceName = guideWorkspace?.name || guideWorkspace?.id || "";
+        const providerQuery = guideWorkspaceId
+          ? `/api/providers/discover?scope=workspace&workspace=${encodeURIComponent(guideWorkspaceId)}`
+          : "/api/providers/discover?scope=global";
+        const providerRes = await fetch(providerQuery, { cache: "no-store" });
+        const providerData = providerRes.ok
+          ? ((await providerRes.json()) as ProviderDiscoveryPayload)
+          : { providers: [] };
+        const providerDiscovery = Array.isArray(providerData.providers) ? providerData.providers : [];
+        const hasProviderKey = Boolean(secretsData.keys?.OPENAI_API_KEY || secretsData.keys?.ANTHROPIC_API_KEY);
+        const guideAgents = guideWorkspaceId ? allAgents.filter((agent) => agent.workspaceId === guideWorkspaceId) : [];
+        const guideRuns = guideWorkspaceId ? allRuns.filter((run) => run.workspaceId === guideWorkspaceId) : [];
+
+        if (cancelled) return;
+
+        setSetup({
+          hasRunnableProvider: hasProviderKey || hasConfiguredProvider(providerDiscovery),
+          workspaceCount: workspaceList.length,
+          taskCount: Array.isArray(tasksData.tasks) ? tasksData.tasks.length : 0,
+          totalRunCount: allRuns.length,
+          orgNodeCount: Array.isArray(orgData.nodes) ? orgData.nodes.length : 0,
+          guideWorkspaceId,
+          guideWorkspaceName,
+          guideAgentCount: guideAgents.length,
+          guideRunCount: guideRuns.length
+        });
+        setAgents((guideWorkspaceId ? guideAgents : allAgents).slice(0, 6));
+        setRecentRuns((guideWorkspaceId ? guideRuns : allRuns).slice(0, 5));
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     };
+
     void load();
-    const timer = setInterval(() => void load(), 8000);
-    return () => clearInterval(timer);
-  }, []);
+    const timer = setInterval(() => {
+      void load();
+    }, 8000);
 
-  const allStepsDone = setup.hasProvider && setup.agentCount > 0 && setup.orgNodeCount > 0 && setup.workspaceCount > 0;
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [selectedWorkspaceId]);
 
-  const steps = [
-    {
-      num: 1,
-      title: "Connect an AI provider",
-      description: "Add your OpenAI or Anthropic API key so agents can think.",
-      done: setup.hasProvider,
-      href: "/settings",
-      action: "Open Settings",
-    },
-    {
-      num: 2,
-      title: "Create your agents",
-      description: "Define at least one agent with a role (pm, dev, audit).",
-      done: setup.agentCount > 0,
-      href: "/agents",
-      action: "Go to Agents",
-    },
-    {
-      num: 3,
-      title: "Build your org chart",
-      description: "Place agents on the board and define who reports to whom.",
-      done: setup.orgNodeCount > 0,
-      href: "/org",
-      action: "Open Org Chart",
-    },
-    {
-      num: 4,
-      title: "Add a workspace",
-      description: "Point to a local repo so agents know where to work.",
-      done: setup.workspaceCount > 0,
-      href: "/workspaces",
-      action: "Add Workspace",
-    },
-  ];
+  const steps = useMemo<SetupStep[]>(() => {
+    const workspaceQuery = setup.guideWorkspaceId ? `&workspace=${encodeURIComponent(setup.guideWorkspaceId)}` : "";
+    const providerHref = setup.guideWorkspaceId
+      ? `/settings?tab=Providers&scope=workspace${workspaceQuery}`
+      : "/settings?tab=Providers&scope=workspace";
+    const agentHref = `/agents?intent=create&preset=dev${workspaceQuery}`;
+
+    return [
+      {
+        id: "workspace",
+        title: "Add a workspace",
+        description: "Connect the local repository you want Orchestrum to work in.",
+        success: "At least one local repo is registered.",
+        done: setup.workspaceCount > 0,
+        actionLabel: "Add workspace",
+        href: "/workspaces?intent=add"
+      },
+      {
+        id: "provider",
+        title: "Verify local tools",
+        description: setup.guideWorkspaceId
+          ? `Check Claude, Codex, Copilot, or Cursor status for ${setup.guideWorkspaceName}. API fallback stays optional.`
+          : "Confirm that at least one local CLI path or API fallback is usable.",
+        success: "At least one local provider or API fallback is ready.",
+        done: setup.hasRunnableProvider,
+        actionLabel: "Verify local tools",
+        href: providerHref
+      },
+      {
+        id: "agents",
+        title: "Create your first agent",
+        description: setup.guideWorkspaceId
+          ? `Start with a Developer agent inside ${setup.guideWorkspaceName}.`
+          : "Create one agent so Orchestrum has someone to route work to.",
+        success: "At least one agent exists in the active workspace.",
+        done: setup.guideAgentCount > 0,
+        actionLabel: "Create first agent",
+        href: agentHref
+      },
+      {
+        id: "run",
+        title: "Launch first mission",
+        description: setup.guideWorkspaceId
+          ? `Run a small feature-dev mission in ${setup.guideWorkspaceName} to verify the loop.`
+          : "Launch a first mission after workspace, provider, and agent setup is done.",
+        success: "This workspace has at least one mission run.",
+        done: setup.guideRunCount > 0,
+        actionLabel: "Launch first mission",
+        onSelect: () => {
+          if (!setup.guideWorkspaceId) return;
+          setSelectedWorkspaceId(setup.guideWorkspaceId);
+          openRunConfig({
+            workspaceId: setup.guideWorkspaceId,
+            missionTemplateId: "feature-dev",
+            runKind: "mission"
+          });
+        }
+      }
+    ];
+  }, [openRunConfig, setSelectedWorkspaceId, setup]);
+
+  const nextAction = steps.find((step) => !step.done) ?? null;
+  const completedSteps = steps.filter((step) => step.done).length;
+  const allCoreSetupDone = steps.every((step) => step.done);
+  const showRecommendedLater = allCoreSetupDone && setup.orgNodeCount === 0;
+
+  const handleStepNavigate = (step: SetupStep) => {
+    if (step.id !== "workspace" && setup.guideWorkspaceId) {
+      setSelectedWorkspaceId(setup.guideWorkspaceId);
+    }
+    if (step.onSelect) {
+      step.onSelect();
+      return;
+    }
+    if (step.href) {
+      router.push(step.href);
+    }
+  };
 
   if (loading) {
     return (
@@ -131,67 +283,135 @@ export default function HomePage() {
     <main className="space-y-6">
       <AgentOnboarding onVisibilityChange={setShowOnboarding} />
 
-      {/* Setup steps - always visible until done, then collapsible */}
-      {!showOnboarding && !allStepsDone && (
-        <section className="rounded-2xl border border-amber-400/20 bg-gradient-to-br from-amber-400/5 to-slate-950/40 p-6">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-white">Get started with Orchestrum</h2>
-            <p className="text-sm text-slate-400">Complete these steps to launch your first autonomous run.</p>
+      {!showOnboarding && !allCoreSetupDone && nextAction && (
+        <section className="space-y-4 rounded-2xl border border-amber-400/20 bg-gradient-to-br from-amber-400/5 to-slate-950/40 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.22em] text-amber-300/80">Next Action</div>
+              <h2 className="mt-2 text-xl font-semibold text-white">{nextAction.title}</h2>
+              <p className="mt-2 max-w-3xl text-sm text-slate-300">{nextAction.description}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {onboardingSkipped && (
+                <button
+                  type="button"
+                  onClick={() => setOnboardingSkipped(false)}
+                  className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300"
+                >
+                  Reopen guided setup
+                </button>
+              )}
+              <div className="rounded-full border border-slate-700 bg-slate-950/40 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-300">
+                Step {completedSteps + 1} of {steps.length}
+              </div>
+            </div>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {steps.map((step) => (
-              <Link
-                key={step.num}
-                href={step.href}
-                className={`group relative rounded-xl border p-4 transition-all ${
-                  step.done
-                    ? "border-emerald-500/30 bg-emerald-500/5"
-                    : "border-slate-700 bg-slate-900/40 hover:border-amber-400/40"
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ${
-                      step.done
-                        ? "bg-emerald-500/20 text-emerald-300"
-                        : "bg-slate-800 text-slate-400 group-hover:bg-amber-400/20 group-hover:text-amber-300"
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-4">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Why this now</div>
+              <div className="mt-2 text-sm text-slate-300">{nextActionReason(nextAction.id)}</div>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-4">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Done when</div>
+              <div className="mt-2 text-sm text-slate-300">{nextAction.success}</div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <button
+              onClick={() => handleStepNavigate(nextAction)}
+              className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs uppercase tracking-[0.24em] text-amber-200"
+            >
+              {nextAction.actionLabel}
+            </button>
+            {setup.guideWorkspaceName && (
+              <div className="text-xs text-slate-500">
+                Active workspace for guidance: <span className="text-slate-300">{setup.guideWorkspaceName}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-950/35 p-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="text-sm font-medium text-white">Setup checklist</div>
+              <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{completedSteps}/{steps.length} complete</div>
+            </div>
+            <div className="space-y-2">
+              {steps.map((step, index) => {
+                const isCurrent = nextAction?.id === step.id;
+                const content = (
+                  <>
+                    <div
+                      className={step.done
+                        ? "flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-xs font-semibold text-emerald-300"
+                        : "flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-800 text-xs font-semibold text-slate-400"}
+                    >
+                      {step.done ? "✓" : index + 1}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className={`text-sm font-medium ${step.done ? "text-emerald-200" : "text-white"}`}>{step.title}</div>
+                      <div className="mt-1 text-xs text-slate-500">{step.success}</div>
+                    </div>
+                    {step.done ? null : isCurrent ? (
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-amber-300/80">Current →</div>
+                    ) : (
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Open →</div>
+                    )}
+                  </>
+                );
+
+                if (step.done) {
+                  return (
+                    <div key={step.id} className="flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+                      {content}
+                    </div>
+                  );
+                }
+
+                return (
+                  <button
+                    key={step.id}
+                    type="button"
+                    onClick={() => handleStepNavigate(step)}
+                    className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition ${
+                      isCurrent
+                        ? "border-amber-400/20 bg-amber-400/5 hover:border-amber-400/35"
+                        : "border-slate-800 bg-slate-900/35 hover:border-slate-700"
                     }`}
                   >
-                    {step.done ? "✓" : step.num}
-                  </div>
-                  <div>
-                    <div className={`text-sm font-medium ${step.done ? "text-emerald-200" : "text-white"}`}>
-                      {step.title}
-                    </div>
-                    <div className="mt-1 text-xs text-slate-500">{step.description}</div>
-                  </div>
-                </div>
-                {!step.done && (
-                  <div className="mt-3 text-[10px] font-medium uppercase tracking-[0.2em] text-amber-300/70 opacity-0 transition-opacity group-hover:opacity-100">
-                    {step.action} →
-                  </div>
-                )}
-              </Link>
-            ))}
-          </div>
-          <div className="mt-4">
-            <div className="h-1.5 rounded-full bg-slate-800">
-              <div
-                className="h-1.5 rounded-full bg-gradient-to-r from-amber-400/60 to-emerald-400/60 transition-all"
-                style={{ width: `${(steps.filter((s) => s.done).length / steps.length) * 100}%` }}
-              />
-            </div>
-            <div className="mt-1 text-right text-[10px] text-slate-500">
-              {steps.filter((s) => s.done).length}/{steps.length} complete
+                    {content}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
       )}
 
-      {/* Quick actions */}
+      {showRecommendedLater && (
+        <section className="rounded-2xl border border-cyan-400/20 bg-slate-950/35 p-5">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-cyan-300/80">Recommended Later</div>
+              <div className="mt-2 text-sm font-semibold text-white">Build the org chart after your first run</div>
+              <div className="mt-1 text-sm text-slate-400">
+                Core setup is already complete. Add reporting lines once your first agent loop is working and you want clearer routing.
+              </div>
+            </div>
+            <Link
+              href="/org"
+              className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-cyan-200"
+            >
+              Open Org Chart
+            </Link>
+          </div>
+        </section>
+      )}
+
       <section className="grid gap-4 sm:grid-cols-3">
         <button
-          onClick={() => openRunConfig()}
+          onClick={() => openRunConfig(setup.guideWorkspaceId ? { workspaceId: setup.guideWorkspaceId } : undefined)}
           className="group rounded-2xl border border-amber-400/20 bg-slate-950/40 p-5 text-left transition hover:border-amber-400/40"
         >
           <div className="text-lg text-amber-300/80">▶</div>
@@ -216,13 +436,12 @@ export default function HomePage() {
         </Link>
       </section>
 
-      {/* Status overview */}
       <section className="grid gap-4 sm:grid-cols-4">
         {[
-          { label: "Agents", value: setup.agentCount, href: "/agents" },
+          { label: "Agents", value: setup.guideAgentCount, href: "/agents" },
           { label: "Tasks", value: setup.taskCount, href: "/tasks" },
-          { label: "Runs", value: setup.runCount, href: "/runs" },
-          { label: "Workspaces", value: setup.workspaceCount, href: "/workspaces" },
+          { label: "Runs", value: setup.totalRunCount, href: "/runs" },
+          { label: "Workspaces", value: setup.workspaceCount, href: "/workspaces" }
         ].map((stat) => (
           <Link
             key={stat.label}
@@ -235,7 +454,6 @@ export default function HomePage() {
         ))}
       </section>
 
-      {/* Agent roster */}
       {agents.length > 0 && (
         <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
           <div className="mb-3 flex items-center justify-between">
@@ -245,24 +463,30 @@ export default function HomePage() {
             </Link>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {agents.map((agent) => (
-              <div key={agent.id} className="flex items-center gap-3 rounded-lg border border-slate-800/60 bg-slate-900/30 px-3 py-2">
-                <div className={`h-2 w-2 rounded-full ${
-                  normalizeAgentRuntimeState(agent.status.state) === "active" ? "bg-amber-400" :
-                  normalizeAgentRuntimeState(agent.status.state) === "sleeping" || normalizeAgentRuntimeState(agent.status.state) === "idle" ? "bg-emerald-400" :
-                  "bg-slate-600"
-                }`} />
-                <div>
-                  <div className="text-xs font-medium text-white">{agent.name}</div>
-                  <div className="text-[10px] text-slate-500">{agent.role} · {normalizeAgentRuntimeState(agent.status.state)}</div>
+            {agents.map((agent) => {
+              const normalizedState = normalizeAgentRuntimeState(agent.status.state);
+              return (
+                <div key={agent.id} className="flex items-center gap-3 rounded-lg border border-slate-800/60 bg-slate-900/30 px-3 py-2">
+                  <div
+                    className={`h-2 w-2 rounded-full ${
+                      normalizedState === "active"
+                        ? "bg-amber-400"
+                        : normalizedState === "sleeping" || normalizedState === "idle"
+                          ? "bg-emerald-400"
+                          : "bg-slate-600"
+                    }`}
+                  />
+                  <div>
+                    <div className="text-xs font-medium text-white">{agent.name}</div>
+                    <div className="text-[10px] text-slate-500">{agent.role} · {normalizedState}</div>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
 
-      {/* Recent runs */}
       {recentRuns.length > 0 && (
         <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
           <div className="mb-3 flex items-center justify-between">
@@ -285,36 +509,6 @@ export default function HomePage() {
           </div>
         </section>
       )}
-
-      {/* All done + empty state */}
-      {allStepsDone && recentRuns.length === 0 && agents.length > 0 && (
-        <section className="rounded-2xl border border-dashed border-slate-700 p-8 text-center">
-          <div className="text-2xl">🚀</div>
-          <div className="mt-2 text-lg font-semibold text-white">You&apos;re all set</div>
-          <p className="mt-1 text-sm text-slate-400">Your platform is configured. Start your first autonomous run.</p>
-          <button
-            onClick={() => openRunConfig()}
-            className="mt-4 rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs uppercase tracking-[0.3em] text-amber-200"
-          >
-            Launch first run
-          </button>
-        </section>
-      )}
     </main>
   );
-}
-
-function statusColor(status: string) {
-  switch (status) {
-    case "running":
-      return "text-amber-300";
-    case "finished":
-      return "text-emerald-300";
-    case "failed":
-      return "text-rose-300";
-    case "cancelled":
-      return "text-rose-300";
-    default:
-      return "text-slate-400";
-  }
 }

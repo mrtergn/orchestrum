@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { z } from "zod";
 import { useAppUi } from "@/components/AppUiProvider";
 import { ProviderDiscoveryGrid } from "@/components/providers/ProviderDiscoveryGrid";
@@ -111,7 +112,8 @@ function deliveryRoleModeHint(value: string) {
 }
 
 export default function SettingsPage() {
-  const { selectedWorkspaceId, pushToast } = useAppUi();
+  const searchParams = useSearchParams();
+  const { selectedWorkspaceId, setSelectedWorkspaceId, pushToast } = useAppUi();
   const [scope, setScope] = useState<Scope>("workspace");
   const [workspaceId, setWorkspaceId] = useState<string>("");
   const [maxAgents, setMaxAgents] = useState<number>(3);
@@ -154,6 +156,7 @@ export default function SettingsPage() {
   const [pmModelDefault, setPmModelDefault] = useState("gpt-5");
   const [devModelDefault, setDevModelDefault] = useState("codex");
   const [auditModelDefault, setAuditModelDefault] = useState("gpt-5");
+  const seededFromQueryRef = useRef(false);
   const effectiveScope: Scope = scope === "workspace" && !workspaceId ? "global" : scope;
   const [activeTab, setActiveTab] = useState("Providers" as Tab);
   const {
@@ -167,8 +170,31 @@ export default function SettingsPage() {
   });
 
   useEffect(() => {
+    if (seededFromQueryRef.current) return;
+    const tabParam = searchParams.get("tab");
+    const scopeParam = searchParams.get("scope");
+    const workspaceParam = searchParams.get("workspace");
+
+    if (tabParam && tabs.includes(tabParam as Tab)) {
+      setActiveTab(tabParam as Tab);
+    }
+    if (scopeParam === "workspace" || scopeParam === "global") {
+      setScope(scopeParam);
+    }
+    if (workspaceParam) {
+      setWorkspaceId(workspaceParam);
+      setSelectedWorkspaceId(workspaceParam);
+    } else if (selectedWorkspaceId && selectedWorkspaceId !== "undefined") {
+      setWorkspaceId(selectedWorkspaceId);
+    }
+    seededFromQueryRef.current = true;
+  }, [searchParams, selectedWorkspaceId, setSelectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!seededFromQueryRef.current) return;
+    if (searchParams.get("workspace")) return;
     setWorkspaceId(selectedWorkspaceId && selectedWorkspaceId !== "undefined" ? selectedWorkspaceId : "");
-  }, [selectedWorkspaceId]);
+  }, [searchParams, selectedWorkspaceId]);
 
   useEffect(() => {
     if (activeTab !== "Providers") return;
@@ -729,7 +755,7 @@ export default function SettingsPage() {
               These are default model preferences by role. They are not provider accounts. The provider above decides which tool runs; this section only sets the model family that role should prefer when the provider supports it.
             </p>
             <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3 text-[11px] text-slate-400">
-              Example: a Developer agent may still run through Cursor CLI or Codex CLI, while this setting tells Orchestrum which model family to ask for by default.
+              Example: a Developer agent may still run through Copilot CLI, Cursor CLI, or Codex CLI, while this setting tells Orchestrum which model family to ask for by default.
             </div>
             <div className="mt-4 grid gap-4 sm:grid-cols-3 max-w-4xl">
               <div>

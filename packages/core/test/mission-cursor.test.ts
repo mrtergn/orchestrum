@@ -2,7 +2,7 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { runMissionDetailed } from "../src/mission/runtime.js";
-import { buildCliFeatureAgents, createMissionSandbox, createMockCliSuite } from "./missionTestUtils.js";
+import { buildCursorFeatureAgents, createMissionSandbox, createMockCliSuite } from "./missionTestUtils.js";
 
 test("feature-dev mission completes with CLI-backed agents", async () => {
   const sandbox = await createMissionSandbox("mission-cli");
@@ -26,7 +26,7 @@ test("feature-dev mission completes with CLI-backed agents", async () => {
       runsDir: sandbox.runsDir,
       workspaceId: "demo",
       goal: "Flip the exported value with native CLI agents.",
-      agents: buildCliFeatureAgents()
+      agents: buildCursorFeatureAgents()
     });
 
     assert.equal(result.ok, true);

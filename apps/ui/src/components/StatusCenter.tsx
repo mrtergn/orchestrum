@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppUi, type AppToast } from "@/components/AppUiProvider";
 import { useRuns } from "@/lib/queries/useRuns";
@@ -41,6 +41,7 @@ const LAST_FAILED_KEY = "orchestrum.status.lastFailedRun";
 
 export function StatusCenter() {
   const router = useRouter();
+  const pathname = usePathname();
   const queryClient = useQueryClient();
   const {
     selectedWorkspaceId,
@@ -72,9 +73,13 @@ export function StatusCenter() {
     staleTime: 5000
   });
 
+  const providerDiscoveryHref = selectedWorkspaceId
+    ? `/api/providers/discover?scope=workspace&workspace=${encodeURIComponent(selectedWorkspaceId)}`
+    : "/api/providers/discover?scope=global";
+
   const { data: providerDiscoveryData, isSuccess: providerDiscoveryReady } = useQuery({
-    queryKey: ["providers", "global"],
-    queryFn: () => fetchJson<ProviderDiscoveryPayload>("/api/providers/discover?scope=global"),
+    queryKey: ["providers", selectedWorkspaceId || "global", selectedWorkspaceId ? "workspace" : "global"],
+    queryFn: () => fetchJson<ProviderDiscoveryPayload>(providerDiscoveryHref),
     staleTime: 30000,
     retry: false
   });
@@ -125,6 +130,8 @@ export function StatusCenter() {
     record.transports.some((transport) => transport.available && (transport.transport === "cli" || transport.transport === "local_http"))
   );
   const isFreshSetup = !onboardingSkipped && workspaceCount === 0 && agentCount === 0;
+  const coreSetupReady = workspaceCount > 0 && hasAnyConfiguredProvider && agentCount > 0;
+  const isHome = pathname === "/";
 
   const selectedWorkspace = useMemo(
     () => (workspaces as WorkspaceSummary[]).find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -133,7 +140,14 @@ export function StatusCenter() {
 
   const banners = useMemo<Banner[]>(() => {
     const list: Banner[] = [];
-    if (!isFreshSetup && providerDiscoveryReady && !hasAnyConfiguredProvider) {
+    const providerSettingsHref = selectedWorkspaceId
+      ? `/settings?tab=Providers&scope=workspace&workspace=${encodeURIComponent(selectedWorkspaceId)}`
+      : "/settings?tab=Providers&scope=workspace";
+    const createAgentHref = selectedWorkspaceId
+      ? `/agents?intent=create&preset=dev&workspace=${encodeURIComponent(selectedWorkspaceId)}`
+      : "/agents?intent=create&preset=dev";
+
+    if (!isFreshSetup && !isHome && providerDiscoveryReady && !hasAnyConfiguredProvider) {
       list.push({
         id: "missing-provider-key",
         tone: hasAnyLocalProvider ? "info" : "warning",
@@ -141,19 +155,19 @@ export function StatusCenter() {
           ? "No provider auth detected yet. API keys are optional if you plan to use CLI or local providers."
           : "No provider configured yet. Connect a local CLI session or add OPENAI_API_KEY / ANTHROPIC_API_KEY in Settings > AI Providers.",
         actionLabel: "Open Settings",
-        actionHref: "/settings"
+        actionHref: providerSettingsHref
       });
     }
-    if (agentCount === 0 && workspaceCount > 0) {
+    if (!isHome && agentCount === 0 && workspaceCount > 0) {
       list.push({
         id: "no-agents",
         tone: "info",
         message: "No agents registered yet. Create your first agent in Agent Registry.",
         actionLabel: "Open Agents",
-        actionHref: "/agents"
+        actionHref: createAgentHref
       });
     }
-    if (agentCount > 0 && orgNodeCount === 0) {
+    if (!isHome && coreSetupReady && orgNodeCount === 0) {
       list.push({
         id: "no-org",
         tone: "info",
@@ -171,7 +185,7 @@ export function StatusCenter() {
         actionHref: "/workspaces"
       });
     }
-    if (onboardingSkipped) {
+    if (onboardingSkipped && !isHome) {
       list.push({
         id: "onboarding-skipped",
         tone: "info",
@@ -187,7 +201,7 @@ export function StatusCenter() {
         tone: "danger",
         message: `Provider error: ${platformError}`,
         actionLabel: "Open Settings",
-        actionHref: "/settings"
+        actionHref: providerSettingsHref
       });
     } else if (lowerError.includes("patch apply failed")) {
       list.push({
@@ -201,14 +215,17 @@ export function StatusCenter() {
     return list;
   }, [
     agentCount,
+    coreSetupReady,
     hasAnyConfiguredProvider,
     hasAnyLocalProvider,
     isFreshSetup,
+    isHome,
     onboardingSkipped,
     orgNodeCount,
     platformError,
     providerDiscoveryReady,
     selectedWorkspace,
+    selectedWorkspaceId,
     workspaceCount
   ]);
 

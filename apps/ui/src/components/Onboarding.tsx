@@ -27,7 +27,7 @@ type OnboardingProps = {
 
 export function Onboarding({ onVisibilityChange }: OnboardingProps) {
   const router = useRouter();
-  const { selectedWorkspaceId, setSelectedWorkspaceId, setOnboardingSkipped, pushToast, openRunConfig } = useAppUi();
+  const { selectedWorkspaceId, setSelectedWorkspaceId, onboardingSkipped, setOnboardingSkipped, pushToast, openRunConfig } = useAppUi();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState(1);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -54,11 +54,14 @@ export function Onboarding({ onVisibilityChange }: OnboardingProps) {
 
   useEffect(() => {
     const done = localStorage.getItem(ONBOARDED_KEY) === "1";
-    const skipped = localStorage.getItem("orchestrum.onboarding.skipped") === "1";
-    if (!done && !skipped) {
+    if (!done && !onboardingSkipped) {
       setOpen(true);
+      return;
     }
-  }, []);
+    if (onboardingSkipped) {
+      setOpen(false);
+    }
+  }, [onboardingSkipped]);
 
   useEffect(() => {
     const loadBootstrap = async () => {

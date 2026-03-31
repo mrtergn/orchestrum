@@ -63,6 +63,47 @@ export function buildCliFeatureAgents(): MissionAgent[] {
       }
     }),
     missionAgent("dev", {
+      vendor: "copilot",
+      transport: "cli",
+      profileId: "copilot-cli-gpt54",
+      auth: { kind: "cli" },
+      fallback: {
+        vendor: "codex",
+        transport: "cli",
+        profileId: "codex-cli-balanced",
+        auth: { kind: "cli" }
+      }
+    }),
+    missionAgent("audit", {
+      vendor: "claude",
+      transport: "cli",
+      profileId: "claude-cli-sonnet",
+      auth: { kind: "cli" },
+      fallback: {
+        vendor: "claude",
+        transport: "api",
+        profileId: "claude-api-sonnet",
+        auth: { kind: "api_key", secretRef: "ANTHROPIC_API_KEY" }
+      }
+    })
+  ];
+}
+
+export function buildCursorFeatureAgents(): MissionAgent[] {
+  return [
+    missionAgent("pm", {
+      vendor: "claude",
+      transport: "cli",
+      profileId: "claude-cli-sonnet",
+      auth: { kind: "cli" },
+      fallback: {
+        vendor: "claude",
+        transport: "api",
+        profileId: "claude-api-sonnet",
+        auth: { kind: "api_key", secretRef: "ANTHROPIC_API_KEY" }
+      }
+    }),
+    missionAgent("dev", {
       vendor: "cursor",
       transport: "cli",
       profileId: "cursor-cli-sonnet",
@@ -120,11 +161,13 @@ export async function createMockCliSuite() {
   const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-cli-bin-"));
   const scripts = {
     codex: path.join(binDir, "mock-codex.cjs"),
+    copilot: path.join(binDir, "mock-copilot.cjs"),
     claude: path.join(binDir, "mock-claude.cjs"),
     cursor: path.join(binDir, "mock-cursor.cjs")
   };
 
   await writeExecutable(scripts.codex, createMockCliScript("codex"));
+  await writeExecutable(scripts.copilot, createMockCliScript("copilot"));
   await writeExecutable(scripts.claude, createMockCliScript("claude"));
   await writeExecutable(scripts.cursor, createMockCliScript("cursor"));
 
@@ -136,7 +179,7 @@ async function writeExecutable(filePath: string, content: string) {
   await fs.chmod(filePath, 0o755);
 }
 
-function createMockCliScript(vendor: "codex" | "claude" | "cursor"): string {
+function createMockCliScript(vendor: "codex" | "copilot" | "claude" | "cursor"): string {
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -150,11 +193,22 @@ const stdin = (() => {
   }
 })();
 const prompt = stdin.trim() || args[args.length - 1] || "";
-const authKey = vendor === "codex" ? "MOCK_CODEX_AUTH" : vendor === "claude" ? "MOCK_CLAUDE_AUTH" : "MOCK_CURSOR_AUTH";
+const authKey =
+  vendor === "codex"
+    ? "MOCK_CODEX_AUTH"
+    : vendor === "copilot"
+      ? "MOCK_COPILOT_AUTH"
+      : vendor === "claude"
+        ? "MOCK_CLAUDE_AUTH"
+        : "MOCK_CURSOR_AUTH";
 const authenticated = process.env[authKey] !== "0";
 
 if (vendor === "codex" && args.includes("--version")) {
   console.log("codex-cli 1.0.0");
+  process.exit(0);
+}
+if (vendor === "copilot" && args.includes("--version")) {
+  console.log("GitHub Copilot CLI 1.0.14.");
   process.exit(0);
 }
 if (vendor === "claude" && args.includes("-v")) {
@@ -208,6 +262,25 @@ if (vendor === "codex" && args[0] === "exec") {
     fs.writeFileSync(path.join(repoPath, "src", "index.ts"), "export const ok = false;\\n", "utf8");
   }
   console.log(JSON.stringify({ text: "codex execution complete", usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } }));
+  process.exit(0);
+}
+
+if (vendor === "copilot" && args.includes("-p")) {
+  if (!authenticated) {
+    console.log(JSON.stringify({ type: "session.error", data: { message: "Authentication failed." } }));
+    process.exit(1);
+  }
+  const toolsIndex = args.indexOf("--available-tools");
+  const tools = toolsIndex >= 0 ? String(args[toolsIndex + 1] || "") : "";
+  const addDirIndex = args.indexOf("--add-dir");
+  const workspace = addDirIndex >= 0 ? args[addDirIndex + 1] : process.cwd();
+  const modelIndex = args.indexOf("--model");
+  const model = modelIndex >= 0 ? args[modelIndex + 1] : "default";
+  if (/(^|,)(edit|create|bash)(,|$)/.test(tools)) {
+    fs.writeFileSync(path.join(workspace, "src", "index.ts"), "export const ok = false;\\n", "utf8");
+  }
+  console.log(JSON.stringify({ type: "assistant.message", data: { content: "copilot execution complete via " + model } }));
+  console.log(JSON.stringify({ type: "result", data: { usage: { input_tokens: 7, output_tokens: 5, total_tokens: 12 } } }));
   process.exit(0);
 }
 
