@@ -601,7 +601,10 @@ async function resolveCandidate(
   const transportRecord = providerRecord?.transports.find((entry) => entry.transport === transport);
   if (!transportRecord?.available || !canExecuteTransport(vendor, transportRecord)) return null;
 
-  const profile = resolveProfile(spec, role);
+  const profile =
+    vendor === "copilot" && !spec.profileId && !spec.modelOverride?.trim()
+      ? undefined
+      : resolveProfile(spec, role);
   const model = spec.modelOverride?.trim() || profile?.model || "";
   if (!model && vendor !== "copilot") {
     throw new Error(`Provider ${vendor}/${transport} requires a model or profile.`);
