@@ -814,7 +814,8 @@ async function probeCliAuth(
     const json = parseJsonLoose(result.stdout);
     const authStatus = readString((json as Record<string, unknown> | null)?.status)?.toLowerCase();
     const authenticated = readBoolean((json as Record<string, unknown> | null)?.authenticated);
-    if (authenticated === true || authStatus === "authenticated") return { ok: true };
+    const loggedIn = readBoolean((json as Record<string, unknown> | null)?.loggedIn);
+    if (authenticated === true || loggedIn === true || authStatus === "authenticated") return { ok: true };
     return { ok: false, reason: "Claude CLI is installed but not authenticated." };
   }
   if (result.exitCode === 0 && !/(not logged|not authenticated|logged out|unauthenticated)/.test(text)) {

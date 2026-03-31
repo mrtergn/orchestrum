@@ -171,7 +171,17 @@ if (vendor === "codex" && args[0] === "login" && args[1] === "status") {
   process.exit(0);
 }
 if (vendor === "claude" && args[0] === "auth" && args[1] === "status") {
-  console.log(JSON.stringify({ authenticated, status: authenticated ? "authenticated" : "unauthenticated" }));
+  if (authenticated) {
+    console.log(JSON.stringify({
+      loggedIn: true,
+      authMethod: "claude.ai",
+      apiProvider: "firstParty",
+      email: "mock@example.com",
+      subscriptionType: "pro"
+    }));
+  } else {
+    console.log(JSON.stringify({ loggedIn: false }));
+  }
   process.exit(0);
 }
 if (vendor === "cursor" && args[0] === "agent" && args[1] === "status") {

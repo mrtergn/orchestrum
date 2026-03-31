@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAppUi } from "@/components/AppUiProvider";
+import { ModalFrame } from "@/components/ModalFrame";
 
 type ActionItem = {
   id: string;
@@ -89,12 +90,9 @@ export function CommandPalette() {
         e.preventDefault();
         const action = filtered[selectedIndex];
         if (action) executeAction(action);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        closeCommandPalette();
       }
     },
-    [filtered, selectedIndex, executeAction, closeCommandPalette]
+    [filtered, selectedIndex, executeAction]
   );
 
   // Scroll selected into view
@@ -103,17 +101,18 @@ export function CommandPalette() {
     if (el) el.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
-  if (!commandPaletteOpen) return null;
-
   let flatIndex = -1;
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/70 p-4" onClick={closeCommandPalette}>
-      <div
-        className="animate-in mx-auto mt-[10vh] w-full max-w-xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/95 shadow-2xl shadow-black/40"
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={handleKeyDown}
-      >
+    <ModalFrame
+      open={commandPaletteOpen}
+      onClose={closeCommandPalette}
+      ariaLabel="Command palette"
+      overlayClassName="z-50 bg-slate-950/70 p-4"
+      containerClassName="items-start pt-[10vh]"
+      panelClassName="animate-in w-full max-w-xl overflow-hidden"
+      panelProps={{ onKeyDown: handleKeyDown }}
+    >
         {/* Search input */}
         <div className="border-b border-slate-800/60 px-4 py-3">
           <input
@@ -176,7 +175,6 @@ export function CommandPalette() {
           </div>
           <span>{filtered.length} command{filtered.length !== 1 ? "s" : ""}</span>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }

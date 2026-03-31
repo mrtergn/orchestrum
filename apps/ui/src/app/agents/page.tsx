@@ -3,6 +3,9 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { ProviderDiscoveryGrid } from "@/components/providers/ProviderDiscoveryGrid";
+import { ProviderDiscoveryLoadingState } from "@/components/providers/ProviderDiscoveryLoadingState";
+import { ProviderDiscoveryStatusSummary } from "@/components/providers/ProviderDiscoveryStatusSummary";
 import {
   defaultProviderForRole,
   preferredTransport,
@@ -10,12 +13,11 @@ import {
   providerSummary,
   transportLabel,
   vendorLabel,
-  type ProviderDiscoveryRecord,
-  type ProviderDiscoveryTransport,
   type ProviderSpec,
   type ProviderTransport,
   type ProviderVendor
 } from "@/lib/providers";
+import { useProviderDiscovery } from "@/lib/queries/useProviderDiscovery";
 
 type Agent = {
   id: string;
@@ -25,10 +27,6 @@ type Agent = {
   provider: ProviderSpec;
   capabilities: { shell: boolean; fs: boolean; network: boolean };
   status: { state: string; currentTaskId?: string; lastHeartbeatAt: string };
-};
-
-type DiscoveryPayload = {
-  providers?: ProviderDiscoveryRecord[];
 };
 
 type Draft = {
@@ -80,11 +78,19 @@ export default function AgentsPage() {
   const { pushToast, selectedWorkspaceId } = useAppUi();
   const confirm = useConfirm();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [providers, setProviders] = useState<ProviderDiscoveryRecord[]>([]);
   const [draft, setDraft] = useState<Draft>(createDraft());
   const [editingId, setEditingId] = useState("");
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const {
+    providers,
+    isLoading: providerDiscoveryLoading,
+    error: providerDiscoveryError
+  } = useProviderDiscovery({
+    scope: "workspace",
+    workspaceId: selectedWorkspaceId,
+    enabled: Boolean(selectedWorkspaceId)
+  });
 
   const loadAgents = useCallback(async () => {
     if (!selectedWorkspaceId) {
@@ -96,25 +102,13 @@ export default function AgentsPage() {
     setAgents(Array.isArray(data.agents) ? data.agents : []);
   }, [selectedWorkspaceId]);
 
-  const loadProviders = useCallback(async () => {
-    if (!selectedWorkspaceId) {
-      setProviders([]);
-      return;
-    }
-    const res = await fetch(`/api/providers/discover?scope=workspace&workspace=${encodeURIComponent(selectedWorkspaceId)}`, {
-      cache: "no-store"
-    });
-    const data = (res.ok ? await res.json() : { providers: [] }) as DiscoveryPayload;
-    setProviders(Array.isArray(data.providers) ? data.providers : []);
-  }, [selectedWorkspaceId]);
-
   useEffect(() => {
-    void Promise.all([loadAgents(), loadProviders()]);
+    void loadAgents();
     const timer = setInterval(() => {
       void loadAgents();
     }, 4000);
     return () => clearInterval(timer);
-  }, [loadAgents, loadProviders]);
+  }, [loadAgents]);
 
   const selectedVendor = useMemo(
     () => providers.find((provider) => provider.vendor === draft.provider.vendor),
@@ -125,6 +119,7 @@ export default function AgentsPage() {
     [draft.provider.transport, selectedVendor]
   );
   const profileOptions = selectedTransport?.profiles ?? [];
+  const providersReady = Boolean(selectedWorkspaceId) && !providerDiscoveryLoading && !providerDiscoveryError && providers.length > 0;
 
   const syncProvider = useCallback((vendor: ProviderVendor, transport?: ProviderTransport) => {
     setDraft((prev) => {
@@ -228,13 +223,6 @@ export default function AgentsPage() {
     setShowForm(true);
   };
 
-  const transportBadge = (transport: ProviderDiscoveryTransport | null) => {
-    if (!transport) return "No transport";
-    if (transport.configured) return `${transportLabel(transport.transport)} ready`;
-    if (transport.available) return `${transportLabel(transport.transport)} available`;
-    return `${transportLabel(transport.transport)} unavailable`;
-  };
-
   return (
     <main className="space-y-6">
       <section className="flex flex-wrap items-center justify-between gap-4">
@@ -258,40 +246,37 @@ export default function AgentsPage() {
         </button>
       </section>
 
-      <section className="grid gap-3 lg:grid-cols-3">
-        {providers.map((record) => {
-          const transport = preferredTransport(record);
-          return (
-            <div key={record.vendor} className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-white">{record.label}</div>
-                  <div className="mt-1 text-[11px] text-slate-500">{transportBadge(transport)}</div>
-                </div>
-                <button
-                  onClick={() => {
-                    syncProvider(record.vendor, transport?.transport);
-                    setShowForm(true);
-                  }}
-                  className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300"
-                >
-                  Use
-                </button>
-              </div>
-              <div className="mt-3 space-y-1 text-[11px] text-slate-500">
-                {record.transports.map((entry) => (
-                  <div key={`${record.vendor}-${entry.transport}`} className="flex items-center justify-between rounded-lg bg-slate-900/30 px-2.5 py-1.5">
-                    <span>{transportLabel(entry.transport)}</span>
-                    <span className={entry.configured ? "text-emerald-300" : entry.available ? "text-amber-300" : "text-slate-600"}>
-                      {entry.configured ? "ready" : entry.available ? "available" : "off"}
-                    </span>
-                  </div>
-                ))}
-              </div>
+      {!selectedWorkspaceId ? (
+        <section className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/30 p-6">
+          <div className="text-sm font-semibold text-white">Select a workspace</div>
+          <div className="mt-1 text-xs text-slate-500">Provider routing is workspace-scoped. Pick a workspace first, then this page can inspect available CLI and local transports.</div>
+        </section>
+      ) : providerDiscoveryLoading ? (
+        <ProviderDiscoveryLoadingState variant="compact" />
+      ) : providerDiscoveryError ? (
+        <section className="rounded-2xl border border-rose-400/30 bg-rose-400/10 p-5">
+          <div className="text-sm font-semibold text-rose-100">Provider discovery failed</div>
+          <div className="mt-1 text-xs text-rose-100/80">{providerDiscoveryError}</div>
+        </section>
+      ) : (
+        <section className="space-y-4">
+          <ProviderDiscoveryStatusSummary providers={providers} variant="compact" />
+          {providers.length > 0 ? (
+            <ProviderDiscoveryGrid
+              providers={providers}
+              variant="compact"
+              onUseProvider={(record) => {
+                syncProvider(record.vendor, preferredTransport(record)?.transport);
+                setShowForm(true);
+              }}
+            />
+          ) : (
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/35 p-5 text-xs text-slate-500">
+              No providers detected for this workspace yet. Local CLI auth or runtime endpoints may still need setup.
             </div>
-          );
-        })}
-      </section>
+          )}
+        </section>
+      )}
 
       {agents.length === 0 && !showForm && (
         <section className="rounded-2xl border border-dashed border-slate-700 p-8">
@@ -372,96 +357,114 @@ export default function AgentsPage() {
               </div>
             </div>
 
-            <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/30 p-4">
-              <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Vendor</label>
-                <select
-                  value={draft.provider.vendor}
-                  onChange={(event) => syncProvider(event.target.value as ProviderVendor)}
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
-                >
-                  {providers.map((record) => (
-                    <option key={record.vendor} value={record.vendor}>
-                      {record.label}
-                    </option>
-                  ))}
-                </select>
+            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-4">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Provider Routing</div>
+              <div className="mt-2 text-[11px] text-slate-500">
+                {!selectedWorkspaceId
+                  ? "Select a workspace to inspect provider routing."
+                  : providerDiscoveryLoading
+                    ? "Detecting providers..."
+                    : providerDiscoveryError
+                      ? `Provider discovery failed: ${providerDiscoveryError}`
+                      : providers.length === 0
+                        ? "No providers detected yet for this workspace."
+                        : "Choose vendor, transport, and profile from the discovered provider set."}
               </div>
-              <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Transport</label>
-                <select
-                  value={draft.provider.transport}
-                  onChange={(event) => syncProvider(draft.provider.vendor, event.target.value as ProviderTransport)}
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
-                >
-                  {(selectedVendor?.transports ?? []).map((transport) => (
-                    <option key={transport.transport} value={transport.transport}>
-                      {transportLabel(transport.transport)}
-                    </option>
-                  ))}
-                </select>
-                {selectedTransport?.reason && (
-                  <div className="mt-2 text-[11px] text-slate-500">{selectedTransport.reason}</div>
-                )}
-              </div>
-              <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Profile</label>
-                <select
-                  value={draft.provider.profileId ?? ""}
-                  onChange={(event) => {
-                    const nextProfile = profileOptions.find((profile) => profile.id === event.target.value);
-                    setDraft((prev) => ({
-                      ...prev,
-                      provider: {
-                        ...prev.provider,
-                        profileId: event.target.value || undefined,
-                        modelOverride: nextProfile?.model ?? prev.provider.modelOverride
-                      }
-                    }));
-                  }}
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
-                >
-                  {profileOptions.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Model Override</label>
-                <input
-                  value={draft.provider.modelOverride ?? ""}
-                  onChange={(event) => setDraft((prev) => ({
-                    ...prev,
-                    provider: { ...prev.provider, modelOverride: event.target.value || undefined }
-                  }))}
-                  placeholder={profileLabel(selectedVendor, draft.provider)}
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              {selectedTransport?.capabilities.supportsEffort && (
+
+              <fieldset disabled={!providersReady} className="mt-4 space-y-4 disabled:opacity-60">
                 <div>
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Effort</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Vendor</label>
                   <select
-                    value={draft.provider.effort ?? "medium"}
-                    onChange={(event) => setDraft((prev) => ({
-                      ...prev,
-                      provider: { ...prev.provider, effort: event.target.value as Draft["provider"]["effort"] }
-                    }))}
+                    value={providersReady ? draft.provider.vendor : ""}
+                    onChange={(event) => syncProvider(event.target.value as ProviderVendor)}
                     className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
                   >
-                    <option value="low">low</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                    <option value="max">max</option>
+                    {!providersReady && <option value="">Detecting providers...</option>}
+                    {providers.map((record) => (
+                      <option key={record.vendor} value={record.vendor}>
+                        {record.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
-              )}
-              <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-[11px] text-slate-500">
-                Primary: {providerSummary(draft.provider)}
-                {draft.provider.fallback && <div className="mt-1">Fallback: {providerSummary(draft.provider.fallback)}</div>}
-              </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Transport</label>
+                  <select
+                    value={providersReady ? draft.provider.transport : ""}
+                    onChange={(event) => syncProvider(draft.provider.vendor, event.target.value as ProviderTransport)}
+                    className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
+                  >
+                    {!providersReady && <option value="">Detecting transports...</option>}
+                    {(selectedVendor?.transports ?? []).map((transport) => (
+                      <option key={transport.transport} value={transport.transport}>
+                        {transportLabel(transport.transport)}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedTransport?.reason && (
+                    <div className="mt-2 text-[11px] text-slate-500">{selectedTransport.reason}</div>
+                  )}
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Profile</label>
+                  <select
+                    value={providersReady ? draft.provider.profileId ?? "" : ""}
+                    onChange={(event) => {
+                      const nextProfile = profileOptions.find((profile) => profile.id === event.target.value);
+                      setDraft((prev) => ({
+                        ...prev,
+                        provider: {
+                          ...prev.provider,
+                          profileId: event.target.value || undefined,
+                          modelOverride: nextProfile?.model ?? prev.provider.modelOverride
+                        }
+                      }));
+                    }}
+                    className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
+                  >
+                    {!providersReady && <option value="">Detecting profiles...</option>}
+                    {profileOptions.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Model Override</label>
+                  <input
+                    value={draft.provider.modelOverride ?? ""}
+                    onChange={(event) => setDraft((prev) => ({
+                      ...prev,
+                      provider: { ...prev.provider, modelOverride: event.target.value || undefined }
+                    }))}
+                    placeholder={profileLabel(selectedVendor, draft.provider)}
+                    className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
+                  />
+                </div>
+                {selectedTransport?.capabilities.supportsEffort && (
+                  <div>
+                    <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Effort</label>
+                    <select
+                      value={draft.provider.effort ?? "medium"}
+                      onChange={(event) => setDraft((prev) => ({
+                        ...prev,
+                        provider: { ...prev.provider, effort: event.target.value as Draft["provider"]["effort"] }
+                      }))}
+                      className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="max">max</option>
+                    </select>
+                  </div>
+                )}
+                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-[11px] text-slate-500">
+                  Primary: {providerSummary(draft.provider)}
+                  {draft.provider.fallback && <div className="mt-1">Fallback: {providerSummary(draft.provider.fallback)}</div>}
+                </div>
+              </fieldset>
             </div>
           </div>
 

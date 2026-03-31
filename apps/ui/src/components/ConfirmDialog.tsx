@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ModalFrame } from "@/components/ModalFrame";
 
 type ConfirmOptions = {
   title: string;
@@ -45,14 +46,14 @@ export function ConfirmDialog() {
   const handleConfirm = () => {
     setOpen(false);
     resolveRef.current?.(true);
+    resolveRef.current = null;
   };
 
   const handleCancel = () => {
     setOpen(false);
     resolveRef.current?.(false);
+    resolveRef.current = null;
   };
-
-  if (!open) return null;
 
   const toneStyles = {
     danger: "border-rose-400/40 bg-rose-400/10 text-rose-200",
@@ -62,11 +63,14 @@ export function ConfirmDialog() {
   const tone = options.tone ?? "danger";
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4" onClick={handleCancel}>
-      <div
-        className="animate-in w-full max-w-md rounded-2xl border border-slate-800 bg-slate-950/95 p-6 shadow-2xl shadow-black/40"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <ModalFrame
+      open={open}
+      onClose={handleCancel}
+      ariaLabel={options.title || "Confirmation dialog"}
+      overlayClassName="z-[60] bg-slate-950/70 p-4"
+      containerClassName="items-center"
+      panelClassName="animate-in w-full max-w-md p-6"
+    >
         <h3 className="text-lg font-semibold text-white">{options.title}</h3>
         <p className="mt-2 text-sm text-slate-400">{options.message}</p>
         <div className="mt-5 flex justify-end gap-3">
@@ -83,7 +87,6 @@ export function ConfirmDialog() {
             {options.confirmLabel ?? "Confirm"}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }

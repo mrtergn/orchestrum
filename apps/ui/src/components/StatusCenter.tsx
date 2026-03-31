@@ -8,6 +8,7 @@ import { useAppUi, type AppToast } from "@/components/AppUiProvider";
 import { useRuns } from "@/lib/queries/useRuns";
 import { useWorkspaces, type WorkspaceSummary } from "@/lib/queries/useWorkspaces";
 import { useAgents } from "@/lib/queries/useAgents";
+import { preferredTransport, type ProviderDiscoveryRecord } from "@/lib/providers";
 import { fetchJson } from "@/lib/queries/client";
 import { useEventSource } from "@/lib/hooks/useEventSource";
 
@@ -30,6 +31,10 @@ type PlatformTaskSummary = {
   id: string;
   status: string;
   resultSummary?: string;
+};
+
+type ProviderDiscoveryPayload = {
+  providers?: ProviderDiscoveryRecord[];
 };
 
 const LAST_FAILED_KEY = "orchestrum.status.lastFailedRun";
@@ -67,6 +72,13 @@ export function StatusCenter() {
     staleTime: 5000
   });
 
+  const { data: providerDiscoveryData, isSuccess: providerDiscoveryReady } = useQuery({
+    queryKey: ["providers", "global"],
+    queryFn: () => fetchJson<ProviderDiscoveryPayload>("/api/providers/discover?scope=global"),
+    staleTime: 30000,
+    retry: false
+  });
+
   const handleSseMessage = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["runs"] });
     void queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -98,10 +110,21 @@ export function StatusCenter() {
 
   const hasProviderKey = Boolean(secretsData?.keys?.OPENAI_API_KEY || secretsData?.keys?.ANTHROPIC_API_KEY);
   const agentCount = agents.length;
+  const workspaceCount = workspaces.length;
   const orgNodeCount = Array.isArray(orgData?.nodes) ? orgData.nodes.length : 0;
   const tasks = Array.isArray(tasksData?.tasks) ? tasksData.tasks : [];
   const latestPlatformFailure = tasks.find((task) => task.status === "failed" && typeof task.resultSummary === "string" && task.resultSummary.trim());
   const platformError = latestPlatformFailure?.resultSummary?.trim() ?? "";
+  const providerDiscovery = Array.isArray(providerDiscoveryData?.providers) ? providerDiscoveryData.providers : [];
+  const hasConfiguredCliProvider = providerDiscovery.some((record) => {
+    const transport = preferredTransport(record);
+    return Boolean(transport?.configured && (transport.transport === "cli" || transport.transport === "local_http"));
+  });
+  const hasAnyConfiguredProvider = hasProviderKey || hasConfiguredCliProvider;
+  const hasAnyLocalProvider = providerDiscovery.some((record) =>
+    record.transports.some((transport) => transport.available && (transport.transport === "cli" || transport.transport === "local_http"))
+  );
+  const isFreshSetup = !onboardingSkipped && workspaceCount === 0 && agentCount === 0;
 
   const selectedWorkspace = useMemo(
     () => (workspaces as WorkspaceSummary[]).find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -110,19 +133,21 @@ export function StatusCenter() {
 
   const banners = useMemo<Banner[]>(() => {
     const list: Banner[] = [];
-    if (!hasProviderKey) {
+    if (!isFreshSetup && providerDiscoveryReady && !hasAnyConfiguredProvider) {
       list.push({
         id: "missing-provider-key",
-        tone: "warning",
-        message: "No provider key configured. Add OPENAI_API_KEY or ANTHROPIC_API_KEY in Settings > AI Providers.",
+        tone: hasAnyLocalProvider ? "info" : "warning",
+        message: hasAnyLocalProvider
+          ? "No provider auth detected yet. API keys are optional if you plan to use CLI or local providers."
+          : "No provider configured yet. Connect a local CLI session or add OPENAI_API_KEY / ANTHROPIC_API_KEY in Settings > AI Providers.",
         actionLabel: "Open Settings",
         actionHref: "/settings"
       });
     }
-    if (agentCount === 0) {
+    if (agentCount === 0 && workspaceCount > 0) {
       list.push({
         id: "no-agents",
-        tone: "warning",
+        tone: "info",
         message: "No agents registered yet. Create your first agent in Agent Registry.",
         actionLabel: "Open Agents",
         actionHref: "/agents"
@@ -174,7 +199,18 @@ export function StatusCenter() {
       });
     }
     return list;
-  }, [agentCount, hasProviderKey, onboardingSkipped, orgNodeCount, platformError, selectedWorkspace]);
+  }, [
+    agentCount,
+    hasAnyConfiguredProvider,
+    hasAnyLocalProvider,
+    isFreshSetup,
+    onboardingSkipped,
+    orgNodeCount,
+    platformError,
+    providerDiscoveryReady,
+    selectedWorkspace,
+    workspaceCount
+  ]);
 
   const runToastAction = async (toast: AppToast) => {
     if (!toast.actionPayload || toast.actionPayload.type !== "retry-run") return;

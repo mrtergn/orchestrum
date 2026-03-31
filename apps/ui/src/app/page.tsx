@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { AgentOnboarding } from "@/components/AgentOnboarding";
 import { useAppUi } from "@/components/AppUiProvider";
 import { normalizeAgentRuntimeState } from "@/lib/runtime";
 
@@ -42,6 +43,7 @@ export default function HomePage() {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -127,8 +129,10 @@ export default function HomePage() {
 
   return (
     <main className="space-y-6">
+      <AgentOnboarding onVisibilityChange={setShowOnboarding} />
+
       {/* Setup steps - always visible until done, then collapsible */}
-      {!allStepsDone && (
+      {!showOnboarding && !allStepsDone && (
         <section className="rounded-2xl border border-amber-400/20 bg-gradient-to-br from-amber-400/5 to-slate-950/40 p-6">
           <div className="mb-4">
             <h2 className="text-lg font-semibold text-white">Get started with Orchestrum</h2>

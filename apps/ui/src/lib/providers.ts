@@ -57,6 +57,17 @@ export type ProviderDiscoveryRecord = {
   preferredTransport?: ProviderTransport | null;
 };
 
+export type ProviderDiscoveryState = "connected" | "detected" | "missing";
+
+export const PROVIDER_DISCOVERY_ORDER: ProviderVendor[] = [
+  "codex",
+  "claude",
+  "cursor",
+  "openai",
+  "ollama",
+  "llama.cpp"
+];
+
 export function vendorLabel(vendor: ProviderVendor): string {
   switch (vendor) {
     case "codex":
@@ -134,6 +145,62 @@ export function preferredTransport(record: ProviderDiscoveryRecord): ProviderDis
     return record.transports.find((entry) => entry.transport === record.preferredTransport) ?? null;
   }
   return record.transports.find((entry) => entry.configured) ?? record.transports.find((entry) => entry.available) ?? null;
+}
+
+export function providerDiscoveryState(transport: ProviderDiscoveryTransport | null): ProviderDiscoveryState {
+  if (!transport) return "missing";
+  if (transport.configured) return "connected";
+  if (transport.available) return "detected";
+  return "missing";
+}
+
+export function providerDiscoveryBadgeLabel(transport: ProviderDiscoveryTransport | null): string {
+  const state = providerDiscoveryState(transport);
+  if (state === "connected") return "Usable now";
+  if (state === "detected") return "Needs setup";
+  return "Not detected";
+}
+
+export function providerDiscoverySummaryLabel(transport: ProviderDiscoveryTransport | null): string {
+  const state = providerDiscoveryState(transport);
+  if (state === "connected") return `${transportLabel(transport?.transport ?? "cli")} connected on this machine`;
+  if (state === "detected") return `${transportLabel(transport?.transport ?? "cli")} was found, but still needs sign-in or setup`;
+  return "No usable local transport was detected";
+}
+
+export function providerDiscoveryExplanation(transport: ProviderDiscoveryTransport | null): string {
+  const state = providerDiscoveryState(transport);
+  if (state === "connected") return "Orchestrum can route work here immediately.";
+  if (state === "detected") return "The tool exists, but auth or runtime setup still blocks execution.";
+  return "Orchestrum could not find an installed or reachable transport for this provider.";
+}
+
+export function providerDiscoveryTransportLabel(transport: ProviderDiscoveryTransport): string {
+  const state = providerDiscoveryState(transport);
+  if (state === "connected") return "usable now";
+  if (state === "detected") return "detected";
+  return "not found";
+}
+
+export function orderProviderDiscovery(records: ProviderDiscoveryRecord[]): ProviderDiscoveryRecord[] {
+  const order = new Map(PROVIDER_DISCOVERY_ORDER.map((vendor, index) => [vendor, index]));
+  return [...records].sort((left, right) => {
+    const leftIndex = order.get(left.vendor) ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = order.get(right.vendor) ?? Number.MAX_SAFE_INTEGER;
+    return leftIndex - rightIndex;
+  });
+}
+
+export function hasConfiguredLocalProvider(records: ProviderDiscoveryRecord[]): boolean {
+  return records.some((record) =>
+    record.transports.some((transport) => transport.configured && (transport.transport === "cli" || transport.transport === "local_http"))
+  );
+}
+
+export function hasAnyLocalProvider(records: ProviderDiscoveryRecord[]): boolean {
+  return records.some((record) =>
+    record.transports.some((transport) => transport.available && (transport.transport === "cli" || transport.transport === "local_http"))
+  );
 }
 
 export function profileLabel(record: ProviderDiscoveryRecord | undefined, provider: ProviderSpec): string {

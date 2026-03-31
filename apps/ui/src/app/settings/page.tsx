@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { useAppUi } from "@/components/AppUiProvider";
+import { ProviderDiscoveryGrid } from "@/components/providers/ProviderDiscoveryGrid";
+import { ProviderDiscoveryLoadingState } from "@/components/providers/ProviderDiscoveryLoadingState";
+import { ProviderDiscoveryStatusSummary } from "@/components/providers/ProviderDiscoveryStatusSummary";
 import {
   type DeliveryBinding,
   type DeliveryCapability,
@@ -12,7 +15,7 @@ import {
   targetOptionsForMode,
   toolLabel
 } from "@/lib/delivery";
-import { preferredTransport, transportLabel, vendorLabel, type ProviderDiscoveryRecord } from "@/lib/providers";
+import { useProviderDiscovery } from "@/lib/queries/useProviderDiscovery";
 
 type CapabilityDiscovery = {
   capabilities?: DeliveryCapability[];
@@ -25,10 +28,6 @@ type TeamPresetPayload = {
   scaffoldPreset?: unknown;
   capabilities?: CapabilityDiscovery["capabilities"];
   suggestedBindings?: CapabilityDiscovery["suggestedBindings"];
-};
-
-type ProviderDiscoveryPayload = {
-  providers?: ProviderDiscoveryRecord[];
 };
 
 const ConfigSchema = z.object({
@@ -68,6 +67,48 @@ const ConfigSchema = z.object({
 type Scope = "workspace" | "global";
 const tabs = ["Providers", "Runtime", "Profile", "Advanced"] as const;
 type Tab = (typeof tabs)[number];
+
+const PM_MODEL_OPTIONS = [
+  { value: "gpt-5", label: "GPT-5", hint: "broader planning and reasoning" },
+  { value: "gpt-4.1", label: "GPT-4.1", hint: "balanced fallback" },
+  { value: "o4-mini", label: "o4-mini", hint: "lighter and cheaper" }
+] as const;
+
+const DEV_MODEL_OPTIONS = [
+  { value: "codex", label: "Codex", hint: "code-focused default" },
+  { value: "gpt-5", label: "GPT-5", hint: "general implementation fallback" },
+  { value: "gpt-4.1", label: "GPT-4.1", hint: "balanced fallback" }
+] as const;
+
+const AUDIT_MODEL_OPTIONS = [
+  { value: "gpt-5", label: "GPT-5", hint: "review and risk analysis" },
+  { value: "gpt-4.1", label: "GPT-4.1", hint: "balanced fallback" },
+  { value: "o4-mini", label: "o4-mini", hint: "lighter verification passes" }
+] as const;
+
+function deliveryRunModeLabel(value: string) {
+  if (value === "manual_supervised") return "Manual and supervised";
+  return "Mostly automatic with supervision";
+}
+
+function deliveryRunModeHint(value: string) {
+  if (value === "manual_supervised") return "Humans stay in the loop for most delivery steps.";
+  return "Orchestrum automates more of the flow and asks for help only when needed.";
+}
+
+function deliveryRoleModeLabel(value: string) {
+  if (value === "manual_browser") return "Manual in browser";
+  if (value === "manual_ide") return "Manual in IDE";
+  if (value === "auto_cli") return "Automatic in CLI";
+  return "Disabled";
+}
+
+function deliveryRoleModeHint(value: string) {
+  if (value === "manual_browser") return "A human handles this role in a browser tool such as ChatGPT.";
+  if (value === "manual_ide") return "A human handles this role in an IDE such as Cursor.";
+  if (value === "auto_cli") return "Orchestrum can execute this role directly through a CLI tool.";
+  return "This role will not participate in the preset.";
+}
 
 export default function SettingsPage() {
   const { selectedWorkspaceId, pushToast } = useAppUi();
@@ -109,33 +150,48 @@ export default function SettingsPage() {
   const [claudeKey, setClaudeKey] = useState("");
   const [providerPassphrase, setProviderPassphrase] = useState("");
   const [providerMessage, setProviderMessage] = useState("");
-  const [providerDiscovery, setProviderDiscovery] = useState<ProviderDiscoveryRecord[]>([]);
+  const [showApiFallbacks, setShowApiFallbacks] = useState(false);
   const [pmModelDefault, setPmModelDefault] = useState("gpt-5");
   const [devModelDefault, setDevModelDefault] = useState("codex");
   const [auditModelDefault, setAuditModelDefault] = useState("gpt-5");
   const effectiveScope: Scope = scope === "workspace" && !workspaceId ? "global" : scope;
+  const [activeTab, setActiveTab] = useState("Providers" as Tab);
+  const {
+    providers: providerDiscovery,
+    isLoading: providerDiscoveryLoading,
+    error: providerDiscoveryError
+  } = useProviderDiscovery({
+    scope: effectiveScope,
+    workspaceId,
+    enabled: activeTab === "Providers"
+  });
 
   useEffect(() => {
     setWorkspaceId(selectedWorkspaceId && selectedWorkspaceId !== "undefined" ? selectedWorkspaceId : "");
   }, [selectedWorkspaceId]);
 
   useEffect(() => {
-    const loadProviders = async () => {
-      const [secretRes, providerRes] = await Promise.all([
-        fetch("/api/secrets", { cache: "no-store" }),
-        fetch(`/api/providers/discover?scope=${effectiveScope}${workspaceId ? `&workspace=${encodeURIComponent(workspaceId)}` : ""}`, { cache: "no-store" })
-      ]);
-      if (secretRes.ok) {
-        const data = await secretRes.json();
-        setOpenAiSet(Boolean(data.keys?.OPENAI_API_KEY));
-        setClaudeSet(Boolean(data.keys?.ANTHROPIC_API_KEY));
-      }
-      if (providerRes.ok) {
-        const data = await providerRes.json() as ProviderDiscoveryPayload;
-        setProviderDiscovery(Array.isArray(data.providers) ? data.providers : []);
-      }
+    if (activeTab !== "Providers") return;
+    let cancelled = false;
+
+    const loadSecrets = async () => {
+      const secretRes = await fetch("/api/secrets", { cache: "no-store" });
+      if (!secretRes.ok || cancelled) return;
+      const data = await secretRes.json();
+      if (cancelled) return;
+      setOpenAiSet(Boolean(data.keys?.OPENAI_API_KEY));
+      setClaudeSet(Boolean(data.keys?.ANTHROPIC_API_KEY));
     };
-    void loadProviders();
+
+    void loadSecrets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, effectiveScope, workspaceId]);
+
+  useEffect(() => {
+    setShowApiFallbacks(false);
   }, [effectiveScope, workspaceId]);
 
   useEffect(() => {
@@ -457,8 +513,6 @@ export default function SettingsPage() {
     setTeamPresetDraft(normalizeTeamPresetDraft(nextPreset, nextBindings));
   };
 
-  const [activeTab, setActiveTab] = useState("Providers" as Tab);
-
   return (
     <main className="space-y-6">
       {/* Header */}
@@ -503,180 +557,224 @@ export default function SettingsPage() {
       {/* ── Providers Tab ── */}
       {activeTab === "Providers" && (
         <section className="space-y-6">
-          <div className="grid gap-4 lg:grid-cols-3">
-            {providerDiscovery.map((record) => {
-              const transport = preferredTransport(record);
-              return (
-                <div key={record.vendor} className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold text-white">{vendorLabel(record.vendor)}</h3>
-                      <p className="mt-1 text-[11px] text-slate-500">
-                        {transport
-                          ? `${transportLabel(transport.transport)} ${transport.configured ? "ready" : transport.available ? "available" : "unavailable"}`
-                          : "No transport detected"}
-                      </p>
-                    </div>
-                    <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${transport?.configured ? "bg-emerald-400/10 text-emerald-300" : "bg-slate-800 text-slate-400"}`}>
-                      {transport?.configured ? "Ready" : "Needs setup"}
-                    </span>
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-white">Local Provider Session Detection</h3>
+                <p className="mt-1 text-xs text-slate-500">CLI and local transports are the primary path. API fallbacks remain optional and stay tucked away until you need them.</p>
+              </div>
+              {providerDiscoveryLoading && (
+                <span className="rounded-full border border-slate-800 bg-slate-900/50 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                  scanning machine
+                </span>
+              )}
+            </div>
+
+            {providerDiscoveryLoading ? (
+              <ProviderDiscoveryLoadingState variant="full" />
+            ) : providerDiscoveryError ? (
+              <div className="rounded-2xl border border-rose-400/30 bg-rose-400/10 p-5">
+                <div className="text-sm font-semibold text-rose-100">Provider discovery failed</div>
+                <div className="mt-1 text-xs text-rose-200/80">
+                  Unable to inspect local CLI and transport state right now. API fallbacks are still available below.
+                </div>
+                <div className="mt-3 rounded-xl border border-rose-400/20 bg-slate-950/40 px-3 py-2 text-xs text-rose-100">
+                  {providerDiscoveryError}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <ProviderDiscoveryStatusSummary providers={providerDiscovery} variant="full" />
+                <ProviderDiscoveryGrid providers={providerDiscovery} variant="full" />
+              </div>
+            )}
+          </div>
+
+          {!providerDiscoveryLoading && (
+            <>
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/35">
+                <button
+                  type="button"
+                  onClick={() => setShowApiFallbacks((current) => !current)}
+                  className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+                >
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">API Fallbacks</h3>
+                    <p className="mt-1 text-xs text-slate-500">Only configure these if you want direct API transport or a fallback when local auth is missing.</p>
                   </div>
-                  <div className="mt-3 space-y-1 text-[11px] text-slate-500">
-                    {record.transports.map((entry) => (
-                      <div key={`${record.vendor}-${entry.transport}`} className="flex items-center justify-between rounded-lg bg-slate-900/30 px-2.5 py-1.5">
-                        <span>{transportLabel(entry.transport)}</span>
-                        <span className={entry.configured ? "text-emerald-300" : entry.available ? "text-amber-300" : "text-slate-600"}>
-                          {entry.configured ? "ready" : entry.available ? "available" : "off"}
-                        </span>
+                  <span className="rounded-full border border-slate-700 bg-slate-900/50 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                    {showApiFallbacks ? "Hide" : "Show"}
+                  </span>
+                </button>
+
+                {showApiFallbacks && (
+                  <div className="border-t border-slate-800 px-5 py-5">
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div>
+                            <h3 className="text-sm font-semibold text-white">OpenAI</h3>
+                            <p className="mt-1 text-xs text-slate-500">Optional API fallback. Keys are only required for API transport.</p>
+                          </div>
+                          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${openAiSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
+                            {openAiSet ? "Connected" : "Not configured"}
+                          </span>
+                        </div>
+                        <div className="mt-4 space-y-3">
+                          <input
+                            value={openAiKey}
+                            onChange={(event) => setOpenAiKey(event.target.value)}
+                            type="password"
+                            placeholder="sk-..."
+                            className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleSaveProvider("openai")}
+                              className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
+                            >
+                              Save Key
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleTestProvider("openai")}
+                              className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
+                            >
+                              Test
+                            </button>
+                            {openAiSet && (
+                              <button
+                                type="button"
+                                onClick={() => void handleUnsetProvider("openai")}
+                                className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                    ))}
+
+                      <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div>
+                            <h3 className="text-sm font-semibold text-white">Claude</h3>
+                            <p className="mt-1 text-xs text-slate-500">Optional API fallback when Claude CLI is unavailable.</p>
+                          </div>
+                          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${claudeSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
+                            {claudeSet ? "Connected" : "Not configured"}
+                          </span>
+                        </div>
+                        <div className="mt-4 space-y-3">
+                          <input
+                            value={claudeKey}
+                            onChange={(event) => setClaudeKey(event.target.value)}
+                            type="password"
+                            placeholder="sk-ant-..."
+                            className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleSaveProvider("claude")}
+                              className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
+                            >
+                              Save Key
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleTestProvider("claude")}
+                              className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
+                            >
+                              Test
+                            </button>
+                            {claudeSet && (
+                              <button
+                                type="button"
+                                onClick={() => void handleUnsetProvider("claude")}
+                                className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
+                              >
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 max-w-md space-y-3 rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+                      <div>
+                        <h3 className="text-sm font-semibold text-white">Secret Storage</h3>
+                        <p className="mt-1 text-xs text-slate-500">Optional passphrase used when encrypting provider secrets on disk.</p>
+                      </div>
+                      <input
+                        value={providerPassphrase}
+                        onChange={(event) => setProviderPassphrase(event.target.value)}
+                        type="password"
+                        placeholder="Passphrase for encrypted storage (optional)"
+                        className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                      />
+                      {providerMessage && <div className="text-xs text-slate-400">{providerMessage}</div>}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="grid gap-4 lg:grid-cols-2">
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-sm font-semibold text-white">OpenAI</h3>
-                  <p className="mt-1 text-xs text-slate-500">Optional API fallback. Keys are only required for API transport.</p>
-                </div>
-                <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${openAiSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
-                  {openAiSet ? "Connected" : "Not configured"}
-                </span>
+                )}
               </div>
-              <div className="mt-4 space-y-3">
-                <input
-                  value={openAiKey}
-                  onChange={(event) => setOpenAiKey(event.target.value)}
-                  type="password"
-                  placeholder="sk-..."
-                  className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void handleSaveProvider("openai")}
-                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
-                  >
-                    Save Key
-                  </button>
-                  <button
-                    onClick={() => void handleTestProvider("openai")}
-                    className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
-                  >
-                    Test
-                  </button>
-                  {openAiSet && (
-                    <button
-                      onClick={() => void handleUnsetProvider("openai")}
-                      className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-sm font-semibold text-white">Claude</h3>
-                  <p className="mt-1 text-xs text-slate-500">Optional API fallback when Claude CLI is unavailable.</p>
-                </div>
-                <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${claudeSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
-                  {claudeSet ? "Connected" : "Not configured"}
-                </span>
-              </div>
-              <div className="mt-4 space-y-3">
-                <input
-                  value={claudeKey}
-                  onChange={(event) => setClaudeKey(event.target.value)}
-                  type="password"
-                  placeholder="sk-ant-..."
-                  className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void handleSaveProvider("claude")}
-                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
-                  >
-                    Save Key
-                  </button>
-                  <button
-                    onClick={() => void handleTestProvider("claude")}
-                    className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
-                  >
-                    Test
-                  </button>
-                  {claudeSet && (
-                    <button
-                      onClick={() => void handleUnsetProvider("claude")}
-                      className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="max-w-md space-y-3 rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <div>
-              <h3 className="text-sm font-semibold text-white">Secret Storage</h3>
-              <p className="mt-1 text-xs text-slate-500">Optional passphrase used when encrypting provider secrets on disk.</p>
-            </div>
-            <input
-              value={providerPassphrase}
-              onChange={(event) => setProviderPassphrase(event.target.value)}
-              type="password"
-              placeholder="Passphrase for encrypted storage (optional)"
-              className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
-            />
-            {providerMessage && <div className="text-xs text-slate-400">{providerMessage}</div>}
-          </div>
+            </>
+          )}
 
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <h3 className="text-sm font-semibold text-white">Model Defaults</h3>
-            <p className="mt-1 text-xs text-slate-500">Default model per agent role. Can be overridden per-agent.</p>
-            <div className="mt-4 grid gap-4 sm:grid-cols-3 max-w-2xl">
+            <h3 className="text-sm font-semibold text-white">Role Default Models</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              These are default model preferences by role. They are not provider accounts. The provider above decides which tool runs; this section only sets the model family that role should prefer when the provider supports it.
+            </p>
+            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3 text-[11px] text-slate-400">
+              Example: a Developer agent may still run through Cursor CLI or Codex CLI, while this setting tells Orchestrum which model family to ask for by default.
+            </div>
+            <div className="mt-4 grid gap-4 sm:grid-cols-3 max-w-4xl">
               <div>
                 <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">PM</label>
+                <div className="mt-1 text-[11px] text-slate-500">Used for planning, scoping, and task breakdown.</div>
                 <select
                   value={pmModelDefault}
                   onChange={(event) => setPmModelDefault(event.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
                 >
-                  <option value="gpt-5">gpt-5</option>
-                  <option value="gpt-4.1">gpt-4.1</option>
-                  <option value="o4-mini">o4-mini</option>
+                  {PM_MODEL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
                 <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Developer</label>
+                <div className="mt-1 text-[11px] text-slate-500">Used for implementation, patch generation, and code edits.</div>
                 <select
                   value={devModelDefault}
                   onChange={(event) => setDevModelDefault(event.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
                 >
-                  <option value="codex">codex</option>
-                  <option value="gpt-5">gpt-5</option>
-                  <option value="gpt-4.1">gpt-4.1</option>
+                  {DEV_MODEL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>
                 <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Auditor</label>
+                <div className="mt-1 text-[11px] text-slate-500">Used for review, regression checks, and risk analysis.</div>
                 <select
                   value={auditModelDefault}
                   onChange={(event) => setAuditModelDefault(event.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
                 >
-                  <option value="gpt-5">gpt-5</option>
-                  <option value="gpt-4.1">gpt-4.1</option>
-                  <option value="o4-mini">o4-mini</option>
+                  {AUDIT_MODEL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -687,12 +785,23 @@ export default function SettingsPage() {
       {/* ── Runtime Tab ── */}
       {activeTab === "Runtime" && (
         <section className="space-y-6">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/20 p-5">
+            <h3 className="text-sm font-semibold text-white">What this tab controls</h3>
+            <p className="mt-1 text-xs text-slate-400">
+              Runtime settings control how work runs under the hood: how many agents can work at once, whether runs use isolation, and how Orchestrum picks a winner when multiple models disagree.
+            </p>
+            <div className="mt-3 text-[11px] text-slate-500">
+              Most teams can keep these defaults unless they are tuning speed, safety, or infrastructure cost.
+            </div>
+          </div>
+
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <h3 className="text-sm font-semibold text-white">Concurrency &amp; Execution</h3>
-            <p className="mt-1 text-xs text-slate-500">Control how many agents run in parallel and the execution environment.</p>
+            <h3 className="text-sm font-semibold text-white">How Work Runs</h3>
+            <p className="mt-1 text-xs text-slate-500">Choose how much work runs in parallel and whether Orchestrum uses an isolated execution environment.</p>
             <div className="mt-4 grid gap-6 sm:grid-cols-2 max-w-2xl">
               <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Max Concurrent Agents</label>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Agents Running At The Same Time</label>
+                <div className="mt-1 text-[11px] text-slate-500">Higher values are faster, but consume more machine resources and create more overlapping edits.</div>
                 <input
                   type="number"
                   value={maxAgents}
@@ -701,7 +810,8 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sandbox Image</label>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sandbox Container Image</label>
+                <div className="mt-1 text-[11px] text-slate-500">Only used when sandboxing is enabled. This is the Docker image Orchestrum will run work inside.</div>
                 <input
                   value={sandboxImage}
                   onChange={(e) => setSandboxImage(e.target.value)}
@@ -712,25 +822,31 @@ export default function SettingsPage() {
             <div className="mt-4 flex flex-wrap gap-6">
               <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input type="checkbox" checked={sandboxEnabled} onChange={(e) => setSandboxEnabled(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                Docker sandbox
+                Use Docker isolation for runs
               </label>
               <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input type="checkbox" checked={sandboxNetwork} onChange={(e) => setSandboxNetwork(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                Sandbox network
+                Allow network inside the sandbox
               </label>
               <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input type="checkbox" checked={clusterEnabled} onChange={(e) => setClusterEnabled(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                Worker cluster
+                Use background worker cluster
               </label>
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-3 text-[11px] text-slate-500">
+              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2">Docker isolation: safer, more predictable, slightly slower.</div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2">Network in sandbox: only enable if runs need package installs, APIs, or remote services.</div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2">Worker cluster: useful when you want more background throughput on stronger machines.</div>
             </div>
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <h3 className="text-sm font-semibold text-white">Arbitration</h3>
-            <p className="mt-1 text-xs text-slate-500">How multi-model decisions are resolved when agents propose competing solutions.</p>
+            <h3 className="text-sm font-semibold text-white">How Conflicts Are Resolved</h3>
+            <p className="mt-1 text-xs text-slate-500">When multiple models propose different answers, this tells Orchestrum how to choose the final one.</p>
             <div className="mt-4 grid gap-4 sm:grid-cols-2 max-w-md">
               <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Mode</label>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Decision Rule</label>
+                <div className="mt-1 text-[11px] text-slate-500">Pick quality-first, majority vote, or speed-first behavior.</div>
                 <select
                   value={arbMode}
                   onChange={(e) => setArbMode(e.target.value as "score" | "vote" | "fastest")}
@@ -742,7 +858,8 @@ export default function SettingsPage() {
                 </select>
               </div>
               <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Min Models</label>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Minimum Opinions To Compare</label>
+                <div className="mt-1 text-[11px] text-slate-500">How many model outputs must exist before arbitration kicks in.</div>
                 <input
                   type="number"
                   value={arbMin}
@@ -750,6 +867,11 @@ export default function SettingsPage() {
                   className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
                 />
               </div>
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-3 text-[11px] text-slate-500">
+              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2"><span className="text-slate-300">Score</span>: tries to pick the strongest answer.</div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2"><span className="text-slate-300">Vote</span>: majority wins.</div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2"><span className="text-slate-300">Fastest</span>: returns the first acceptable result.</div>
             </div>
           </div>
 
@@ -780,12 +902,22 @@ export default function SettingsPage() {
             </div>
           ) : (
             <>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/20 p-5">
+              <h3 className="text-sm font-semibold text-white">What this tab controls</h3>
+              <p className="mt-1 text-xs text-slate-400">
+                Profile settings define how autonomous a workspace should feel: its safety posture, budget ceiling, editing style, and delivery defaults.
+              </p>
+              <div className="mt-3 text-[11px] text-slate-500">
+                The upper section changes agent behavior for this workspace. The lower sections control delivery presets and suggested tool routing.
+              </div>
+            </div>
             <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-              <h3 className="text-sm font-semibold text-white">Workspace Profile</h3>
-              <p className="mt-1 text-xs text-slate-500">Per-workspace defaults for risk tolerance, costs, and strategy.</p>
+              <h3 className="text-sm font-semibold text-white">Workspace Behavior Defaults</h3>
+              <p className="mt-1 text-xs text-slate-500">These settings shape how agents behave inside this workspace by default.</p>
               <div className="mt-4 grid gap-4 sm:grid-cols-2 max-w-lg">
                 <div>
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Risk Tolerance</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Autonomy Level</label>
+                  <div className="mt-1 text-[11px] text-slate-500">Lower means more guardrails and caution. Higher means agents act more freely.</div>
                   <select
                     value={profileRisk}
                     onChange={(e) => setProfileRisk(e.target.value)}
@@ -797,7 +929,8 @@ export default function SettingsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sandbox Mode</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Execution Safety Mode</label>
+                  <div className="mt-1 text-[11px] text-slate-500">Choose whether work runs inside Docker isolation or directly on the local machine.</div>
                   <select
                     value={profileSandbox}
                     onChange={(e) => setProfileSandbox(e.target.value)}
@@ -808,7 +941,8 @@ export default function SettingsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Execution Mode</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Where Code Changes Happen</label>
+                  <div className="mt-1 text-[11px] text-slate-500">Inline edits touch the current checkout. Worktree mode uses a separate git worktree for isolation.</div>
                   <select
                     value={profileExecutionMode}
                     onChange={(e) => setProfileExecutionMode(e.target.value)}
@@ -819,7 +953,8 @@ export default function SettingsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Max Cost / Run (USD)</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Soft Budget Per Run (USD)</label>
+                  <div className="mt-1 text-[11px] text-slate-500">Optional. Use this if you want Orchestrum to respect a rough spending ceiling per mission.</div>
                   <input
                     value={profileMaxCost}
                     onChange={(e) => setProfileMaxCost(e.target.value)}
@@ -828,7 +963,8 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Default Strategy</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Default Working Style</label>
+                  <div className="mt-1 text-[11px] text-slate-500">Optional shorthand such as `balanced`, `fast`, or `careful` for prompts and orchestration defaults.</div>
                   <input
                     value={profileStrategy}
                     onChange={(e) => setProfileStrategy(e.target.value)}
@@ -837,7 +973,8 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div className="sm:col-span-2">
-                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Browser Base URL</label>
+                  <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Default Browser App URL</label>
+                  <div className="mt-1 text-[11px] text-slate-500">Optional. Used when browser-based steps need a known local app URL to open or test.</div>
                   <input
                     value={profileBrowserBaseUrl}
                     onChange={(e) => setProfileBrowserBaseUrl(e.target.value)}
@@ -847,23 +984,24 @@ export default function SettingsPage() {
                 </div>
               </div>
               <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/20 p-4">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Governance</div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Safety Rules</div>
+                <div className="mt-1 text-[11px] text-slate-500">These switches decide which protective checks Orchestrum should enforce before or during execution.</div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label className="flex items-center gap-2 text-xs text-slate-300">
                     <input type="checkbox" checked={governanceEnabled} onChange={(e) => setGovernanceEnabled(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                    Enable governance layer
+                    Turn on workspace safety checks
                   </label>
                   <label className="flex items-center gap-2 text-xs text-slate-300">
                     <input type="checkbox" checked={governanceDangerousCommand} onChange={(e) => setGovernanceDangerousCommand(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                    Dangerous command guard
+                    Block risky shell commands
                   </label>
                   <label className="flex items-center gap-2 text-xs text-slate-300">
                     <input type="checkbox" checked={governanceConfigProtection} onChange={(e) => setGovernanceConfigProtection(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                    Config protection
+                    Protect config files from casual edits
                   </label>
                   <label className="flex items-center gap-2 text-xs text-slate-300">
                     <input type="checkbox" checked={governanceQualityGate} onChange={(e) => setGovernanceQualityGate(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                    Quality gate
+                    Require quality gate before finishing
                   </label>
                 </div>
               </div>
@@ -881,30 +1019,33 @@ export default function SettingsPage() {
             <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-semibold text-white">Team Preset</h3>
-                  <p className="mt-1 text-xs text-slate-500">Repo-scoped role bindings, handoff defaults, and packet templates for delivery sessions.</p>
+                  <h3 className="text-sm font-semibold text-white">Delivery Team Preset</h3>
+                  <p className="mt-1 text-xs text-slate-500">This decides which roles exist in delivery mode and which tool each role should use by default.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
                     onClick={handleScaffoldPreset}
                     className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs uppercase tracking-[0.2em] text-slate-300"
                   >
-                    Scaffold
+                    Generate Starter Preset
                   </button>
                   <button
                     onClick={() => void (teamPresetEditor === "confirm" ? handleSaveTeamPresetFromForm() : handleSaveTeamPreset())}
                     className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-emerald-200"
                   >
-                    {teamPresetEditor === "confirm" ? "Save Confirmed Preset" : "Save Raw JSON"}
+                    {teamPresetEditor === "confirm" ? "Save Preset" : "Save Raw JSON"}
                   </button>
                 </div>
+              </div>
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/20 px-4 py-3 text-[11px] text-slate-400">
+                If you do not need to fine-tune delivery handoffs yet, you can leave this section alone. The guided editor is the safer path; raw JSON is only for advanced customization.
               </div>
               <div className="mt-4 inline-flex rounded-lg border border-slate-800 bg-slate-900/40 p-1">
                 <button
                   onClick={() => setTeamPresetEditor("confirm")}
                   className={`rounded-md px-3 py-1.5 text-xs ${teamPresetEditor === "confirm" ? "bg-slate-800 text-white" : "text-slate-400"}`}
                 >
-                  Confirm Editor
+                  Guided Editor
                 </button>
                 <button
                   onClick={() => setTeamPresetEditor("raw")}
@@ -932,6 +1073,7 @@ export default function SettingsPage() {
                         </div>
                         <div>
                           <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Run Mode</label>
+                          <div className="mt-1 text-[11px] text-slate-500">How automatic the overall delivery loop should be by default.</div>
                           <select
                             value={teamPresetDraft.defaultRunMode}
                             onChange={(event) => setTeamPresetDraft((prev) => prev ? {
@@ -940,8 +1082,8 @@ export default function SettingsPage() {
                             } : prev)}
                             className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
                           >
-                            <option value="max_auto_supervised_hybrid">max_auto_supervised_hybrid</option>
-                            <option value="manual_supervised">manual_supervised</option>
+                            <option value="max_auto_supervised_hybrid">{deliveryRunModeLabel("max_auto_supervised_hybrid")} · {deliveryRunModeHint("max_auto_supervised_hybrid")}</option>
+                            <option value="manual_supervised">{deliveryRunModeLabel("manual_supervised")} · {deliveryRunModeHint("manual_supervised")}</option>
                           </select>
                         </div>
                       </div>
@@ -960,6 +1102,7 @@ export default function SettingsPage() {
                               <div className="mt-4 grid gap-4 sm:grid-cols-2">
                                 <div>
                                   <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Mode</label>
+                                  <div className="mt-1 text-[11px] text-slate-500">How this specific role is executed.</div>
                                   <select
                                     value={role.mode}
                                     onChange={(event) => {
@@ -975,14 +1118,15 @@ export default function SettingsPage() {
                                     }}
                                     className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
                                   >
-                                    <option value="manual_browser">manual_browser</option>
-                                    <option value="manual_ide">manual_ide</option>
-                                    <option value="auto_cli">auto_cli</option>
-                                    <option value="disabled">disabled</option>
+                                    <option value="manual_browser">{deliveryRoleModeLabel("manual_browser")} · {deliveryRoleModeHint("manual_browser")}</option>
+                                    <option value="manual_ide">{deliveryRoleModeLabel("manual_ide")} · {deliveryRoleModeHint("manual_ide")}</option>
+                                    <option value="auto_cli">{deliveryRoleModeLabel("auto_cli")} · {deliveryRoleModeHint("auto_cli")}</option>
+                                    <option value="disabled">{deliveryRoleModeLabel("disabled")} · {deliveryRoleModeHint("disabled")}</option>
                                   </select>
                                 </div>
                                 <div>
                                   <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Primary Target</label>
+                                  <div className="mt-1 text-[11px] text-slate-500">Which tool or endpoint this role should use first.</div>
                                   <select
                                     value={role.target}
                                     onChange={(event) => {
@@ -1018,8 +1162,8 @@ export default function SettingsPage() {
             </div>
 
             <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-              <h3 className="text-sm font-semibold text-white">Capabilities & Suggested Bindings</h3>
-              <p className="mt-1 text-xs text-slate-500">Machine discovery is suggest-and-confirm. These detections do not change behavior until they are saved into the repo preset.</p>
+              <h3 className="text-sm font-semibold text-white">Detected Tools & Suggested Role Routing</h3>
+              <p className="mt-1 text-xs text-slate-500">Orchestrum scans the machine and suggests how roles could be routed. Nothing changes until you save the preset above.</p>
               <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
                 <div className="space-y-2">
                   {(capabilities ?? []).map((capability) => (
@@ -1058,9 +1202,22 @@ export default function SettingsPage() {
       {/* ── Advanced Tab ── */}
       {activeTab === "Advanced" && (
         <section className="space-y-6">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/20 p-5">
+            <h3 className="text-sm font-semibold text-white">What this tab controls</h3>
+            <p className="mt-1 text-xs text-slate-400">
+              Advanced settings are low-level overrides. Most users will rarely need this tab unless they are customizing raw model maps, tightening shell permissions, or wiring telemetry.
+            </p>
+            <div className="mt-3 text-[11px] text-slate-500">
+              If you are unsure, leave these settings at their defaults.
+            </div>
+          </div>
+
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <h3 className="text-sm font-semibold text-white">Model Overrides</h3>
-            <p className="mt-1 text-xs text-slate-500">JSON map of model aliases. Merged with defaults.</p>
+            <h3 className="text-sm font-semibold text-white">Raw Model Map Overrides</h3>
+            <p className="mt-1 text-xs text-slate-500">Advanced JSON override for model aliases and role mappings. This merges into the defaults from the simpler settings above.</p>
+            <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/25 px-4 py-3 text-[11px] text-slate-400">
+              Only edit this if you need precise model IDs beyond the standard role defaults.
+            </div>
             <textarea
               value={modelsText}
               onChange={(e) => setModelsText(e.target.value)}
@@ -1069,8 +1226,11 @@ export default function SettingsPage() {
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <h3 className="text-sm font-semibold text-white">Shell Allowlist</h3>
-            <p className="mt-1 text-xs text-slate-500">Commands agents are permitted to execute (one per line). Leave empty to allow all.</p>
+            <h3 className="text-sm font-semibold text-white">Allowed Terminal Commands</h3>
+            <p className="mt-1 text-xs text-slate-500">Optional safety restriction. If you list commands here, agents may only execute those commands.</p>
+            <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/25 px-4 py-3 text-[11px] text-slate-400">
+              Leave this empty if you do not want command restrictions. Add one command prefix per line if you need a stricter environment.
+            </div>
             <textarea
               value={shellAllowlistText}
               onChange={(e) => setShellAllowlistText(e.target.value)}
@@ -1081,18 +1241,21 @@ export default function SettingsPage() {
 
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
             <h3 className="text-sm font-semibold text-white">Telemetry</h3>
-            <p className="mt-1 text-xs text-slate-500">Anonymized usage data. Never sends code or secrets.</p>
+            <p className="mt-1 text-xs text-slate-500">Optional usage reporting. This is for operational metrics, not your code contents or secrets.</p>
             <label className="mt-3 flex items-center gap-2 text-xs text-slate-300">
               <input type="checkbox" checked={telemetryEnabled} onChange={(e) => setTelemetryEnabled(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-              Enable telemetry
+              Send anonymous operational telemetry
             </label>
             {telemetryEnabled && (
-              <input
-                value={telemetryEndpoint}
-                onChange={(e) => setTelemetryEndpoint(e.target.value)}
-                placeholder="Custom endpoint (optional)"
-                className="mt-2 w-full max-w-md rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
-              />
+              <div className="mt-2">
+                <div className="mb-2 text-[11px] text-slate-500">Optional custom endpoint if you do not want the default telemetry target.</div>
+                <input
+                  value={telemetryEndpoint}
+                  onChange={(e) => setTelemetryEndpoint(e.target.value)}
+                  placeholder="Custom endpoint (optional)"
+                  className="w-full max-w-md rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                />
+              </div>
             )}
           </div>
 

@@ -4,7 +4,6 @@ import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
 import { AppUiProvider } from "@/components/AppUiProvider";
 import { StatusCenter } from "@/components/StatusCenter";
-import { AgentOnboarding } from "@/components/AgentOnboarding";
 import { RunConfigModal } from "@/components/RunConfigModal";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -67,7 +66,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <RunConfigModal />
           <CommandPalette />
           <ConfirmDialog />
-          <AgentOnboarding />
         </AppUiProvider>
       </body>
     </html>

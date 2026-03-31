@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useReducer } from "react";
 import { useRouter } from "next/navigation";
 import { useAppUi } from "@/components/AppUiProvider";
+import { ModalFrame } from "@/components/ModalFrame";
 
 type Workspace = {
   id: string;
@@ -314,8 +315,14 @@ export function RunConfigModal() {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-6" role="presentation">
-      <div className="w-full max-w-2xl rounded-2xl border border-slate-800 bg-slate-950/95 p-6" role="dialog" aria-modal="true" aria-label="Run configuration modal">
+    <ModalFrame
+      open={runConfigOpen}
+      onClose={closeRunConfig}
+      ariaLabel="Run configuration modal"
+      overlayClassName="z-50 overflow-y-auto overscroll-contain bg-slate-950/85 p-4 md:p-6"
+      containerClassName="items-start py-4 md:py-8"
+      panelClassName="my-0 w-full max-w-2xl max-h-[calc(100vh-4rem)] overflow-y-auto p-6"
+    >
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-white">New Run</h3>
@@ -540,7 +547,6 @@ export function RunConfigModal() {
             {state.starting ? "Starting..." : state.runKind === "mission" ? "Start Mission" : `Start ${state.runKind}`}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }

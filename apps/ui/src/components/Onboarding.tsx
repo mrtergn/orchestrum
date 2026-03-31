@@ -3,7 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
-import { preferredTransport, transportLabel, vendorLabel, type ProviderDiscoveryRecord } from "@/lib/providers";
+import { ProviderDiscoveryGrid } from "@/components/providers/ProviderDiscoveryGrid";
+import { ProviderDiscoveryLoadingState } from "@/components/providers/ProviderDiscoveryLoadingState";
+import { ProviderDiscoveryStatusSummary } from "@/components/providers/ProviderDiscoveryStatusSummary";
+import { preferredTransport, vendorLabel } from "@/lib/providers";
+import { useProviderDiscovery } from "@/lib/queries/useProviderDiscovery";
 
 type Workspace = {
   id: string;
@@ -15,13 +19,13 @@ type AgentPayload = {
   agents?: Array<{ id: string }>;
 };
 
-type ProviderDiscoveryPayload = {
-  providers?: ProviderDiscoveryRecord[];
-};
-
 const ONBOARDED_KEY = "orchestrum.onboarded";
 
-export function Onboarding() {
+type OnboardingProps = {
+  onVisibilityChange?: (open: boolean) => void;
+};
+
+export function Onboarding({ onVisibilityChange }: OnboardingProps) {
   const router = useRouter();
   const { selectedWorkspaceId, setSelectedWorkspaceId, setOnboardingSkipped, pushToast, openRunConfig } = useAppUi();
   const [open, setOpen] = useState(false);
@@ -38,33 +42,43 @@ export function Onboarding() {
   const [hasOpenAiKey, setHasOpenAiKey] = useState(false);
   const [hasClaudeKey, setHasClaudeKey] = useState(false);
   const [agentCount, setAgentCount] = useState(0);
-  const [providerDiscovery, setProviderDiscovery] = useState<ProviderDiscoveryRecord[]>([]);
+  const [showApiFallbacks, setShowApiFallbacks] = useState(false);
+  const {
+    providers: providerDiscovery,
+    isLoading: providerDiscoveryLoading,
+    error: providerDiscoveryError
+  } = useProviderDiscovery({
+    scope: "global",
+    enabled: open && step >= 2
+  });
 
   useEffect(() => {
-    const load = async () => {
-      const [workspaceRes, secretsRes, providersRes] = await Promise.all([
+    const done = localStorage.getItem(ONBOARDED_KEY) === "1";
+    const skipped = localStorage.getItem("orchestrum.onboarding.skipped") === "1";
+    if (!done && !skipped) {
+      setOpen(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const loadBootstrap = async () => {
+      const [workspaceRes, secretsRes] = await Promise.all([
         fetch("/api/workspaces", { cache: "no-store" }),
-        fetch("/api/secrets", { cache: "no-store" }),
-        fetch("/api/providers/discover?scope=global", { cache: "no-store" })
+        fetch("/api/secrets", { cache: "no-store" })
       ]);
       const workspacePayload = workspaceRes.ok ? await workspaceRes.json() : { workspaces: [] };
       const secretsPayload = secretsRes.ok ? await secretsRes.json() : { keys: {} };
-      const providersPayload = providersRes.ok ? await providersRes.json() : { providers: [] };
       const workspaceList = Array.isArray(workspacePayload.workspaces) ? workspacePayload.workspaces as Workspace[] : [];
       const defaultWorkspaceId = selectedWorkspaceId || workspaceList[0]?.id || "";
-      const done = localStorage.getItem(ONBOARDED_KEY) === "1";
-      const skipped = localStorage.getItem("orchestrum.onboarding.skipped") === "1";
       setWorkspaces(workspaceList);
       setWorkspaceId(defaultWorkspaceId);
       setHasOpenAiKey(Boolean(secretsPayload.keys?.OPENAI_API_KEY));
       setHasClaudeKey(Boolean(secretsPayload.keys?.ANTHROPIC_API_KEY));
-      setProviderDiscovery(Array.isArray((providersPayload as ProviderDiscoveryPayload).providers) ? (providersPayload as ProviderDiscoveryPayload).providers ?? [] : []);
-      if (!done && !skipped) {
-        setOpen(true);
-        setStep(defaultWorkspaceId ? 2 : 1);
+      if (defaultWorkspaceId) {
+        setStep((current) => Math.max(current, 2));
       }
     };
-    void load();
+    void loadBootstrap();
   }, [selectedWorkspaceId]);
 
   useEffect(() => {
@@ -79,6 +93,14 @@ export function Onboarding() {
     };
     void loadAgents();
   }, [workspaceId]);
+
+  useEffect(() => {
+    onVisibilityChange?.(open);
+  }, [open, onVisibilityChange]);
+
+  useEffect(() => {
+    setShowApiFallbacks(false);
+  }, [step, open]);
 
   const addWorkspace = async () => {
     if (!workspacePath.trim()) {
@@ -156,12 +178,12 @@ export function Onboarding() {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/92 p-6">
-      <div className="w-full max-w-4xl rounded-3xl border border-slate-800 bg-slate-950/98 p-8 shadow-2xl shadow-slate-950/40">
+    <section className="animate-fade-in rounded-3xl border border-slate-800/80 bg-slate-950/80 p-6 shadow-2xl shadow-slate-950/30 backdrop-blur-xl lg:p-8">
+      <div className="mx-auto w-full max-w-5xl">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-2xl font-semibold text-white">Orchestrum Mission Setup</h2>
-            <p className="mt-1 text-sm text-slate-400">Set up a workspace, configure a provider, and move into workspace-scoped mission execution.</p>
+            <p className="mt-1 text-sm text-slate-400">Set up a workspace, verify your CLI or API path, and move into workspace-scoped mission execution.</p>
           </div>
           <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Step {step} / 3</div>
         </div>
@@ -230,69 +252,88 @@ export function Onboarding() {
           <section className="mt-6 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
               <div className="text-sm font-semibold text-white">CLI-First Provider Status</div>
-              <div className="mt-4 space-y-3 text-sm">
-                {providerDiscovery.filter((record) => ["codex", "claude", "cursor", "openai"].includes(record.vendor)).map((record) => {
-                  const transport = preferredTransport(record);
-                  const ready = Boolean(transport?.configured);
-                  return (
-                    <div
-                      key={record.vendor}
-                      className={`rounded-xl border px-4 py-3 ${ready ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200" : "border-slate-800 bg-slate-950/60 text-slate-400"}`}
-                    >
-                      {vendorLabel(record.vendor)}: {transport ? `${transportLabel(transport.transport)} ${ready ? "ready" : "available"}` : "not detected"}
-                    </div>
-                  );
-                })}
-                <div className={`rounded-xl border px-4 py-3 ${hasOpenAiKey ? "border-sky-400/20 bg-sky-400/10 text-sky-200" : "border-slate-800 bg-slate-950/60 text-slate-400"}`}>
-                  OpenAI API fallback: {hasOpenAiKey ? "configured" : "optional"}
-                </div>
-                <div className={`rounded-xl border px-4 py-3 ${hasClaudeKey ? "border-sky-400/20 bg-sky-400/10 text-sky-200" : "border-slate-800 bg-slate-950/60 text-slate-400"}`}>
-                  Claude API fallback: {hasClaudeKey ? "configured" : "optional"}
-                </div>
+              <div className="mt-1 text-xs text-slate-500">We detect local sessions first. API keys stay optional and hidden until you open them.</div>
+              <div className="mt-4">
+                {providerDiscoveryLoading ? (
+                  <ProviderDiscoveryLoadingState variant="compact" />
+                ) : providerDiscoveryError ? (
+                  <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-xs text-rose-100">
+                    <div className="font-medium">Local discovery could not finish.</div>
+                    <div className="mt-1 text-rose-100/80">{providerDiscoveryError}</div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <ProviderDiscoveryStatusSummary providers={providerDiscovery} variant="compact" />
+                    <ProviderDiscoveryGrid providers={providerDiscovery} variant="compact" />
+                  </div>
+                )}
               </div>
             </div>
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
               <div className="text-sm font-semibold text-white">Optional API Fallback</div>
-              <div className="mt-1 text-xs text-slate-500">Only needed for API transport or when you want a fallback if local CLI auth is missing.</div>
-              <div className="mt-4 space-y-3">
-                <select
-                  value={provider}
-                  onChange={(event) => setProvider(event.target.value as "openai" | "claude")}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+              <div className="mt-1 text-xs text-slate-500">Only open this if you want direct API transport or a fallback when local CLI auth is missing.</div>
+              <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/40">
+                <button
+                  type="button"
+                  onClick={() => setShowApiFallbacks((current) => !current)}
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
                 >
-                  <option value="openai">OpenAI</option>
-                  <option value="claude">Claude</option>
-                </select>
-                <input
-                  value={apiKey}
-                  onChange={(event) => setApiKey(event.target.value)}
-                  type="password"
-                  placeholder={provider === "claude" ? "sk-ant-..." : "sk-..."}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                />
-                <input
-                  value={passphrase}
-                  onChange={(event) => setPassphrase(event.target.value)}
-                  type="password"
-                  placeholder="Passphrase for encrypted storage (optional)"
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void saveProvider()}
-                    disabled={busy === "provider"}
-                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-amber-200 disabled:opacity-50"
-                  >
-                    {busy === "provider" ? "Saving..." : "Save Fallback"}
-                  </button>
-                  <button
-                    onClick={() => setStep(3)}
-                    className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
-                  >
-                    Continue
-                  </button>
-                </div>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-white">API fallback settings</div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      OpenAI {hasOpenAiKey ? "configured" : "optional"} · Claude {hasClaudeKey ? "configured" : "optional"}
+                    </div>
+                  </div>
+                  <span className="rounded-full border border-slate-700 bg-slate-900/50 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                    {showApiFallbacks ? "Hide" : "Show"}
+                  </span>
+                </button>
+
+                {showApiFallbacks && (
+                  <div className="space-y-3 border-t border-slate-800 px-4 py-4">
+                    <select
+                      value={provider}
+                      onChange={(event) => setProvider(event.target.value as "openai" | "claude")}
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="claude">Claude</option>
+                    </select>
+                    <input
+                      value={apiKey}
+                      onChange={(event) => setApiKey(event.target.value)}
+                      type="password"
+                      placeholder={provider === "claude" ? "sk-ant-..." : "sk-..."}
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+                    />
+                    <input
+                      value={passphrase}
+                      onChange={(event) => setPassphrase(event.target.value)}
+                      type="password"
+                      placeholder="Passphrase for encrypted storage (optional)"
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void saveProvider()}
+                      disabled={busy === "provider"}
+                      className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-amber-200 disabled:opacity-50"
+                    >
+                      {busy === "provider" ? "Saving..." : "Save Fallback"}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setStep(3)}
+                  className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
+                >
+                  Continue
+                </button>
               </div>
             </div>
           </section>
@@ -377,6 +418,6 @@ export function Onboarding() {
           </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 }
