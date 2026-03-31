@@ -8,6 +8,10 @@ import { loadWorkspaces } from "../runner/workspaces.js";
 import { listInstalledPlugins } from "../plugins/registry.js";
 import { loadGovernanceEvents } from "../runner/governance.js";
 import { loadLearnings } from "../runner/learnings.js";
+import {
+  DeliverySessionStateSchema,
+  type DeliverySummary
+} from "../delivery/types.js";
 
 type SqlJsDatabase = any;
 type SqlJsModule = {
@@ -33,6 +37,21 @@ export type IndexedRunRecord = {
   workflow: string;
   readinessScore: number | null;
   readinessBlocking: string[];
+};
+
+export type IndexedDeliverySessionRecord = {
+  workspaceId: string;
+  runId: string;
+  status: string;
+  updatedAt: string;
+  openFindings: number;
+  resolvedFindings: number;
+  remediationsOpen: number;
+  remediationsDone: number;
+  unresolvedManualPackets: number;
+  unmatchedImportAttempts: number;
+  packetStatusCounts: Record<string, number>;
+  toolUsage: Record<string, number>;
 };
 
 export function getStateIndexPath(): string {
@@ -144,11 +163,81 @@ export class StateIndex {
     };
   }
 
+  async queryDeliverySessions(workspaceId?: string): Promise<IndexedDeliverySessionRecord[]> {
+    await this.health();
+    if (!this.db) return [];
+    const statement = workspaceId
+      ? this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage FROM delivery_sessions WHERE workspace_id = ? ORDER BY updated_at DESC")
+      : this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage FROM delivery_sessions ORDER BY updated_at DESC");
+    const rows: IndexedDeliverySessionRecord[] = [];
+    if (workspaceId) {
+      statement.bind([workspaceId]);
+    }
+    while (statement.step()) {
+      const row = statement.getAsObject();
+      rows.push({
+        workspaceId: String(row.workspace_id ?? ""),
+        runId: String(row.run_id ?? ""),
+        status: String(row.status ?? ""),
+        updatedAt: String(row.updated_at ?? ""),
+        openFindings: Number(row.open_findings ?? 0),
+        resolvedFindings: Number(row.resolved_findings ?? 0),
+        remediationsOpen: Number(row.remediations_open ?? 0),
+        remediationsDone: Number(row.remediations_done ?? 0),
+        unresolvedManualPackets: Number(row.unresolved_manual_packets ?? 0),
+        unmatchedImportAttempts: Number(row.unmatched_import_attempts ?? 0),
+        packetStatusCounts: parseJsonRecord(row.packet_status_counts),
+        toolUsage: parseJsonRecord(row.tool_usage)
+      });
+    }
+    statement.free();
+    return rows;
+  }
+
+  async getDeliverySummary(workspaceId?: string): Promise<DeliverySummary> {
+    const sessions = await this.queryDeliverySessions(workspaceId);
+    const summary: DeliverySummary = {
+      workspaceId,
+      sessions: sessions.length,
+      activeSessions: 0,
+      blockedSessions: 0,
+      completedSessions: 0,
+      openFindings: 0,
+      resolvedFindings: 0,
+      remediationsOpen: 0,
+      remediationsDone: 0,
+      unresolvedManualPackets: 0,
+      unmatchedImportAttempts: 0,
+      packetStatusCounts: {},
+      toolUsage: {},
+      latestRunId: sessions[0]?.runId ?? null
+    };
+    for (const session of sessions) {
+      if (session.status === "running") summary.activeSessions += 1;
+      if (session.status === "blocked" || session.status === "failed") summary.blockedSessions += 1;
+      if (session.status === "completed") summary.completedSessions += 1;
+      summary.openFindings += session.openFindings;
+      summary.resolvedFindings += session.resolvedFindings;
+      summary.remediationsOpen += session.remediationsOpen;
+      summary.remediationsDone += session.remediationsDone;
+      summary.unresolvedManualPackets += session.unresolvedManualPackets;
+      summary.unmatchedImportAttempts += session.unmatchedImportAttempts;
+      for (const [status, count] of Object.entries(session.packetStatusCounts)) {
+        summary.packetStatusCounts[status] = (summary.packetStatusCounts[status] ?? 0) + count;
+      }
+      for (const [tool, count] of Object.entries(session.toolUsage)) {
+        summary.toolUsage[tool] = (summary.toolUsage[tool] ?? 0) + count;
+      }
+    }
+    return summary;
+  }
+
   private async ingestAll(): Promise<void> {
     if (!this.db) return;
     this.db.run("DELETE FROM workspaces;");
     this.db.run("DELETE FROM plugins;");
     this.db.run("DELETE FROM runs;");
+    this.db.run("DELETE FROM delivery_sessions;");
     this.db.run("DELETE FROM approvals;");
     this.db.run("DELETE FROM governance_events;");
     this.db.run("DELETE FROM learnings;");
@@ -204,6 +293,32 @@ export class StateIndex {
           JSON.stringify(runMeta.readiness?.blocking ?? [])
         ]
       );
+
+      if ((runMeta.kind ?? "workflow") === "delivery") {
+        const deliveryRaw = await readJsonIfExists<unknown>(path.join(record.runDir, "delivery", "session.json"));
+        const deliverySession = deliveryRaw ? DeliverySessionStateSchema.parse(deliveryRaw) : null;
+        if (deliverySession) {
+          const packetStatusCounts = countPacketStatuses(deliverySession.packets);
+          const toolUsage = countToolUsage(deliverySession.exports);
+          this.db.run(
+            "INSERT OR REPLACE INTO delivery_sessions (workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+              record.workspaceId,
+              deliverySession.runId,
+              deliverySession.status,
+              deliverySession.updatedAt,
+              deliverySession.findings.filter((finding) => finding.status === "open").length,
+              deliverySession.findings.filter((finding) => finding.status === "resolved").length,
+              deliverySession.remediations.filter((task) => task.status !== "done").length,
+              deliverySession.remediations.filter((task) => task.status === "done").length,
+              deliverySession.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed").length,
+              deliverySession.imports.filter((item) => item.matchStatus !== "matched").length,
+              JSON.stringify(packetStatusCounts),
+              JSON.stringify(toolUsage)
+            ]
+          );
+        }
+      }
 
       const approvalsDir = path.join(record.runDir, "approvals");
       const approvalFiles = await fs.readdir(approvalsDir, { withFileTypes: true }).catch(() => []);
@@ -289,6 +404,23 @@ export class StateIndex {
       );
     `);
     this.db.run(`
+      CREATE TABLE IF NOT EXISTS delivery_sessions (
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        status TEXT,
+        updated_at TEXT,
+        open_findings INTEGER,
+        resolved_findings INTEGER,
+        remediations_open INTEGER,
+        remediations_done INTEGER,
+        unresolved_manual_packets INTEGER,
+        unmatched_import_attempts INTEGER,
+        packet_status_counts TEXT,
+        tool_usage TEXT,
+        PRIMARY KEY (workspace_id, run_id)
+      );
+    `);
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS governance_events (
         id TEXT PRIMARY KEY,
         workspace_id TEXT,
@@ -367,4 +499,40 @@ function parseJsonArray(value: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+function parseJsonRecord(value: unknown): Record<string, number> {
+  if (typeof value !== "string" || !value) return {};
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed ?? {}).map(([key, count]) => [key, Number(count ?? 0)])
+    );
+  } catch {
+    return {};
+  }
+}
+
+function countPacketStatuses(
+  packets: Array<{
+    status: string;
+  }>
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const packet of packets) {
+    counts[packet.status] = (counts[packet.status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function countToolUsage(
+  exportsList: Array<{
+    targetTool: string;
+  }>
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of exportsList) {
+    counts[item.targetTool] = (counts[item.targetTool] ?? 0) + 1;
+  }
+  return counts;
 }

@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { LearningEntry, ReleaseReadiness } from "@orchestrum/core";
+import type { DeliverySummary, LearningEntry, ReleaseReadiness } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
+import { toolLabel } from "@/lib/delivery";
 
 /* ---------- types ---------- */
 type AnalyticsData = {
@@ -44,6 +45,7 @@ export default function MetricsPage() {
   const [evaluations, setEvaluations] = useState<EvaluationResult[]>([]);
   const [learnings, setLearnings] = useState<LearningEntry[]>([]);
   const [readiness, setReadiness] = useState<ReleaseReadiness | null>(null);
+  const [deliverySummary, setDeliverySummary] = useState<DeliverySummary | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -73,11 +75,13 @@ export default function MetricsPage() {
       if (!workspaceId) {
         setLearnings([]);
         setReadiness(null);
+        setDeliverySummary(null);
         return;
       }
-      const [learningsRes, readinessRes] = await Promise.all([
+      const [learningsRes, readinessRes, deliverySummaryRes] = await Promise.all([
         fetch(`/api/learnings?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" }),
-        fetch(`/api/release/readiness?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" })
+        fetch(`/api/release/readiness?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" }),
+        fetch(`/api/delivery/summary?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" })
       ]);
       if (learningsRes.ok) {
         const payload = await learningsRes.json();
@@ -85,6 +89,9 @@ export default function MetricsPage() {
       }
       if (readinessRes.ok) {
         setReadiness((await readinessRes.json()) as ReleaseReadiness);
+      }
+      if (deliverySummaryRes.ok) {
+        setDeliverySummary((await deliverySummaryRes.json()) as DeliverySummary);
       }
     };
     void load();
@@ -147,8 +154,8 @@ export default function MetricsPage() {
             <KPICard icon="↻" label="Avg Loops" value={to(analytics.loopCounts?.avg).toFixed(1)} accent="sky" sub={`${to(analytics.loopCounts?.total)} total loops`} />
           </section>
 
-          {(readiness || learnings.length > 0) && (
-            <section className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+          {(readiness || learnings.length > 0 || deliverySummary) && (
+            <section className="grid gap-4 lg:grid-cols-[0.75fr_1fr_0.85fr]">
               <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Release Readiness</div>
@@ -188,6 +195,45 @@ export default function MetricsPage() {
                       </div>
                     ))}
                   </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Delivery Summary</div>
+                {!deliverySummary ? (
+                  <div className="text-xs text-slate-500 py-4 text-center">No delivery data yet.</div>
+                ) : (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Active Sessions</div>
+                        <div className="mt-2 text-xl font-semibold text-cyan-300">{deliverySummary.activeSessions}</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Open Findings</div>
+                        <div className="mt-2 text-xl font-semibold text-rose-300">{deliverySummary.openFindings}</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Manual Packets</div>
+                        <div className="mt-2 text-xl font-semibold text-amber-300">{deliverySummary.unresolvedManualPackets}</div>
+                      </div>
+                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Imports to Match</div>
+                        <div className="mt-2 text-xl font-semibold text-white">{deliverySummary.unmatchedImportAttempts}</div>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {Object.entries(deliverySummary.toolUsage)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 4)
+                        .map(([tool, count]) => (
+                          <div key={tool} className="flex items-center justify-between text-xs text-slate-300">
+                            <span>{toolLabel(tool)}</span>
+                            <span className="text-slate-500">{count} export(s)</span>
+                          </div>
+                        ))}
+                    </div>
+                  </>
                 )}
               </div>
             </section>

@@ -66,6 +66,7 @@ import {
   loadDeliverySession,
   listDeliveryPackets,
   exportDeliveryPacket,
+  analyzeDeliveryImport,
   importDeliveryPacketResponse,
   loadDeliveryFindings,
   loadDeliveryRemediations,
@@ -74,7 +75,8 @@ import {
   readTailLines,
   recoverInterruptedRuns,
   getLicenseStatus,
-  isFeatureAllowed
+  isFeatureAllowed,
+  type DeliveryTargetTool
 } from "@orchestrum/core";
 import { writeJson, writeText } from "@orchestrum/core";
 import { AgentPlatform } from "./agentPlatform.js";
@@ -1190,6 +1192,13 @@ export async function startService(options: ServiceOptions = {}) {
     }
   });
 
+  app.get("/delivery/summary", async (req, res) => {
+    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    await stateIndex.health();
+    const summary = await stateIndex.getDeliverySummary(workspaceId);
+    res.json(summary);
+  });
+
   app.get("/delivery/:id", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
     const session = await loadDeliverySession({ runsDir, runId: req.params.id, workspaceId });
@@ -1205,16 +1214,46 @@ export async function startService(options: ServiceOptions = {}) {
 
   app.get("/delivery/:id/packets/:packetId/export", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
+    const target = req.query.target ? String(req.query.target) : "";
+    if (!target) return res.status(400).json({ error: "target query param is required" });
     try {
       const exported = await exportDeliveryPacket({
         runsDir,
         runId: req.params.id,
         workspaceId,
-        packetId: req.params.packetId
+        packetId: req.params.packetId,
+        targetTool: target as DeliveryTargetTool
       });
+      void stateIndex.rebuild().catch(() => undefined);
       res.json(exported);
     } catch (err: any) {
       res.status(400).json({ error: err?.message ?? "Packet export failed." });
+    }
+  });
+
+  app.post("/delivery/:id/import", async (req, res) => {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    let text = typeof req.body?.text === "string" ? req.body.text : "";
+    const fileName = typeof req.body?.fileName === "string" ? req.body.fileName : undefined;
+    const targetTool = typeof req.body?.targetTool === "string" ? req.body.targetTool : undefined;
+    if (!text && typeof req.body?.data === "string" && req.body.data.trim()) {
+      text = Buffer.from(String(req.body.data), "base64").toString("utf8");
+    }
+    try {
+      const result = await analyzeDeliveryImport({
+        runsDir,
+        runId: req.params.id,
+        workspaceId,
+        text,
+        fileName,
+        targetTool: targetTool as DeliveryTargetTool | undefined,
+        source: fileName ? "file" : "paste",
+        recordAttempt: true
+      });
+      void stateIndex.rebuild().catch(() => undefined);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Delivery import analysis failed." });
     }
   });
 
@@ -1222,6 +1261,7 @@ export async function startService(options: ServiceOptions = {}) {
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
     let text = typeof req.body?.text === "string" ? req.body.text : "";
     const fileName = typeof req.body?.fileName === "string" ? req.body.fileName : undefined;
+    const targetTool = typeof req.body?.targetTool === "string" ? req.body.targetTool : undefined;
     if (!text && typeof req.body?.data === "string" && req.body.data.trim()) {
       text = Buffer.from(String(req.body.data), "base64").toString("utf8");
     }
@@ -1233,6 +1273,7 @@ export async function startService(options: ServiceOptions = {}) {
         packetId: req.params.packetId,
         text,
         fileName,
+        targetTool: targetTool as DeliveryTargetTool | undefined,
         source: fileName ? "file" : "paste"
       });
       void stateIndex.rebuild().catch(() => undefined);

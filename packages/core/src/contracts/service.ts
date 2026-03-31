@@ -1,8 +1,11 @@
 import type { GovernanceProfile, RunKind, RunReadiness, RunState, StepState } from "../runner/types.js";
 import type {
   CapabilityDiscoveryResult,
+  DeliveryImportAnalysis,
   DeliverySessionRequest,
   DeliverySessionState,
+  DeliverySummary,
+  DeliveryTargetTool,
   EvidenceRecord,
   MachineCapability,
   PacketExport,
@@ -100,6 +103,19 @@ export type DeliveryStartRequest = DeliverySessionRequest;
 
 export type DeliveryStartResponse = RunStartResponse & {
   kind?: Extract<RunKind, "delivery">;
+};
+
+export type DeliveryPacketExportRequest = {
+  target: DeliveryTargetTool;
+};
+
+export type DeliveryPacketImportRequest = {
+  workspaceId?: string;
+  packetId?: string;
+  text?: string;
+  data?: string;
+  fileName?: string;
+  targetTool?: DeliveryTargetTool;
 };
 
 export type RunStartRequest = {
@@ -226,11 +242,14 @@ export type {
   WorkPacket,
   PacketExport,
   PacketImport,
+  DeliveryImportAnalysis,
+  DeliverySummary,
   ReviewFinding,
   RemediationTask,
   EvidenceRecord,
   CapabilityDiscoveryResult,
-  TeamPresetResponse
+  TeamPresetResponse,
+  DeliveryTargetTool
 };
 
 export function normalizeTaskStatus(status: string | null | undefined): TaskRuntimeStatus {

@@ -8,7 +8,7 @@
 
 ### **The Local-First AI Engineering OS**
 
-*Define agents. Wire org charts. Let AI plan, build, audit, and deploy —<br/>all without sending a single line of code to third parties.*
+*Compile work into packets. Hand off across multiple AI tools. Import findings and fixes back into one local delivery loop.*
 
 <br/>
 
@@ -37,12 +37,11 @@
 ```
  ┌───────────────────────────────────────────────────────────────┐
  │                                                               │
- │   [ PM Agent ] ──> [ Dev Agent ] ──> [ Audit ] ──> [ Done ]  │
- │       |                |                |                     │
- │       v                v                v                     │
- │    Spec.md          Code.diff       Review.md     Metrics     │
- │                                                   Analytics   │
- │                                                   Audit Trail │
+ │   Goal / Sprint ─> Work Packets ─> Tool Handoff ─> Import     │
+ │        |                |                 |            |       │
+ │        v                v                 v            v       │
+ │   Repo Context      ChatGPT / Cursor   Findings    Remediations│
+ │                                                     Evidence   │
  │                                                               │
  │              * All data stays on YOUR machine *               │
  │                                                               │
@@ -51,7 +50,7 @@
 
 </div>
 
-> **Orchestrum is not a SaaS.** There's no cloud, no telemetry by default, no vendor lock-in. It's an engineering OS that runs on your laptop, manages AI agent teams, and keeps every artifact on your local filesystem.
+> **Orchestrum is not a SaaS.** It is a local-first engineering control plane for teams working across multiple AI tools, with human-supervised handoff, import, review, and remediation loops.
 
 <br/>
 
@@ -61,49 +60,49 @@
 <tr>
 <td width="50%" valign="top">
 
-### 🤖 Agent Management
-- Create unlimited AI agents (PM, Dev, Audit, QA, …)
-- Support for **OpenAI**, **Claude**, **Ollama**, **llama.cpp**
-- Per-agent capabilities (filesystem, network, shell)
-- Dynamic agent spawning at runtime
-- Onboarding wizard for instant setup
+### 📦 Delivery Loop
+- Start delivery sessions from a goal or sprint title
+- Generate role-specific work packets from repo context
+- Export packets for `ChatGPT`, `Cursor`, `Codex`, `Copilot`, and `Claude`
+- Import responses back into findings, remediations, and evidence
+- Track the whole loop on one local branch
 
 </td>
 <td width="50%" valign="top">
 
-### 🏗️ Org Chart
-- Visual hierarchy builder with drag & drop
-- Define reporting lines between agents
-- Role-colored cards (PM · Dev · Audit · QA)
-- CSS tree connectors — see who reports to whom instantly
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### ⚡ Task Queue & Execution
-- Assign tasks to agents from the UI
-- Real-time output streaming via SSE
-- Cancel, retry, and monitor live
-- Attempt tracking with progress bars
-- Approval gates for high-risk actions
-
-</td>
-<td width="50%" valign="top">
-
-### 🎯 Mission Control
-- Live dashboard with SSE event stream
-- Agent status, task progress, cost tracking
-- Color-coded event tape
-- One-click run launching
+### 🧭 Team Presets
+- Repo-scoped roles for planner, developer, auditor, and tester
+- Machine capability discovery for `git`, shells, IDE targets, and repo scripts
+- Suggest-and-confirm role bindings instead of hidden auto-magic
+- Structured preset editor plus advanced raw JSON fallback
 
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
 
-### 🔬 Multi-Model Arbitration
+### 🤝 Human-Supervised Handoff
+- Manual browser and IDE handoff as first-class modes
+- Explicit packet matching for imported responses
+- Tool-specific export variants for browser, IDE, patch, and review workflows
+- Evidence trail for exports, imports, findings, and remediations
+- Local CLI validation where safe and available
+
+</td>
+<td width="50%" valign="top">
+
+### 🔎 Runs, Metrics, and Diagnostics
+- Run detail page with live stream, artifacts, packet export/import, and remediation board
+- Delivery summary metrics for sessions, findings, unmatched imports, and tool usage
+- Diagnostics view for readiness, doctor checks, recovery, docs sync, and import health
+- Desktop wrapper plus local service for a consistent operator workflow
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🔬 Workflow Engine
 - Run multiple LLMs in parallel per step
 - Score winners by policy compliance, patch quality, token efficiency
 - Supports `score` / `fastest` / `vote` selection modes
@@ -112,11 +111,11 @@
 </td>
 <td width="50%" valign="top">
 
-### 🐳 Sandboxed Execution
-- Docker container isolation for agent actions
-- Non-root, network-disabled by default
-- Automatic fallback to local execution
-- Full container logs per step
+### 🛡️ Governance and Validation
+- Governance profiles, command scanning, and quality gates
+- Release readiness, learnings, and doctor checks
+- Shell allowlists and worktree execution support
+- Local-first persistence for runs, logs, artifacts, and indexes
 
 </td>
 </tr>
@@ -126,8 +125,8 @@
 ### 📊 Analytics & Metrics
 - Cost trends, success rates, loop frequency
 - Model win-rate and determinism scores
-- Token tracking per agent and per step
-- KPI dashboard with spark charts
+- Delivery summaries across sessions and tools
+- KPI dashboard with workspace-level readiness and learnings
 
 </td>
 <td width="50%" valign="top">
@@ -223,12 +222,13 @@ npm run dist:desktop
 ```
   1. Open Orchestrum UI
   2. Complete the onboarding wizard:
-     ├─ Save your provider API key
-     ├─ Create PM / Dev / Audit agents
-     ├─ Auto-generate org chart
-     └─ Enqueue a demo task
-  3. Use Tasks page to assign real work
-  4. Watch live execution on Mission Control
+     ├─ Select or add a workspace
+     ├─ Check provider access and local capabilities
+     ├─ Confirm the repo team preset
+     ├─ Create the first delivery session
+     └─ Open the first packet export/import flow
+  3. Use Delivery as the primary control center
+  4. Use Metrics and Diagnostics for readiness and health
 ```
 
 <br/>

@@ -14,6 +14,12 @@ export type RoleExecutionMode = typeof ROLE_EXECUTION_MODES[number];
 export const DELIVERY_RUN_MODES = ["max_auto_supervised_hybrid", "manual_supervised"] as const;
 export type DeliveryRunMode = typeof DELIVERY_RUN_MODES[number];
 
+export const DELIVERY_TARGET_TOOLS = ["chatgpt", "cursor", "codex", "copilot", "claude"] as const;
+export type DeliveryTargetTool = typeof DELIVERY_TARGET_TOOLS[number];
+
+export const DELIVERY_TEXT_VARIANTS = ["browser_prompt", "ide_task", "patch_brief", "review_prompt"] as const;
+export type DeliveryTextVariant = typeof DELIVERY_TEXT_VARIANTS[number];
+
 export const MACHINE_CAPABILITY_KINDS = ["binary", "repo_script", "browser_handoff", "ide_handoff"] as const;
 export type MachineCapabilityKind = typeof MACHINE_CAPABILITY_KINDS[number];
 
@@ -46,6 +52,9 @@ export type ReviewFindingStatus = typeof FINDING_STATUSES[number];
 export const REMEDIATION_STATUSES = ["open", "in_progress", "done", "blocked"] as const;
 export type RemediationStatus = typeof REMEDIATION_STATUSES[number];
 
+export const IMPORT_MATCH_STATUSES = ["matched", "ambiguous", "unmatched"] as const;
+export type DeliveryImportMatchStatus = typeof IMPORT_MATCH_STATUSES[number];
+
 export const EVIDENCE_KINDS = [
   "session_started",
   "packet_created",
@@ -71,12 +80,21 @@ export const RoleDefinitionSchema = z.object({
 });
 export type RoleDefinition = z.infer<typeof RoleDefinitionSchema>;
 
+export const DeliveryToolProfileOverrideSchema = z.object({
+  label: z.string().min(1).optional(),
+  guidance: z.array(z.string().min(1)).optional(),
+  response_contract: z.array(z.string().min(1)).optional(),
+  text_variant: z.enum(DELIVERY_TEXT_VARIANTS).optional()
+});
+export type DeliveryToolProfileOverride = z.infer<typeof DeliveryToolProfileOverrideSchema>;
+
 export const TeamPresetSchema = z.object({
   version: z.literal(1),
   name: z.string().min(1),
   default_run_mode: z.enum(DELIVERY_RUN_MODES).default("max_auto_supervised_hybrid"),
   roles: z.array(RoleDefinitionSchema).min(1),
   tool_preferences: z.record(z.array(z.string().min(1))).optional(),
+  tool_profiles: z.record(z.string(), DeliveryToolProfileOverrideSchema).optional(),
   governance_defaults: GovernanceProfileSchema.optional(),
   packet_templates: z
     .record(
@@ -158,6 +176,9 @@ export const PacketExportSchema = z.object({
   sessionId: z.string().min(1),
   packetId: z.string().min(1),
   format: z.literal("markdown+json"),
+  targetTool: z.enum(DELIVERY_TARGET_TOOLS),
+  textVariant: z.enum(DELIVERY_TEXT_VARIANTS),
+  renderedText: z.string(),
   markdown: z.string(),
   sidecar: z.record(z.unknown()),
   fileNameBase: z.string().min(1),
@@ -171,6 +192,9 @@ export const PacketImportSchema = z.object({
   packetId: z.string().optional(),
   matchedPacketId: z.string().optional(),
   parsedPacketId: z.string().optional(),
+  targetTool: z.enum(DELIVERY_TARGET_TOOLS).optional(),
+  matchStatus: z.enum(IMPORT_MATCH_STATUSES).default("matched"),
+  candidatePacketIds: z.array(z.string()).default([]),
   source: z.enum(["paste", "file", "auto_cli"]),
   fileName: z.string().optional(),
   rawText: z.string(),
@@ -291,6 +315,36 @@ export const TeamPresetResponseSchema = z.object({
   suggestedBindings: z.array(RoleBindingSchema)
 });
 export type TeamPresetResponse = z.infer<typeof TeamPresetResponseSchema>;
+
+export const DeliveryImportAnalysisSchema = z.object({
+  sessionId: z.string().min(1),
+  parsedPacketId: z.string().optional(),
+  matchedPacketId: z.string().optional(),
+  targetTool: z.enum(DELIVERY_TARGET_TOOLS).optional(),
+  matchStatus: z.enum(IMPORT_MATCH_STATUSES),
+  needsPacketMatch: z.boolean().default(false),
+  candidatePacketIds: z.array(z.string()).default([]),
+  summary: z.string().optional()
+});
+export type DeliveryImportAnalysis = z.infer<typeof DeliveryImportAnalysisSchema>;
+
+export const DeliverySummarySchema = z.object({
+  workspaceId: z.string().optional(),
+  sessions: z.number().int().nonnegative(),
+  activeSessions: z.number().int().nonnegative(),
+  blockedSessions: z.number().int().nonnegative(),
+  completedSessions: z.number().int().nonnegative(),
+  openFindings: z.number().int().nonnegative(),
+  resolvedFindings: z.number().int().nonnegative(),
+  remediationsOpen: z.number().int().nonnegative(),
+  remediationsDone: z.number().int().nonnegative(),
+  unresolvedManualPackets: z.number().int().nonnegative(),
+  unmatchedImportAttempts: z.number().int().nonnegative(),
+  packetStatusCounts: z.record(z.string(), z.number().int().nonnegative()),
+  toolUsage: z.record(z.string(), z.number().int().nonnegative()),
+  latestRunId: z.string().nullable().optional()
+});
+export type DeliverySummary = z.infer<typeof DeliverySummarySchema>;
 
 export function defaultRoleDefinitions(): RoleDefinition[] {
   return [

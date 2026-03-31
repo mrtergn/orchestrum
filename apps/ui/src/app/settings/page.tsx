@@ -3,22 +3,19 @@
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { useAppUi } from "@/components/AppUiProvider";
+import {
+  type DeliveryBinding,
+  type DeliveryCapability,
+  type TeamPresetDraft,
+  normalizeTeamPresetDraft,
+  serializeTeamPresetDraft,
+  targetOptionsForMode,
+  toolLabel
+} from "@/lib/delivery";
 
 type CapabilityDiscovery = {
-  capabilities?: Array<{
-    id: string;
-    kind: string;
-    label: string;
-    available: boolean;
-    details?: string;
-  }>;
-  suggestedBindings?: Array<{
-    roleId: string;
-    mode: string;
-    target: string;
-    available: boolean;
-    reason: string;
-  }>;
+  capabilities?: DeliveryCapability[];
+  suggestedBindings?: DeliveryBinding[];
   scaffoldPreset?: unknown;
 };
 
@@ -96,9 +93,11 @@ export default function SettingsPage() {
   const [governanceQualityGate, setGovernanceQualityGate] = useState(false);
   const [profileMessage, setProfileMessage] = useState("");
   const [teamPresetText, setTeamPresetText] = useState("");
+  const [teamPresetDraft, setTeamPresetDraft] = useState<TeamPresetDraft | null>(null);
+  const [teamPresetEditor, setTeamPresetEditor] = useState<"confirm" | "raw">("confirm");
   const [teamPresetMessage, setTeamPresetMessage] = useState("");
-  const [capabilities, setCapabilities] = useState<NonNullable<CapabilityDiscovery["capabilities"]>>([]);
-  const [suggestedBindings, setSuggestedBindings] = useState<NonNullable<CapabilityDiscovery["suggestedBindings"]>>([]);
+  const [capabilities, setCapabilities] = useState<DeliveryCapability[]>([]);
+  const [suggestedBindings, setSuggestedBindings] = useState<DeliveryBinding[]>([]);
   const [openAiSet, setOpenAiSet] = useState(false);
   const [openAiKey, setOpenAiKey] = useState("");
   const [providerPassphrase, setProviderPassphrase] = useState("");
@@ -188,7 +187,9 @@ export default function SettingsPage() {
       const presetSource = presetPayload.preset ?? presetPayload.scaffoldPreset ?? capabilityPayload.scaffoldPreset ?? {};
       setTeamPresetText(JSON.stringify(presetSource, null, 2));
       setCapabilities(capabilityPayload.capabilities ?? presetPayload.capabilities ?? []);
-      setSuggestedBindings(capabilityPayload.suggestedBindings ?? presetPayload.suggestedBindings ?? []);
+      const nextBindings = capabilityPayload.suggestedBindings ?? presetPayload.suggestedBindings ?? [];
+      setSuggestedBindings(nextBindings);
+      setTeamPresetDraft(normalizeTeamPresetDraft(presetSource, nextBindings));
     };
     void loadDeliverySetup();
   }, [scope, workspaceId]);
@@ -364,9 +365,12 @@ export default function SettingsPage() {
       setTeamPresetMessage(payload.error ?? "Unable to scaffold team preset.");
       return;
     }
-    setTeamPresetText(JSON.stringify(payload.preset ?? payload.scaffoldPreset ?? {}, null, 2));
+    const nextPreset = payload.preset ?? payload.scaffoldPreset ?? {};
+    const nextBindings = payload.suggestedBindings ?? [];
+    setTeamPresetText(JSON.stringify(nextPreset, null, 2));
     setCapabilities(payload.capabilities ?? []);
-    setSuggestedBindings(payload.suggestedBindings ?? []);
+    setSuggestedBindings(nextBindings);
+    setTeamPresetDraft(normalizeTeamPresetDraft(nextPreset, nextBindings));
     setTeamPresetMessage("Scaffolded team preset created.");
   };
 
@@ -381,6 +385,25 @@ export default function SettingsPage() {
       preset = JSON.parse(teamPresetText);
     } catch {
       setTeamPresetMessage("Team preset JSON is invalid.");
+      return;
+    }
+    await handleSaveTeamPresetPayload(preset);
+  };
+
+  const handleSaveTeamPresetFromForm = async () => {
+    if (!teamPresetDraft) {
+      setTeamPresetMessage("No preset draft loaded.");
+      return;
+    }
+    setTeamPresetText(JSON.stringify(serializeTeamPresetDraft(teamPresetDraft), null, 2));
+    setTeamPresetEditor("confirm");
+    await handleSaveTeamPresetPayload(serializeTeamPresetDraft(teamPresetDraft));
+  };
+
+  const handleSaveTeamPresetPayload = async (preset: unknown) => {
+    setTeamPresetMessage("");
+    if (!workspaceId) {
+      setTeamPresetMessage("Select a workspace first.");
       return;
     }
     const res = await fetch("/api/team-preset", {
@@ -398,8 +421,11 @@ export default function SettingsPage() {
     }
     setTeamPresetMessage("Team preset saved.");
     setCapabilities(payload.capabilities ?? []);
-    setSuggestedBindings(payload.suggestedBindings ?? []);
-    setTeamPresetText(JSON.stringify(payload.preset ?? preset, null, 2));
+    const nextBindings = payload.suggestedBindings ?? [];
+    const nextPreset = payload.preset ?? preset;
+    setSuggestedBindings(nextBindings);
+    setTeamPresetText(JSON.stringify(nextPreset, null, 2));
+    setTeamPresetDraft(normalizeTeamPresetDraft(nextPreset, nextBindings));
   };
 
   const [activeTab, setActiveTab] = useState("Providers" as Tab);
@@ -752,18 +778,128 @@ export default function SettingsPage() {
                     Scaffold
                   </button>
                   <button
-                    onClick={handleSaveTeamPreset}
+                    onClick={() => void (teamPresetEditor === "confirm" ? handleSaveTeamPresetFromForm() : handleSaveTeamPreset())}
                     className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-emerald-200"
                   >
-                    Save Preset
+                    {teamPresetEditor === "confirm" ? "Save Confirmed Preset" : "Save Raw JSON"}
                   </button>
                 </div>
               </div>
-              <textarea
-                value={teamPresetText}
-                onChange={(event) => setTeamPresetText(event.target.value)}
-                className="mt-4 h-72 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-3 font-mono text-xs text-slate-200"
-              />
+              <div className="mt-4 inline-flex rounded-lg border border-slate-800 bg-slate-900/40 p-1">
+                <button
+                  onClick={() => setTeamPresetEditor("confirm")}
+                  className={`rounded-md px-3 py-1.5 text-xs ${teamPresetEditor === "confirm" ? "bg-slate-800 text-white" : "text-slate-400"}`}
+                >
+                  Confirm Editor
+                </button>
+                <button
+                  onClick={() => setTeamPresetEditor("raw")}
+                  className={`rounded-md px-3 py-1.5 text-xs ${teamPresetEditor === "raw" ? "bg-slate-800 text-white" : "text-slate-400"}`}
+                >
+                  Advanced JSON
+                </button>
+              </div>
+              {teamPresetEditor === "confirm" ? (
+                <div className="mt-4 space-y-4">
+                  {!teamPresetDraft ? (
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-5 text-xs text-slate-500">
+                      No preset draft loaded yet. Scaffold or load a workspace preset first.
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid gap-4 lg:grid-cols-[0.65fr_1.35fr]">
+                        <div>
+                          <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Preset Name</label>
+                          <input
+                            value={teamPresetDraft.name}
+                            onChange={(event) => setTeamPresetDraft((prev) => prev ? { ...prev, name: event.target.value } : prev)}
+                            className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Run Mode</label>
+                          <select
+                            value={teamPresetDraft.defaultRunMode}
+                            onChange={(event) => setTeamPresetDraft((prev) => prev ? {
+                              ...prev,
+                              defaultRunMode: event.target.value === "manual_supervised" ? "manual_supervised" : "max_auto_supervised_hybrid"
+                            } : prev)}
+                            className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                          >
+                            <option value="max_auto_supervised_hybrid">max_auto_supervised_hybrid</option>
+                            <option value="manual_supervised">manual_supervised</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="grid gap-4 xl:grid-cols-2">
+                        {teamPresetDraft.roles.map((role) => {
+                          const options = targetOptionsForMode(role.mode, capabilities);
+                          return (
+                            <div key={role.id} className="rounded-xl border border-slate-800 bg-slate-900/30 p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-medium text-white">{role.label}</div>
+                                  <div className="mt-1 text-[11px] text-slate-500">{role.description || role.id}</div>
+                                </div>
+                                <span className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{role.id}</span>
+                              </div>
+                              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                                <div>
+                                  <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Mode</label>
+                                  <select
+                                    value={role.mode}
+                                    onChange={(event) => {
+                                      const nextMode = event.target.value as TeamPresetDraft["roles"][number]["mode"];
+                                      setTeamPresetDraft((prev) => prev ? {
+                                        ...prev,
+                                        roles: prev.roles.map((item) => item.id === role.id ? {
+                                          ...item,
+                                          mode: nextMode,
+                                          target: targetOptionsForMode(nextMode, capabilities)[0] ?? item.target
+                                        } : item)
+                                      } : prev);
+                                    }}
+                                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+                                  >
+                                    <option value="manual_browser">manual_browser</option>
+                                    <option value="manual_ide">manual_ide</option>
+                                    <option value="auto_cli">auto_cli</option>
+                                    <option value="disabled">disabled</option>
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Primary Target</label>
+                                  <select
+                                    value={role.target}
+                                    onChange={(event) => {
+                                      const nextTarget = event.target.value;
+                                      setTeamPresetDraft((prev) => prev ? {
+                                        ...prev,
+                                        roles: prev.roles.map((item) => item.id === role.id ? { ...item, target: nextTarget } : item)
+                                      } : prev);
+                                    }}
+                                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+                                  >
+                                    {options.map((option) => (
+                                      <option key={option} value={option}>{toolLabel(option)}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <textarea
+                  value={teamPresetText}
+                  onChange={(event) => setTeamPresetText(event.target.value)}
+                  className="mt-4 h-72 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-3 font-mono text-xs text-slate-200"
+                />
+              )}
               {teamPresetMessage && <div className="mt-3 text-xs text-slate-400">{teamPresetMessage}</div>}
             </div>
 

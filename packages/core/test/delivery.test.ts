@@ -4,11 +4,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  analyzeDeliveryImport,
   createDefaultTeamPreset,
   exportDeliveryPacket,
   initTeamPreset,
   importDeliveryPacketResponse,
   loadDeliverySession,
+  loadTeamPreset,
+  saveTeamPreset,
+  summarizeDeliverySessions,
   runDeliverySessionDetailed
 } from "../src/index.js";
 
@@ -27,6 +31,23 @@ test("delivery preset scaffolds into the repo", async () => {
   const raw = await fs.readFile(path.join(repoPath, ".orchestrum", "team-preset.json"), "utf8");
   const saved = JSON.parse(raw) as { name?: string };
   assert.equal(saved.name, result.preset?.name);
+});
+
+test("delivery preset accepts tool profile overrides", async () => {
+  const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-delivery-tool-profiles-"));
+  await fs.writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "demo", version: "1.0.0" }, null, 2), "utf8");
+  const preset = createDefaultTeamPreset();
+  preset.tool_profiles = {
+    chatgpt: {
+      label: "ChatGPT Business",
+      guidance: ["Keep the reply enterprise-safe."],
+      response_contract: ["Status: completed|blocked"],
+      text_variant: "browser_prompt"
+    }
+  };
+  await saveTeamPreset(repoPath, preset);
+  const loaded = await loadTeamPreset(repoPath);
+  assert.equal(loaded?.tool_profiles?.chatgpt?.label, "ChatGPT Business");
 });
 
 test("delivery session supports packet export, import, findings, and remediation closure", async () => {
@@ -71,10 +92,24 @@ test("delivery session supports packet export, import, findings, and remediation
     runsDir,
     runId: sessionResult.runId,
     workspaceId: "demo",
-    packetId: plannerPacket!.id
+    packetId: plannerPacket!.id,
+    targetTool: "chatgpt"
   });
   assert.match(exported.markdown, /Packet ID:/);
   assert.equal(exported.packetId, plannerPacket!.id);
+  assert.equal(exported.targetTool, "chatgpt");
+  assert.match(exported.renderedText, /Tool Target: chatgpt/);
+
+  const ambiguous = await analyzeDeliveryImport({
+    runsDir,
+    runId: sessionResult.runId,
+    workspaceId: "demo",
+    text: "Summary: review this sprint\nFindings:\n- follow up on rollout",
+    source: "paste",
+    targetTool: "chatgpt"
+  });
+  assert.equal(ambiguous.matchStatus, "ambiguous");
+  assert.ok((ambiguous.candidatePacketIds ?? []).length >= 2);
 
   await importDeliveryPacketResponse({
     runsDir,
@@ -127,4 +162,12 @@ test("delivery session supports packet export, import, findings, and remediation
   const resolvedFinding = finalSession?.findings.find((finding) => finding.title === "Missing migration plan");
   assert.equal(resolvedFinding?.status, "resolved");
   assert.equal(finalSession?.remediations[0]?.status, "done");
+
+  const summary = await summarizeDeliverySessions({
+    runsDir,
+    workspaceId: "demo"
+  });
+  assert.equal(summary.sessions, 1);
+  assert.equal(summary.toolUsage.chatgpt, 1);
+  assert.equal(summary.unmatchedImportAttempts, 0);
 });

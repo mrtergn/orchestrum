@@ -125,10 +125,12 @@ export {
   loadDeliverySession,
   listDeliveryPackets,
   exportDeliveryPacket,
+  analyzeDeliveryImport,
   importDeliveryPacketResponse,
   loadDeliveryFindings,
   loadDeliveryRemediations,
-  executeAutoCliPacket
+  executeAutoCliPacket,
+  summarizeDeliverySessions
 } from "./delivery/index.js";
 export {
   TeamPresetSchema,
@@ -139,6 +141,8 @@ export {
   WorkPacketSchema,
   PacketExportSchema,
   PacketImportSchema,
+  DeliveryImportAnalysisSchema,
+  DeliverySummarySchema,
   ReviewFindingSchema,
   RemediationTaskSchema,
   EvidenceRecordSchema,
@@ -149,12 +153,15 @@ export {
   createDefaultTeamPreset,
   ROLE_EXECUTION_MODES,
   DELIVERY_RUN_MODES,
+  DELIVERY_TARGET_TOOLS,
+  DELIVERY_TEXT_VARIANTS,
   MACHINE_CAPABILITY_KINDS,
   PACKET_STATUSES,
   FINDING_CATEGORIES,
   FINDING_SEVERITIES,
   FINDING_STATUSES,
   REMEDIATION_STATUSES,
+  IMPORT_MATCH_STATUSES,
   EVIDENCE_KINDS
 } from "./delivery/types.js";
 export type {
@@ -163,6 +170,9 @@ export type {
   MachineCapability,
   RoleBinding,
   DeliveryRunMode,
+  DeliveryTargetTool,
+  DeliveryTextVariant,
+  DeliveryImportMatchStatus,
   RoleExecutionMode,
   MachineCapabilityKind,
   WorkPacketStatus,
@@ -171,6 +181,8 @@ export type {
   WorkPacket,
   PacketExport,
   PacketImport,
+  DeliveryImportAnalysis,
+  DeliverySummary,
   ReviewFindingCategory,
   ReviewFindingSeverity,
   ReviewFindingStatus,
@@ -182,7 +194,7 @@ export type {
   CapabilityDiscoveryResult,
   TeamPresetResponse
 } from "./delivery/types.js";
-export type { StateIndexHealth, IndexedRunRecord } from "./state/index.js";
+export type { StateIndexHealth, IndexedRunRecord, IndexedDeliverySessionRecord } from "./state/index.js";
 export {
   normalizeTaskStatus,
   normalizeAgentRuntimeState,
@@ -203,6 +215,8 @@ export type {
   BrowserRunResponse,
   DeliveryStartRequest,
   DeliveryStartResponse,
+  DeliveryPacketExportRequest,
+  DeliveryPacketImportRequest,
   RunResumeRequest,
   RunResumeResponse,
   RunActionResponse,

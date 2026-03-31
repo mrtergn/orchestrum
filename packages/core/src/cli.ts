@@ -38,8 +38,11 @@ import {
   initTeamPreset,
   runDeliverySessionDetailed,
   exportDeliveryPacket,
+  analyzeDeliveryImport,
   importDeliveryPacketResponse,
   loadDeliveryFindings,
+  summarizeDeliverySessions,
+  type DeliveryTargetTool,
   getLicenseStatus,
   isFeatureAllowed,
   enforceFeature
@@ -350,9 +353,10 @@ deliveryCmd
   .command("export")
   .argument("<packetId>", "Packet ID")
   .requiredOption("--run <id>", "Delivery run ID")
+  .requiredOption("--target <tool>", "Handoff target: chatgpt|cursor|codex|copilot|claude")
   .option("--workspace <id>", "Workspace ID")
   .option("--runs-dir <path>", "Runs directory (default: ./runs)")
-  .option("--format <format>", "markdown|json", "markdown")
+  .option("--format <format>", "text|markdown|json", "text")
   .action(async (packetId, options) => {
     try {
       const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
@@ -360,12 +364,15 @@ deliveryCmd
         runsDir,
         runId: String(options.run),
         workspaceId: options.workspace ? String(options.workspace) : undefined,
-        packetId: String(packetId)
+        packetId: String(packetId),
+        targetTool: String(options.target) as DeliveryTargetTool
       });
       if (options.format === "json") {
         console.log(JSON.stringify(result.sidecar, null, 2));
-      } else {
+      } else if (options.format === "markdown") {
         console.log(result.markdown);
+      } else {
+        console.log(result.renderedText);
       }
     } catch (err) {
       await handleFatal(err);
@@ -376,6 +383,7 @@ deliveryCmd
   .command("import")
   .requiredOption("--run <id>", "Delivery run ID")
   .option("--packet <id>", "Packet ID")
+  .requiredOption("--target <tool>", "Import source: chatgpt|cursor|codex|copilot|claude")
   .option("--workspace <id>", "Workspace ID")
   .option("--runs-dir <path>", "Runs directory (default: ./runs)")
   .option("--file <path>", "Import content file")
@@ -385,7 +393,7 @@ deliveryCmd
       const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
       const inlineText = options.text ? String(options.text) : "";
       const text = inlineText || (options.file ? await fsSync.promises.readFile(path.resolve(options.file), "utf8") : await readStdinIfAny());
-      const result = await importDeliveryPacketResponse({
+      const analysis = await analyzeDeliveryImport({
         runsDir,
         runId: String(options.run),
         workspaceId: options.workspace ? String(options.workspace) : undefined,
@@ -393,6 +401,23 @@ deliveryCmd
         text,
         filePath: options.file ? path.resolve(options.file) : undefined,
         fileName: options.file ? path.basename(String(options.file)) : undefined,
+        targetTool: String(options.target) as DeliveryTargetTool,
+        source: options.file ? "file" : "paste"
+      });
+      if (analysis.matchStatus !== "matched" || !analysis.matchedPacketId) {
+        console.log(JSON.stringify(analysis, null, 2));
+        process.exitCode = 1;
+        return;
+      }
+      const result = await importDeliveryPacketResponse({
+        runsDir,
+        runId: String(options.run),
+        workspaceId: options.workspace ? String(options.workspace) : undefined,
+        packetId: analysis.matchedPacketId,
+        text,
+        filePath: options.file ? path.resolve(options.file) : undefined,
+        fileName: options.file ? path.basename(String(options.file)) : undefined,
+        targetTool: String(options.target) as DeliveryTargetTool,
         source: options.file ? "file" : "paste"
       });
       console.log(JSON.stringify({
@@ -401,6 +426,23 @@ deliveryCmd
         findings: result.findings.length,
         remediations: result.remediations.length
       }, null, 2));
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+deliveryCmd
+  .command("summary")
+  .option("--workspace <id>", "Workspace ID")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .action(async (options) => {
+    try {
+      const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
+      const summary = await summarizeDeliverySessions({
+        runsDir,
+        workspaceId: options.workspace ? String(options.workspace) : undefined
+      });
+      console.log(JSON.stringify(summary, null, 2));
     } catch (err) {
       await handleFatal(err);
     }

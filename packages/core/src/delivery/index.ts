@@ -21,9 +21,13 @@ import {
   DeliverySessionRequestSchema,
   DeliverySessionStateSchema,
   type CapabilityDiscoveryResult,
+  type DeliveryImportAnalysis,
   type DeliverySessionRequest,
   type DeliverySessionState,
+  type DeliverySummary,
   type EvidenceRecord,
+  type DeliveryTargetTool,
+  type DeliveryTextVariant,
   type MachineCapability,
   type PacketExport,
   type PacketImport,
@@ -56,6 +60,7 @@ type PacketImportOptions = {
   filePath?: string;
   fileName?: string;
   source?: "paste" | "file" | "auto_cli";
+  targetTool?: DeliveryTargetTool;
 };
 
 export type DeliveryImportResult = {
@@ -64,6 +69,119 @@ export type DeliveryImportResult = {
   findings: ReviewFinding[];
   remediations: RemediationTask[];
   session: DeliverySessionState;
+};
+
+type DeliveryToolProfile = {
+  id: DeliveryTargetTool;
+  label: string;
+  textVariant: DeliveryTextVariant;
+  guidance: string[];
+  responseContract: string[];
+};
+
+type ImportMatchResult = DeliveryImportAnalysis & {
+  candidates: WorkPacket[];
+};
+
+const BUILTIN_TOOL_PROFILES: Record<DeliveryTargetTool, DeliveryToolProfile> = {
+  chatgpt: {
+    id: "chatgpt",
+    label: "ChatGPT",
+    textVariant: "browser_prompt",
+    guidance: [
+      "Treat this as a browser handoff packet for ChatGPT.",
+      "Stay within the repo context and scoped files.",
+      "If you are blocked, say exactly what is missing instead of guessing."
+    ],
+    responseContract: [
+      "Status: completed|blocked",
+      "Summary: <one concise paragraph>",
+      "Findings:",
+      "- [category|severity] title :: summary",
+      "Files:",
+      "- path/to/file"
+    ]
+  },
+  cursor: {
+    id: "cursor",
+    label: "Cursor",
+    textVariant: "ide_task",
+    guidance: [
+      "Treat this as an IDE implementation task for Cursor.",
+      "Prefer precise file scope, concrete edits, and brief verification notes.",
+      "Call out any repo commands that should be run locally after the change."
+    ],
+    responseContract: [
+      "Status: completed|blocked",
+      "Summary: <what changed or what blocked progress>",
+      "Changed Files:",
+      "- path/to/file",
+      "Verification:",
+      "- command or check",
+      "Findings:",
+      "- [category|severity] title :: summary"
+    ]
+  },
+  codex: {
+    id: "codex",
+    label: "Codex",
+    textVariant: "patch_brief",
+    guidance: [
+      "Treat this as a patch-plus-verification brief for Codex.",
+      "Prefer minimal, defensible diffs over speculative rewrites.",
+      "Report exact verification commands or explain what could not be verified."
+    ],
+    responseContract: [
+      "Status: completed|blocked",
+      "Summary: <patch summary>",
+      "Changed Files:",
+      "- path/to/file",
+      "Verification:",
+      "- command :: result",
+      "Findings:",
+      "- [category|severity] title :: summary"
+    ]
+  },
+  copilot: {
+    id: "copilot",
+    label: "GitHub Copilot",
+    textVariant: "ide_task",
+    guidance: [
+      "Treat this as an editor-assist task for Copilot.",
+      "Keep the scope narrow and align with existing patterns in the selected files.",
+      "If the repo context is insufficient, surface the gap explicitly."
+    ],
+    responseContract: [
+      "Status: completed|blocked",
+      "Summary: <what was implemented>",
+      "Changed Files:",
+      "- path/to/file",
+      "Next Checks:",
+      "- command or manual validation",
+      "Findings:",
+      "- [category|severity] title :: summary"
+    ]
+  },
+  claude: {
+    id: "claude",
+    label: "Claude",
+    textVariant: "review_prompt",
+    guidance: [
+      "Treat this as a review or audit packet for Claude.",
+      "Lead with concrete findings ordered by severity.",
+      "Separate blockers from follow-ups and note missing validation."
+    ],
+    responseContract: [
+      "Status: completed|blocked",
+      "Summary: <review summary>",
+      "Findings:",
+      "- [category|severity] title :: summary",
+      "Files:",
+      "- path/to/file",
+      "Follow Up:",
+      "- optional next step"
+    ]
+  }
 };
 
 export function getTeamPresetPath(repoPath: string): string {
@@ -424,10 +542,54 @@ export async function loadDeliveryRemediations(options: {
   return session?.remediations ?? [];
 }
 
+export async function summarizeDeliverySessions(options: {
+  runsDir: string;
+  workspaceId?: string;
+}): Promise<DeliverySummary> {
+  const sessions = await listAllDeliverySessions(options.runsDir, options.workspaceId);
+  const summary: DeliverySummary = {
+    workspaceId: options.workspaceId,
+    sessions: sessions.length,
+    activeSessions: 0,
+    blockedSessions: 0,
+    completedSessions: 0,
+    openFindings: 0,
+    resolvedFindings: 0,
+    remediationsOpen: 0,
+    remediationsDone: 0,
+    unresolvedManualPackets: 0,
+    unmatchedImportAttempts: 0,
+    packetStatusCounts: {},
+    toolUsage: {},
+    latestRunId: sessions[0]?.runId ?? null
+  };
+
+  for (const session of sessions) {
+    if (session.status === "running") summary.activeSessions += 1;
+    if (session.status === "blocked" || session.status === "failed") summary.blockedSessions += 1;
+    if (session.status === "completed") summary.completedSessions += 1;
+    summary.openFindings += session.findings.filter((finding) => finding.status === "open").length;
+    summary.resolvedFindings += session.findings.filter((finding) => finding.status === "resolved").length;
+    summary.remediationsOpen += session.remediations.filter((task) => task.status !== "done").length;
+    summary.remediationsDone += session.remediations.filter((task) => task.status === "done").length;
+    summary.unresolvedManualPackets += session.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed").length;
+    summary.unmatchedImportAttempts += session.imports.filter((item) => item.matchStatus !== "matched").length;
+    for (const packet of session.packets) {
+      summary.packetStatusCounts[packet.status] = (summary.packetStatusCounts[packet.status] ?? 0) + 1;
+    }
+    for (const exported of session.exports) {
+      summary.toolUsage[exported.targetTool] = (summary.toolUsage[exported.targetTool] ?? 0) + 1;
+    }
+  }
+
+  return summary;
+}
+
 export async function exportDeliveryPacket(options: {
   runsDir: string;
   runId: string;
   packetId: string;
+  targetTool: DeliveryTargetTool;
   workspaceId?: string;
 }): Promise<PacketExport> {
   const runDir = await resolveRunDir(options.runsDir, options.runId, options.workspaceId);
@@ -437,17 +599,23 @@ export async function exportDeliveryPacket(options: {
   const packet = session.packets.find((item) => item.id === options.packetId);
   if (!packet) throw new Error("Packet not found.");
   const createdAt = new Date().toISOString();
+  const renderedText = renderPacketMarkdown(session, packet, options.targetTool);
+  const toolProfile = resolveToolProfile(session, options.targetTool);
   const exportRecord: PacketExport = {
     id: crypto.randomUUID(),
     sessionId: session.runId,
     packetId: packet.id,
     format: "markdown+json",
-    markdown: renderPacketMarkdown(session, packet),
+    targetTool: options.targetTool,
+    textVariant: toolProfile.textVariant,
+    renderedText,
+    markdown: renderedText,
     sidecar: {
       sessionId: session.runId,
       packetId: packet.id,
       roleId: packet.roleId,
       target: packet.target,
+      targetTool: options.targetTool,
       mode: packet.mode,
       goal: session.goal,
       sprintName: session.sprintName,
@@ -456,10 +624,11 @@ export async function exportDeliveryPacket(options: {
       selectedPaths: packet.selectedPaths,
       contextNotes: packet.contextNotes
     },
-    fileNameBase: `${session.runId}-${packet.id}`,
+    fileNameBase: `${session.runId}-${packet.id}-${options.targetTool}`,
     createdAt
   };
   await writeText(path.join(getDeliveryDir(runDir), "exports", `${exportRecord.fileNameBase}.md`), exportRecord.markdown);
+  await writeText(path.join(getDeliveryDir(runDir), "exports", `${exportRecord.fileNameBase}.txt`), exportRecord.renderedText);
   await writeJson(path.join(getDeliveryDir(runDir), "exports", `${exportRecord.fileNameBase}.json`), exportRecord.sidecar);
   session.exports.unshift(exportRecord);
   packet.lastExportId = exportRecord.id;
@@ -476,10 +645,11 @@ export async function exportDeliveryPacket(options: {
     actor: "user",
     roleId: packet.roleId,
     source: "delivery",
-    summary: `Exported packet ${packet.id} for ${packet.target}.`,
+    summary: `Exported packet ${packet.id} for ${options.targetTool}.`,
     createdAt,
     data: {
       target: packet.target,
+      targetTool: options.targetTool,
       mode: packet.mode
     }
   });
@@ -494,6 +664,55 @@ export async function exportDeliveryPacket(options: {
   return exportRecord;
 }
 
+export async function analyzeDeliveryImport(options: PacketImportOptions & {
+  recordAttempt?: boolean;
+}): Promise<DeliveryImportAnalysis> {
+  const runDir = await resolveRunDir(options.runsDir, options.runId, options.workspaceId);
+  if (!runDir) throw new Error("Delivery session not found.");
+  const session = await loadSessionByRunDir(runDir);
+  if (!session) throw new Error("Delivery session is missing.");
+  const rawText = options.text ?? (options.filePath ? await fs.readFile(options.filePath, "utf8") : "");
+  if (!rawText.trim()) throw new Error("No import content provided.");
+  const match = resolveImportPacket(session, {
+    requestedPacketId: options.packetId,
+    parsedPacketId: parsePacketId(rawText),
+    targetTool: options.targetTool
+  });
+
+  if (options.recordAttempt && match.matchStatus !== "matched") {
+    const createdAt = new Date().toISOString();
+    const importRecord: PacketImport = {
+      id: crypto.randomUUID(),
+      sessionId: session.runId,
+      parsedPacketId: match.parsedPacketId ?? undefined,
+      targetTool: options.targetTool,
+      matchStatus: match.matchStatus,
+      candidatePacketIds: match.candidatePacketIds,
+      source: options.source ?? (options.filePath ? "file" : "paste"),
+      fileName: options.fileName ?? (options.filePath ? path.basename(options.filePath) : undefined),
+      rawText,
+      summary: summarizeImport(rawText),
+      createdAt
+    };
+    await writeText(path.join(getDeliveryDir(runDir), "imports", `${importRecord.id}.txt`), rawText);
+    session.imports.unshift(importRecord);
+    session.updatedAt = createdAt;
+    await persistDeliverySession(runDir, session);
+    await writeRunMeta(runDir, session, { repoPath: session.repoPath, worktreePath: session.worktreePath ?? null });
+  }
+
+  return {
+    sessionId: session.runId,
+    parsedPacketId: match.parsedPacketId ?? undefined,
+    matchedPacketId: match.matchedPacketId ?? undefined,
+    targetTool: options.targetTool,
+    matchStatus: match.matchStatus,
+    needsPacketMatch: match.matchStatus !== "matched",
+    candidatePacketIds: match.candidatePacketIds,
+    summary: summarizeImport(rawText)
+  };
+}
+
 export async function importDeliveryPacketResponse(options: PacketImportOptions): Promise<DeliveryImportResult> {
   const runDir = await resolveRunDir(options.runsDir, options.runId, options.workspaceId);
   if (!runDir) throw new Error("Delivery session not found.");
@@ -501,16 +720,26 @@ export async function importDeliveryPacketResponse(options: PacketImportOptions)
   if (!session) throw new Error("Delivery session is missing.");
   const rawText = options.text ?? (options.filePath ? await fs.readFile(options.filePath, "utf8") : "");
   if (!rawText.trim()) throw new Error("No import content provided.");
-  const parsedPacketId = parsePacketId(rawText);
-  const packet = resolveImportPacket(session, options.packetId, parsedPacketId);
-  if (!packet) throw new Error("Unable to match import content to a packet.");
+  const analysis = resolveImportPacket(session, {
+    requestedPacketId: options.packetId,
+    parsedPacketId: parsePacketId(rawText),
+    targetTool: options.targetTool
+  });
+  if (analysis.matchStatus !== "matched" || !analysis.matchedPacketId) {
+    throw new Error("Unable to safely match import content to a packet.");
+  }
+  const packet = session.packets.find((item) => item.id === analysis.matchedPacketId);
+  if (!packet) throw new Error("Matched packet not found.");
   const createdAt = new Date().toISOString();
   const importRecord: PacketImport = {
     id: crypto.randomUUID(),
     sessionId: session.runId,
     packetId: packet.id,
     matchedPacketId: packet.id,
-    parsedPacketId: parsedPacketId ?? undefined,
+    parsedPacketId: analysis.parsedPacketId ?? undefined,
+    targetTool: options.targetTool,
+    matchStatus: "matched",
+    candidatePacketIds: [packet.id],
     source: options.source ?? (options.filePath ? "file" : "paste"),
     fileName: options.fileName ?? (options.filePath ? path.basename(options.filePath) : undefined),
     rawText,
@@ -578,12 +807,13 @@ export async function importDeliveryPacketResponse(options: PacketImportOptions)
     kind: "packet_imported",
     actor: "user",
     roleId: packet.roleId,
-    source: importRecord.source,
+    source: options.targetTool ?? importRecord.source,
     summary: `Imported response for packet ${packet.id}.`,
     createdAt,
     data: {
       importId: importRecord.id,
-      findingCount: packetFindings.length
+      findingCount: packetFindings.length,
+      targetTool: options.targetTool
     }
   });
   for (const finding of packetFindings) {
@@ -596,7 +826,7 @@ export async function importDeliveryPacketResponse(options: PacketImportOptions)
       kind: "finding_created",
       actor: "system",
       roleId: packet.roleId,
-      source: packet.target,
+      source: options.targetTool ?? packet.target,
       summary: `Captured ${finding.category} finding: ${finding.title}.`,
       createdAt,
       data: {
@@ -799,6 +1029,25 @@ async function resolveRunDir(runsDir: string, runId: string, workspaceId?: strin
     if (fsSync.existsSync(path.join(candidate, "run.json"))) return candidate;
   }
   return null;
+}
+
+async function listAllDeliverySessions(runsDir: string, workspaceId?: string): Promise<DeliverySessionState[]> {
+  const workspaceDirs = workspaceId
+    ? [workspaceId]
+    : (await fs.readdir(runsDir, { withFileTypes: true }).catch(() => []))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+  const sessions: DeliverySessionState[] = [];
+  for (const workspaceDir of workspaceDirs) {
+    const parentDir = path.join(runsDir, workspaceDir);
+    const runEntries = await fs.readdir(parentDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of runEntries) {
+      if (!entry.isDirectory()) continue;
+      const session = await loadSessionByRunDir(path.join(parentDir, entry.name)).catch(() => null);
+      if (session) sessions.push(session);
+    }
+  }
+  return sessions.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 async function writeRunMeta(runDir: string, session: DeliverySessionState, options: {
@@ -1037,13 +1286,20 @@ function extractFindingsFromImport(options: {
   packet: WorkPacket;
   importRecord: PacketImport;
 }): ReviewFinding[] {
+  const listedFiles = extractListedFiles(options.importRecord.rawText);
   const explicit = extractExplicitFindings(options.importRecord.rawText);
   if (explicit.length > 0) {
-    return explicit.map((entry) => createFinding(options.session, options.packet, options.importRecord, entry));
+    return explicit.map((entry) => createFinding(options.session, options.packet, options.importRecord, {
+      ...entry,
+      files: entry.files?.length ? entry.files : listedFiles
+    }));
   }
   const heuristics = inferHeuristicFindings(options.importRecord.rawText);
   if (heuristics.length > 0) {
-    return heuristics.map((entry) => createFinding(options.session, options.packet, options.importRecord, entry));
+    return heuristics.map((entry) => createFinding(options.session, options.packet, options.importRecord, {
+      ...entry,
+      files: listedFiles
+    }));
   }
   const status = parseExplicitStatus(options.importRecord.rawText);
   if (status === "completed") {
@@ -1054,7 +1310,8 @@ function extractFindingsFromImport(options: {
       category: "follow_up",
       severity: "medium",
       title: `${options.packet.roleId} response needs review`,
-      summary: summarizeImport(options.importRecord.rawText)
+      summary: summarizeImport(options.importRecord.rawText),
+      files: listedFiles
     })
   ];
 }
@@ -1126,15 +1383,151 @@ function parsePacketId(input: string): string | null {
   return lineMatch?.[1] ?? null;
 }
 
-function resolveImportPacket(session: DeliverySessionState, requestedPacketId?: string, parsedPacketId?: string | null): WorkPacket | null {
-  const candidateId = requestedPacketId ?? parsedPacketId ?? undefined;
-  if (candidateId) {
-    return session.packets.find((packet) => packet.id === candidateId) ?? null;
+function resolveImportPacket(
+  session: DeliverySessionState,
+  options: {
+    requestedPacketId?: string;
+    parsedPacketId?: string | null;
+    targetTool?: DeliveryTargetTool;
   }
-  return session.packets.find((packet) => packet.status === "awaiting_import" || (packet.mode !== "auto_cli" && packet.status === "pending")) ?? null;
+): ImportMatchResult {
+  const importablePackets = getImportablePackets(session);
+  const candidatePacketIds = importablePackets.map((packet) => packet.id);
+  const parsedPacketId = options.parsedPacketId ?? undefined;
+
+  if (options.requestedPacketId) {
+    const requested = session.packets.find((packet) => packet.id === options.requestedPacketId) ?? null;
+    if (!requested) {
+      return {
+        sessionId: session.runId,
+        parsedPacketId,
+        targetTool: options.targetTool,
+        matchStatus: candidatePacketIds.length > 0 ? "ambiguous" : "unmatched",
+        needsPacketMatch: true,
+        candidatePacketIds,
+        summary: `Requested packet ${options.requestedPacketId} was not found.`,
+        candidates: importablePackets
+      };
+    }
+    return {
+      sessionId: session.runId,
+      parsedPacketId,
+      matchedPacketId: requested.id,
+      targetTool: options.targetTool,
+      matchStatus: "matched",
+      needsPacketMatch: false,
+      candidatePacketIds: [requested.id],
+      summary: `Matched import to requested packet ${requested.id}.`,
+      candidates: [requested]
+    };
+  }
+
+  if (parsedPacketId) {
+    const parsed = session.packets.find((packet) => packet.id === parsedPacketId) ?? null;
+    if (parsed) {
+      return {
+        sessionId: session.runId,
+        parsedPacketId,
+        matchedPacketId: parsed.id,
+        targetTool: options.targetTool,
+        matchStatus: "matched",
+        needsPacketMatch: false,
+        candidatePacketIds: [parsed.id],
+        summary: `Matched import to packet ${parsed.id} via embedded packet id.`,
+        candidates: [parsed]
+      };
+    }
+    return {
+      sessionId: session.runId,
+      parsedPacketId,
+      targetTool: options.targetTool,
+      matchStatus: candidatePacketIds.length > 0 ? "ambiguous" : "unmatched",
+      needsPacketMatch: true,
+      candidatePacketIds,
+      summary: `Embedded packet id ${parsedPacketId} did not match an active packet.`,
+      candidates: importablePackets
+    };
+  }
+
+  const toolMatched = options.targetTool ? getToolMatchedPackets(session, importablePackets, options.targetTool) : [];
+  if (toolMatched.length === 1) {
+    return {
+      sessionId: session.runId,
+      targetTool: options.targetTool,
+      matchedPacketId: toolMatched[0]?.id,
+      matchStatus: "matched",
+      needsPacketMatch: false,
+      candidatePacketIds: [toolMatched[0]!.id],
+      summary: `Matched import to ${toolMatched[0]!.id} via tool target ${options.targetTool}.`,
+      candidates: toolMatched
+    };
+  }
+  if (toolMatched.length > 1) {
+    return {
+      sessionId: session.runId,
+      targetTool: options.targetTool,
+      matchStatus: "ambiguous",
+      needsPacketMatch: true,
+      candidatePacketIds: toolMatched.map((packet) => packet.id),
+      summary: `Multiple packets are waiting for ${options.targetTool} imports.`,
+      candidates: toolMatched
+    };
+  }
+  if (importablePackets.length === 1) {
+    return {
+      sessionId: session.runId,
+      targetTool: options.targetTool,
+      matchedPacketId: importablePackets[0]?.id,
+      matchStatus: "matched",
+      needsPacketMatch: false,
+      candidatePacketIds: [importablePackets[0]!.id],
+      summary: `Matched import to the only pending manual packet ${importablePackets[0]!.id}.`,
+      candidates: importablePackets
+    };
+  }
+  return {
+    sessionId: session.runId,
+    targetTool: options.targetTool,
+    matchStatus: importablePackets.length > 0 ? "ambiguous" : "unmatched",
+    needsPacketMatch: true,
+    candidatePacketIds,
+    summary: importablePackets.length > 0 ? "Multiple manual packets are awaiting imports." : "No manual packets are awaiting imports.",
+    candidates: importablePackets
+  };
 }
 
-function renderPacketMarkdown(session: DeliverySessionState, packet: WorkPacket): string {
+function getImportablePackets(session: DeliverySessionState): WorkPacket[] {
+  return session.packets.filter((packet) => packet.mode !== "auto_cli" && packet.status !== "completed" && packet.status !== "failed");
+}
+
+function getToolMatchedPackets(
+  session: DeliverySessionState,
+  packets: WorkPacket[],
+  targetTool: DeliveryTargetTool
+): WorkPacket[] {
+  return packets.filter((packet) => {
+    const lastExport = packet.lastExportId
+      ? session.exports.find((entry) => entry.id === packet.lastExportId)
+      : null;
+    return lastExport?.targetTool === targetTool || packet.target === targetTool;
+  });
+}
+
+function resolveToolProfile(session: DeliverySessionState, targetTool: DeliveryTargetTool): DeliveryToolProfile {
+  const base = BUILTIN_TOOL_PROFILES[targetTool];
+  const override = session.preset.tool_profiles?.[targetTool];
+  if (!override) return base;
+  return {
+    ...base,
+    label: override.label ?? base.label,
+    textVariant: override.text_variant ?? base.textVariant,
+    guidance: override.guidance ?? base.guidance,
+    responseContract: override.response_contract ?? base.responseContract
+  };
+}
+
+function renderPacketMarkdown(session: DeliverySessionState, packet: WorkPacket, targetTool: DeliveryTargetTool): string {
+  const toolProfile = resolveToolProfile(session, targetTool);
   const lines = [
     `<!-- ORCHESTRUM_PACKET ${JSON.stringify({ sessionId: session.runId, packetId: packet.id, roleId: packet.roleId })} -->`,
     "# Orchestrum Work Packet",
@@ -1144,6 +1537,7 @@ function renderPacketMarkdown(session: DeliverySessionState, packet: WorkPacket)
     `Role: ${packet.roleId}`,
     `Mode: ${packet.mode}`,
     `Target: ${packet.target}`,
+    `Tool Target: ${targetTool}`,
     `Goal: ${session.goal}`,
     ...(session.sprintName ? [`Sprint: ${session.sprintName}`] : []),
     "",
@@ -1162,14 +1556,12 @@ function renderPacketMarkdown(session: DeliverySessionState, packet: WorkPacket)
     "## Expected Output",
     ...(packet.expectedOutput.length > 0 ? packet.expectedOutput.map((item) => `- ${item}`) : ["- Summary", "- Findings or completion notes"]),
     "",
+    "## Tool Guidance",
+    ...toolProfile.guidance.map((item) => `- ${item}`),
+    "",
     "## Response Contract",
     "Return a concise response using this structure:",
-    "Status: completed|blocked",
-    "Summary: <one short paragraph>",
-    "Findings:",
-    "- [category|severity] title :: summary",
-    "Files:",
-    "- path/to/file"
+    ...toolProfile.responseContract
   ];
   if (packet.commands?.length) {
     lines.push("", "## Suggested Commands", ...packet.commands.map((command) => `- ${command}`));
@@ -1188,12 +1580,14 @@ function extractExplicitFindings(input: string): Array<{
   severity: ReviewFinding["severity"];
   title: string;
   summary: string;
+  files?: string[];
 }> {
   const findings: Array<{
     category: ReviewFinding["category"];
     severity: ReviewFinding["severity"];
     title: string;
     summary: string;
+    files?: string[];
   }> = [];
   const lines = input.split(/\r?\n/);
   for (const line of lines) {
@@ -1211,6 +1605,36 @@ function extractExplicitFindings(input: string): Array<{
     });
   }
   return findings;
+}
+
+function extractListedFiles(input: string): string[] {
+  const lines = input.split(/\r?\n/);
+  const files = new Set<string>();
+  let inFilesSection = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (inFilesSection) break;
+      continue;
+    }
+    if (/^#{1,6}\s*(files|changed files|file scope|files changed)\s*$/i.test(line) || /^(files|changed files|file scope|files changed)\s*:\s*$/i.test(line)) {
+      inFilesSection = true;
+      continue;
+    }
+    if (inFilesSection) {
+      const bulletMatch = line.match(/^[-*]\s+`?([^`]+?)`?\s*$/);
+      if (bulletMatch?.[1]) {
+        files.add(bulletMatch[1].trim());
+        continue;
+      }
+      if (/^#{1,6}\s+/.test(line)) break;
+    }
+    const inlinePath = line.match(/(?:^|\s)([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)(?:\s|$)/);
+    if (inlinePath?.[1] && (line.toLowerCase().includes("file") || line.toLowerCase().includes("path"))) {
+      files.add(inlinePath[1].trim());
+    }
+  }
+  return Array.from(files);
 }
 
 function inferHeuristicFindings(input: string): Array<{
