@@ -18,6 +18,7 @@ import type {
   TeamPresetResponse,
   WorkPacket
 } from "../delivery/types.js";
+import type { MissionGraph, MissionNode } from "../mission/types.js";
 
 export const TASK_RUNTIME_STATUSES = [
   "queued",
@@ -52,6 +53,36 @@ export type WorkflowSummary = {
   security?: { threshold?: number };
 };
 
+export type MissionNodeSummary = Pick<
+  MissionNode,
+  | "id"
+  | "title"
+  | "role"
+  | "executor"
+  | "dependsOn"
+  | "status"
+  | "assignedAgentId"
+  | "assignedAgentName"
+  | "provider"
+  | "transport"
+  | "profileId"
+  | "model"
+  | "effort"
+  | "authSource"
+  | "exitCode"
+  | "targetTool"
+  | "approval"
+  | "artifacts"
+  | "findingCount"
+  | "start"
+  | "end"
+  | "error"
+>;
+
+export type MissionGraphSummary = Pick<MissionGraph, "templateId" | "name" | "description"> & {
+  nodes: MissionNodeSummary[];
+};
+
 export type RunSummary = RunState & {
   repoPath?: string;
   workflow?: string;
@@ -61,6 +92,7 @@ export type RunSummary = RunState & {
 export type RunDetail = {
   run: RunSummary;
   steps: StepState[];
+  graph: MissionGraphSummary | null;
   workflow: WorkflowSummary | null;
   delivery?: DeliverySessionState | null;
 };
@@ -120,7 +152,8 @@ export type DeliveryPacketImportRequest = {
 
 export type RunStartRequest = {
   workspaceId: string;
-  workflowId: string;
+  missionTemplateId?: string;
+  workflowId?: string;
   userGoal?: string;
   runId?: string;
   options?: RunStartOptions;

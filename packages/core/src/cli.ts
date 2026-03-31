@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 import fsSync from "node:fs";
 import {
   runWorkflow,
+  runMissionDetailed,
+  resumeMissionRun,
+  importMissionNodeInput,
+  loadMissionRun,
   resumeWorkflow,
   cancelRun,
   replayRun,
@@ -42,7 +46,9 @@ import {
   importDeliveryPacketResponse,
   loadDeliveryFindings,
   summarizeDeliverySessions,
+  normalizeMissionProvider,
   type DeliveryTargetTool,
+  type MissionAgent,
   getLicenseStatus,
   isFeatureAllowed,
   enforceFeature
@@ -61,7 +67,7 @@ const program = new Command();
 
 program
   .name("orchestrum")
-  .description("Orchestrum workflow runner")
+  .description("Orchestrum mission runtime")
   .version("0.4.0");
 
 program
@@ -74,44 +80,11 @@ program
   .option("--workspace <id>", "Workspace ID to associate the run with")
   .option("--sandbox <mode>", "Sandbox mode (docker)")
   .option("--strategy <mode>", "Strategy mode override (aggressive|balanced|conservative)")
-  .action(async (workflow, options) => {
+  .action(async (_workflow, _options) => {
     try {
-      const repoPath = path.resolve(options.repo);
-      const runsDir = options.runsDir
-        ? path.resolve(options.runsDir)
-        : path.resolve(process.cwd(), "runs");
-      const goal = options.goal ?? "";
-
-      let workflowPath: string | null = workflow ? path.resolve(workflow) : null;
-      if (!workflowPath) {
-        const config = await loadConfig(repoPath);
-        if (!config?.defaultWorkflow) {
-          throw new Error("No workflow provided and config has no defaultWorkflow");
-        }
-        workflowPath = path.resolve(repoPath, config.defaultWorkflow);
-      }
-
-      const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
-      const sandbox = options.sandbox === "docker" ? "docker" : undefined;
-      await applySecretsToEnv({
-        names: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
-        scope: workspaceId ? "workspace" : "global",
-        repoPath,
-        useKeychain: process.env.ORCHESTRUM_USE_KEYCHAIN === "1"
-      });
-      const ok = await runWorkflow({
-        workflowPath,
-        repoPath,
-        runsDir,
-        goal,
-        branch: options.branch,
-        workspaceId,
-        sandbox,
-        strategyMode: options.strategy
-      });
-      if (!ok) {
-        process.exitCode = 1;
-      }
+      console.error("Workflow execution was removed.");
+      console.error("Use: orchestrum mission start --template <id> --workspace <id> --goal <text>");
+      process.exitCode = 1;
     } catch (err) {
       await handleFatal(err);
     }
@@ -137,6 +110,116 @@ program
       if (!ok) {
         process.exitCode = 1;
       }
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+const missionCmd = program.command("mission").description("Manage mission runs");
+
+missionCmd
+  .command("start")
+  .requiredOption("--template <id>", "Mission template id")
+  .requiredOption("--workspace <id>", "Workspace ID")
+  .requiredOption("--goal <text>", "Mission goal")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .option("--run-id <id>", "Mission run id")
+  .action(async (options) => {
+    try {
+      const rootDir = process.cwd();
+      const runsDir = options.runsDir
+        ? path.resolve(options.runsDir)
+        : path.resolve(rootDir, "runs");
+      const workspaces = await loadWorkspaces(rootDir);
+      const workspace = findWorkspaceById(workspaces, options.workspace);
+      if (!workspace) {
+        throw new Error(`Workspace ${options.workspace} not found. Use orchestrum workspace add.`);
+      }
+      const agents = await loadWorkspaceMissionAgents(workspace.path);
+      await applySecretsToEnv({
+        names: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+        scope: "workspace",
+        repoPath: workspace.path,
+        useKeychain: process.env.ORCHESTRUM_USE_KEYCHAIN === "1"
+      });
+      const result = await runMissionDetailed({
+        templateId: String(options.template),
+        repoPath: workspace.path,
+        runsDir,
+        workspaceId: workspace.id,
+        runId: options.runId ? String(options.runId) : undefined,
+        goal: String(options.goal),
+        agents
+      });
+      console.log(JSON.stringify({
+        ok: result.ok,
+        runId: result.runId,
+        status: result.run.status,
+        paused: result.paused ?? false
+      }, null, 2));
+      if (!result.ok && result.run.status !== "running") {
+        process.exitCode = 1;
+      }
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+missionCmd
+  .command("import")
+  .requiredOption("--run <id>", "Mission run id")
+  .requiredOption("--node <id>", "Mission node id")
+  .requiredOption("--workspace <id>", "Workspace ID")
+  .option("--runs-dir <path>", "Runs directory (default: ./runs)")
+  .option("--file <path>", "Response file path")
+  .option("--stdin", "Read response from stdin")
+  .option("--target-tool <tool>", "Target tool label")
+  .action(async (options) => {
+    try {
+      const rootDir = process.cwd();
+      const runsDir = options.runsDir
+        ? path.resolve(options.runsDir)
+        : path.resolve(rootDir, "runs");
+      const workspaces = await loadWorkspaces(rootDir);
+      const workspace = findWorkspaceById(workspaces, options.workspace);
+      if (!workspace) {
+        throw new Error(`Workspace ${options.workspace} not found. Use orchestrum workspace add.`);
+      }
+      const text = options.file
+        ? fsSync.readFileSync(path.resolve(String(options.file)), "utf8")
+        : options.stdin
+          ? await readStdinIfAny()
+          : await readStdinIfAny();
+      if (!text.trim()) {
+        throw new Error("No import text provided. Use --file <path> or pipe text via stdin.");
+      }
+      const run = await importMissionNodeInput({
+        runsDir,
+        workspaceId: workspace.id,
+        runId: String(options.run),
+        nodeId: String(options.node),
+        text,
+        targetTool: options.targetTool ? String(options.targetTool) : undefined
+      });
+      let resumed = false;
+      if (run.status === "running") {
+        const agents = await loadWorkspaceMissionAgents(workspace.path);
+        await resumeMissionRun({
+          runsDir,
+          workspaceId: workspace.id,
+          runId: run.runId,
+          agents
+        });
+        resumed = true;
+      }
+      const latest = await loadMissionRun(path.join(runsDir, workspace.id, String(options.run)));
+      console.log(JSON.stringify({
+        ok: true,
+        runId: run.runId,
+        nodeId: String(options.node),
+        status: latest?.status ?? run.status,
+        resumed
+      }, null, 2));
     } catch (err) {
       await handleFatal(err);
     }
@@ -1140,6 +1223,36 @@ async function resolveWorkspaceId(repoPath: string, workspaceId?: string): Promi
   const match = findWorkspaceByPath(workspaces, repoPath);
   if (match) return match.id;
   return "default";
+}
+
+async function loadWorkspaceMissionAgents(workspacePath: string): Promise<MissionAgent[]> {
+  const agentsPath = path.join(workspacePath, ".orchestrum", "agents.json");
+  const raw = await fsSync.promises.readFile(agentsPath, "utf8").catch(() => "[]");
+  const parsed = JSON.parse(raw) as Array<{
+    id?: string;
+    workspaceId?: string;
+    name?: string;
+    role?: string;
+    tags?: string[];
+    provider?: { type?: string; model?: string; apiKeyRef?: string };
+    capabilities?: { shell?: boolean; fs?: boolean; network?: boolean };
+  }>;
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error(`No workspace agents configured in ${agentsPath}.`);
+  }
+  return parsed.map((agent) => ({
+    id: String(agent.id ?? ""),
+    workspaceId: agent.workspaceId,
+    name: String(agent.name ?? "Agent"),
+    role: String(agent.role ?? "general"),
+    tags: Array.isArray(agent.tags) ? agent.tags.map((tag) => String(tag)) : [],
+    provider: normalizeMissionProvider(agent.provider ?? {}, String(agent.role ?? "general")),
+    capabilities: {
+      shell: Boolean(agent.capabilities?.shell),
+      fs: agent.capabilities?.fs !== false,
+      network: agent.capabilities?.network !== false
+    }
+  }));
 }
 
 async function requireFeature(feature: Parameters<typeof isFeatureAllowed>[1]) {

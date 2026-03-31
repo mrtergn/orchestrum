@@ -14,15 +14,13 @@ const navGroups: NavGroup[] = [
       { href: "/", label: "Dashboard", icon: "◉" },
       { href: "/agents", label: "Agents", icon: "◆" },
       { href: "/org", label: "Org Chart", icon: "⬡" },
-      { href: "/tasks", label: "Tasks", icon: "▶" },
     ],
   },
   {
     title: "Operations",
     items: [
       { href: "/workspaces", label: "Workspaces", icon: "◫" },
-      { href: "/delivery", label: "Delivery", icon: "▣" },
-      { href: "/templates", label: "Templates", icon: "❖" },
+      { href: "/templates", label: "Missions", icon: "❖" },
       { href: "/plugins", label: "Plugins", icon: "⧉" },
     ],
   },
@@ -30,7 +28,7 @@ const navGroups: NavGroup[] = [
     title: "Observe",
     items: [
       { href: "/runs", label: "Runs", icon: "◌" },
-      { href: "/mission", label: "Live Feed", icon: "◈" },
+      { href: "/mission", label: "Mission Feed", icon: "◈" },
       { href: "/metrics", label: "Metrics", icon: "▤" },
       { href: "/roadmap", label: "Roadmap", icon: "◧" },
       { href: "/diagnostics", label: "Diagnostics", icon: "⚙" },

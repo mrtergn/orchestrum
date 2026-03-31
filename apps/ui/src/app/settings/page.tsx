@@ -12,6 +12,7 @@ import {
   targetOptionsForMode,
   toolLabel
 } from "@/lib/delivery";
+import { preferredTransport, transportLabel, vendorLabel, type ProviderDiscoveryRecord } from "@/lib/providers";
 
 type CapabilityDiscovery = {
   capabilities?: DeliveryCapability[];
@@ -24,6 +25,10 @@ type TeamPresetPayload = {
   scaffoldPreset?: unknown;
   capabilities?: CapabilityDiscovery["capabilities"];
   suggestedBindings?: CapabilityDiscovery["suggestedBindings"];
+};
+
+type ProviderDiscoveryPayload = {
+  providers?: ProviderDiscoveryRecord[];
 };
 
 const ConfigSchema = z.object({
@@ -99,9 +104,12 @@ export default function SettingsPage() {
   const [capabilities, setCapabilities] = useState<DeliveryCapability[]>([]);
   const [suggestedBindings, setSuggestedBindings] = useState<DeliveryBinding[]>([]);
   const [openAiSet, setOpenAiSet] = useState(false);
+  const [claudeSet, setClaudeSet] = useState(false);
   const [openAiKey, setOpenAiKey] = useState("");
+  const [claudeKey, setClaudeKey] = useState("");
   const [providerPassphrase, setProviderPassphrase] = useState("");
   const [providerMessage, setProviderMessage] = useState("");
+  const [providerDiscovery, setProviderDiscovery] = useState<ProviderDiscoveryRecord[]>([]);
   const [pmModelDefault, setPmModelDefault] = useState("gpt-5");
   const [devModelDefault, setDevModelDefault] = useState("codex");
   const [auditModelDefault, setAuditModelDefault] = useState("gpt-5");
@@ -113,13 +121,22 @@ export default function SettingsPage() {
 
   useEffect(() => {
     const loadProviders = async () => {
-      const res = await fetch("/api/secrets", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      setOpenAiSet(Boolean(data.keys?.OPENAI_API_KEY));
+      const [secretRes, providerRes] = await Promise.all([
+        fetch("/api/secrets", { cache: "no-store" }),
+        fetch(`/api/providers/discover?scope=${effectiveScope}${workspaceId ? `&workspace=${encodeURIComponent(workspaceId)}` : ""}`, { cache: "no-store" })
+      ]);
+      if (secretRes.ok) {
+        const data = await secretRes.json();
+        setOpenAiSet(Boolean(data.keys?.OPENAI_API_KEY));
+        setClaudeSet(Boolean(data.keys?.ANTHROPIC_API_KEY));
+      }
+      if (providerRes.ok) {
+        const data = await providerRes.json() as ProviderDiscoveryPayload;
+        setProviderDiscovery(Array.isArray(data.providers) ? data.providers : []);
+      }
     };
     void loadProviders();
-  }, []);
+  }, [effectiveScope, workspaceId]);
 
   useEffect(() => {
     const load = async () => {
@@ -244,18 +261,20 @@ export default function SettingsPage() {
     setSaved(true);
   };
 
-  const handleSaveProvider = async () => {
+  const handleSaveProvider = async (provider: "openai" | "claude") => {
     setProviderMessage("");
-    if (!openAiKey.trim()) {
-      setProviderMessage("Enter OPENAI_API_KEY.");
+    const keyName = provider === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+    const value = provider === "claude" ? claudeKey.trim() : openAiKey.trim();
+    if (!value) {
+      setProviderMessage(`Enter ${keyName}.`);
       return;
     }
     const res = await fetch("/api/secrets/set", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        keyName: "OPENAI_API_KEY",
-        value: openAiKey.trim(),
+        keyName,
+        value,
         scope: "global",
         passphrase: providerPassphrase.trim() || undefined
       })
@@ -265,18 +284,24 @@ export default function SettingsPage() {
       setProviderMessage(payload.error ?? "Failed to save API key.");
       return;
     }
-    setOpenAiSet(true);
-    setOpenAiKey("");
-    pushToast({ tone: "success", title: "OPENAI_API_KEY saved" });
+    if (provider === "claude") {
+      setClaudeSet(true);
+      setClaudeKey("");
+    } else {
+      setOpenAiSet(true);
+      setOpenAiKey("");
+    }
+    pushToast({ tone: "success", title: `${keyName} saved` });
   };
 
-  const handleUnsetProvider = async () => {
+  const handleUnsetProvider = async (provider: "openai" | "claude") => {
     setProviderMessage("");
+    const keyName = provider === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
     const res = await fetch("/api/secrets/unset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        keyName: "OPENAI_API_KEY",
+        keyName,
         scope: "global",
         passphrase: providerPassphrase.trim() || undefined
       })
@@ -286,17 +311,21 @@ export default function SettingsPage() {
       setProviderMessage(payload.error ?? "Failed to remove API key.");
       return;
     }
-    setOpenAiSet(false);
-    pushToast({ tone: "info", title: "OPENAI_API_KEY removed" });
+    if (provider === "claude") {
+      setClaudeSet(false);
+    } else {
+      setOpenAiSet(false);
+    }
+    pushToast({ tone: "info", title: `${keyName} removed` });
   };
 
-  const handleTestProvider = async () => {
+  const handleTestProvider = async (provider: "openai" | "claude") => {
     setProviderMessage("Testing...");
     const res = await fetch("/api/secrets/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        provider: "openai",
+        provider,
         scope: "global",
         passphrase: providerPassphrase.trim() || undefined
       })
@@ -474,55 +503,140 @@ export default function SettingsPage() {
       {/* ── Providers Tab ── */}
       {activeTab === "Providers" && (
         <section className="space-y-6">
-          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <h3 className="text-sm font-semibold text-white">OpenAI</h3>
-                <p className="mt-1 text-xs text-slate-500">Store your API key locally. Keys are encrypted at rest.</p>
+          <div className="grid gap-4 lg:grid-cols-3">
+            {providerDiscovery.map((record) => {
+              const transport = preferredTransport(record);
+              return (
+                <div key={record.vendor} className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-white">{vendorLabel(record.vendor)}</h3>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {transport
+                          ? `${transportLabel(transport.transport)} ${transport.configured ? "ready" : transport.available ? "available" : "unavailable"}`
+                          : "No transport detected"}
+                      </p>
+                    </div>
+                    <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${transport?.configured ? "bg-emerald-400/10 text-emerald-300" : "bg-slate-800 text-slate-400"}`}>
+                      {transport?.configured ? "Ready" : "Needs setup"}
+                    </span>
+                  </div>
+                  <div className="mt-3 space-y-1 text-[11px] text-slate-500">
+                    {record.transports.map((entry) => (
+                      <div key={`${record.vendor}-${entry.transport}`} className="flex items-center justify-between rounded-lg bg-slate-900/30 px-2.5 py-1.5">
+                        <span>{transportLabel(entry.transport)}</span>
+                        <span className={entry.configured ? "text-emerald-300" : entry.available ? "text-amber-300" : "text-slate-600"}>
+                          {entry.configured ? "ready" : entry.available ? "available" : "off"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">OpenAI</h3>
+                  <p className="mt-1 text-xs text-slate-500">Optional API fallback. Keys are only required for API transport.</p>
+                </div>
+                <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${openAiSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
+                  {openAiSet ? "Connected" : "Not configured"}
+                </span>
               </div>
-              <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${openAiSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
-                {openAiSet ? "Connected" : "Not configured"}
-              </span>
-            </div>
-            <div className="mt-4 space-y-3 max-w-md">
-              <input
-                value={openAiKey}
-                onChange={(event) => setOpenAiKey(event.target.value)}
-                type="password"
-                placeholder="sk-..."
-                className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
-              />
-              <input
-                value={providerPassphrase}
-                onChange={(event) => setProviderPassphrase(event.target.value)}
-                type="password"
-                placeholder="Passphrase for encrypted storage (optional)"
-                className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
-              />
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={() => void handleSaveProvider()}
-                  className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
-                >
-                  Save Key
-                </button>
-                <button
-                  onClick={() => void handleTestProvider()}
-                  className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
-                >
-                  Test
-                </button>
-                {openAiSet && (
+              <div className="mt-4 space-y-3">
+                <input
+                  value={openAiKey}
+                  onChange={(event) => setOpenAiKey(event.target.value)}
+                  type="password"
+                  placeholder="sk-..."
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                />
+                <div className="flex flex-wrap gap-2">
                   <button
-                    onClick={() => void handleUnsetProvider()}
-                    className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
+                    onClick={() => void handleSaveProvider("openai")}
+                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
                   >
-                    Remove
+                    Save Key
                   </button>
-                )}
+                  <button
+                    onClick={() => void handleTestProvider("openai")}
+                    className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
+                  >
+                    Test
+                  </button>
+                  {openAiSet && (
+                    <button
+                      onClick={() => void handleUnsetProvider("openai")}
+                      className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
               </div>
-              {providerMessage && <div className="text-xs text-slate-400">{providerMessage}</div>}
             </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Claude</h3>
+                  <p className="mt-1 text-xs text-slate-500">Optional API fallback when Claude CLI is unavailable.</p>
+                </div>
+                <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium ${claudeSet ? "bg-emerald-400/10 text-emerald-300" : "bg-amber-400/10 text-amber-300"}`}>
+                  {claudeSet ? "Connected" : "Not configured"}
+                </span>
+              </div>
+              <div className="mt-4 space-y-3">
+                <input
+                  value={claudeKey}
+                  onChange={(event) => setClaudeKey(event.target.value)}
+                  type="password"
+                  placeholder="sk-ant-..."
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => void handleSaveProvider("claude")}
+                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-amber-200"
+                  >
+                    Save Key
+                  </button>
+                  <button
+                    onClick={() => void handleTestProvider("claude")}
+                    className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-sky-200"
+                  >
+                    Test
+                  </button>
+                  {claudeSet && (
+                    <button
+                      onClick={() => void handleUnsetProvider("claude")}
+                      className="rounded-lg border border-rose-400/40 bg-rose-400/10 px-3 py-2 text-xs uppercase tracking-[0.2em] text-rose-200"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="max-w-md space-y-3 rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Secret Storage</h3>
+              <p className="mt-1 text-xs text-slate-500">Optional passphrase used when encrypting provider secrets on disk.</p>
+            </div>
+            <input
+              value={providerPassphrase}
+              onChange={(event) => setProviderPassphrase(event.target.value)}
+              type="password"
+              placeholder="Passphrase for encrypted storage (optional)"
+              className="w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+            />
+            {providerMessage && <div className="text-xs text-slate-400">{providerMessage}</div>}
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">

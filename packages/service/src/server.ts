@@ -10,7 +10,6 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   runWorkflow,
-  runWorkflowDetailed,
   resumeWorkflow,
   cancelRun,
   loadWorkspaces,
@@ -76,6 +75,10 @@ import {
   recoverInterruptedRuns,
   getLicenseStatus,
   isFeatureAllowed,
+  listMissionTemplates,
+  missionGraphToStepStates,
+  loadMissionRun,
+  discoverMissionProviders,
   type DeliveryTargetTool
 } from "@orchestrum/core";
 import { writeJson, writeText } from "@orchestrum/core";
@@ -382,15 +385,47 @@ export async function startService(options: ServiceOptions = {}) {
   }
 
   app.post("/api/secrets/test", async (req, res) => {
-    const provider = String(req.body?.provider ?? "openai").toLowerCase();
+    const provider = String(req.body?.vendor ?? req.body?.provider ?? "openai").toLowerCase();
+    const transport = req.body?.transport ? String(req.body.transport).toLowerCase() : (provider === "openai" ? "api" : provider === "claude" ? "api" : "cli");
     const scope = req.body?.scope === "workspace" ? "workspace" : "global";
     const workspacePath = scope === "workspace" ? await resolveWorkspacePath(rootDir, req.body?.workspaceId) : null;
     if (scope === "workspace" && !workspacePath) return res.status(404).json({ error: "Workspace not found" });
     const passphrase = req.body?.passphrase ? String(req.body.passphrase) : undefined;
-    if (provider !== "openai") {
+    if (transport !== "api") {
+      const discovery = await buildProviderDiscovery({
+        rootDir,
+        workspacePath: workspacePath ?? undefined,
+        scope,
+        passphrase,
+        useKeychain
+      });
+      const record = discovery.find((entry) => entry.vendor === provider);
+      const match = record?.transports.find((entry) => entry.transport === transport);
+      if (!match) {
+        return res.status(400).json({ ok: false, error: `Unsupported provider transport: ${provider}/${transport}` });
+      }
+      if (!match.available) {
+        return res.status(400).json({ ok: false, provider, transport, error: match.reason ?? "Provider transport is unavailable." });
+      }
+      if (!match.configured) {
+        return res.status(400).json({ ok: false, provider, transport, error: match.reason ?? "Provider transport is not configured." });
+      }
+      return res.json({
+        ok: true,
+        provider,
+        transport,
+        model: match.profiles.find((profile) => profile.recommended)?.model ?? match.models?.[0] ?? undefined
+      });
+    }
+    const secretName =
+      provider === "claude"
+        ? "ANTHROPIC_API_KEY"
+        : provider === "openai"
+          ? "OPENAI_API_KEY"
+          : "";
+    if (!secretName) {
       return res.status(400).json({ error: `Unsupported provider: ${provider}` });
     }
-    const secretName = "OPENAI_API_KEY";
     const apiKey = await getSecret({
       name: secretName,
       scope,
@@ -399,13 +434,28 @@ export async function startService(options: ServiceOptions = {}) {
       useKeychain
     }).catch(() => null);
     if (!apiKey) {
-      return res.status(400).json({ ok: false, error: "OPENAI_API_KEY is not configured." });
+      return res.status(400).json({ ok: false, error: `${secretName} is not configured.` });
     }
-    const testResult = await testOpenAiConnection(apiKey);
+    const testResult = provider === "claude"
+      ? await testClaudeConnection(apiKey)
+      : await testOpenAiConnection(apiKey);
     if (!testResult.ok) {
       return res.status(400).json(testResult);
     }
     res.json(testResult);
+  });
+
+  app.get("/api/providers/discover", async (req, res) => {
+    const scope = req.query.scope === "workspace" ? "workspace" : "global";
+    const workspacePath = scope === "workspace" ? await resolveWorkspacePath(rootDir, req.query.workspace as string | undefined) : null;
+    if (scope === "workspace" && !workspacePath) return res.status(404).json({ error: "Workspace not found" });
+    const discovery = await buildProviderDiscovery({
+      rootDir,
+      workspacePath: workspacePath ?? undefined,
+      scope,
+      useKeychain
+    });
+    res.json({ providers: discovery });
   });
 
   app.get("/plugins", async (_req, res) => {
@@ -491,27 +541,30 @@ export async function startService(options: ServiceOptions = {}) {
     res.json({ runs });
   });
 
-  const startRunHandler = async (req: express.Request, res: express.Response) => {
+  const startRunHandler = async (_req: express.Request, res: express.Response) => {
+    return res.status(410).json({
+      ok: false,
+      error: "Workflow execution was removed. Use POST /missions/start with missionTemplateId."
+    });
+  };
+
+  const startMissionHandler = async (req: express.Request, res: express.Response) => {
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
-    const workflowId = String(req.body?.workflowId ?? req.body?.workflowPath ?? "");
-    const userGoal = String(req.body?.userGoal ?? req.body?.goal ?? "");
+    const missionTemplateId = String(req.body?.missionTemplateId ?? "");
+    const goal = String(req.body?.userGoal ?? req.body?.goal ?? "");
     const options = normalizeRunStartOptions(req.body?.options);
     if (!workspaceId) return res.status(400).json({ error: "workspaceId required" });
-    if (!workflowId) return res.status(400).json({ error: "workflowId required" });
+    if (!missionTemplateId) return res.status(400).json({ error: "missionTemplateId required" });
 
     const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
     if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
 
-    const workflowPath = await resolveWorkflowPath(workspacePath, workflowId, rootDir);
-    if (!workflowPath) return res.status(404).json({ error: "Workflow not found" });
-
-    const runId = sanitizeRunId(req.body?.runId ? String(req.body.runId) : createServiceRunId());
-    const configOverrides = {
-      concurrency: options.concurrency,
-      sandboxEnabled: options.sandboxEnabled,
-      modelOverrides: options.modelOverrides
-    };
-
+    await applySecretsToEnv({
+      names: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+      scope: "global",
+      passphrase: options.passphrase,
+      useKeychain
+    });
     await applySecretsToEnv({
       names: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
       scope: "workspace",
@@ -520,37 +573,24 @@ export async function startService(options: ServiceOptions = {}) {
       useKeychain
     });
 
-    void runWorkflowDetailed({
-      runId,
-      repoPath: workspacePath,
-      workflowPath,
-      runsDir,
-      goal: userGoal,
-      workspaceId,
-      sandbox: options.sandboxEnabled ? "docker" : undefined,
-      strategyMode: options.strategyMode,
-      configOverrides
-    })
-      .then(() => {
-        void stateIndex.rebuild().catch(() => undefined);
-        void logger.info("run.start.completed", { runId, workspaceId });
-      })
-      .catch(async (err: any) => {
-        const message = String(err?.message ?? "Run start failed");
-        await writeRunBootstrapFailure({
-          runsDir,
-          workspaceId,
-          runId,
-          repoPath: workspacePath,
-          workflowPath,
-          userGoal,
-          error: message
-        });
-        void stateIndex.rebuild().catch(() => undefined);
-        void logger.error("run.start.failed", { runId, workspaceId, message });
+    try {
+      const runId = sanitizeRunId(req.body?.runId ? String(req.body.runId) : createServiceRunId("mission"));
+      const result = await agentPlatform.startMission({
+        runsDir,
+        workspaceId,
+        repoPath: workspacePath,
+        templateId: missionTemplateId,
+        goal,
+        runId
       });
-
-    return res.json({ ok: true, runId });
+      void stateIndex.rebuild().catch(() => undefined);
+      void logger.info("mission.start.accepted", { runId: result.runId, workspaceId, missionTemplateId });
+      return res.json(result);
+    } catch (err: any) {
+      const message = String(err?.message ?? "Mission start failed");
+      void logger.error("mission.start.failed", { workspaceId, missionTemplateId, message });
+      return res.status(400).json({ ok: false, error: message });
+    }
   };
 
   const startBrowserRunHandler = (kind: "qa" | "benchmark" | "canary") =>
@@ -584,6 +624,8 @@ export async function startService(options: ServiceOptions = {}) {
 
   app.post("/runs/start", startRunHandler);
   app.post("/api/runs/start", startRunHandler);
+  app.post("/missions/start", startMissionHandler);
+  app.post("/api/missions/start", startMissionHandler);
   app.post("/qa/run", startBrowserRunHandler("qa"));
   app.post("/qa/benchmark", startBrowserRunHandler("benchmark"));
   app.post("/qa/canary", startBrowserRunHandler("canary"));
@@ -602,7 +644,7 @@ export async function startService(options: ServiceOptions = {}) {
     const tail = Number.isFinite(tailRaw) && tailRaw > 0 ? tailRaw : 200;
     const run = runIndex.get(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
-    const logPath = path.join(run.runDir, "logs", "runner.ndjson");
+    const logPath = resolveRunLogPath(run.runDir, run.meta);
     const lines = fsSync.existsSync(logPath) ? await readTailLines(logPath, tail) : [];
     res.json({ lines });
   });
@@ -632,17 +674,7 @@ export async function startService(options: ServiceOptions = {}) {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
     const run = runIndex.get(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
-    const stepsDir = path.join(run.runDir, "steps");
-    const entries = await fs.readdir(stepsDir, { withFileTypes: true }).catch(() => []);
-    const steps = await Promise.all(
-      entries
-        .filter((e) => e.isDirectory())
-        .map(async (entry) => {
-          const statusPath = path.join(stepsDir, entry.name, "status.json");
-          const raw = await fs.readFile(statusPath, "utf8").catch(() => null);
-          return raw ? JSON.parse(raw) : { stepId: entry.name, ok: false, error: "Missing status" };
-        })
-    );
+    const steps = await loadRunSteps(run);
     res.json(steps);
   });
 
@@ -650,7 +682,7 @@ export async function startService(options: ServiceOptions = {}) {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
     const run = runIndex.get(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
-    const stepPath = path.join(run.runDir, "steps", req.params.stepId);
+    const stepPath = getRunStepDir(run, req.params.stepId);
     const files = await listArtifacts(stepPath);
     res.json({ files });
   });
@@ -660,7 +692,7 @@ export async function startService(options: ServiceOptions = {}) {
     const run = runIndex.get(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const artifactPath = (req.params as Record<string, string | undefined>)["0"] ?? "";
-    const baseDir = path.join(run.runDir, "steps", req.params.stepId);
+    const baseDir = getRunStepDir(run, req.params.stepId);
     const full = path.resolve(baseDir, artifactPath);
     if (!full.startsWith(path.resolve(baseDir))) {
       return res.status(400).json({ error: "Invalid path" });
@@ -699,6 +731,14 @@ export async function startService(options: ServiceOptions = {}) {
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
     const run = runIndex.get(runId, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
+    if (isMissionRunMeta(run.meta)) {
+      const result = await agentPlatform.resumeMission({
+        runsDir,
+        workspaceId: run.workspaceId === "legacy" ? (workspaceId ?? "default") : run.workspaceId,
+        runId
+      });
+      return res.json({ ok: result.ok, fromStepId: inferMissionResumeNodeId(run.meta) ?? undefined });
+    }
     const requestedFrom = req.body?.fromStepId ? String(req.body.fromStepId) : "";
     const fromStepId = requestedFrom || (await inferResumeStepId(run.runDir));
     if (!fromStepId) return res.status(400).json({ error: "Unable to infer resume step. Provide fromStepId." });
@@ -715,6 +755,18 @@ export async function startService(options: ServiceOptions = {}) {
     const runId = String(req.params.id ?? "");
     if (!runId) return res.status(400).json({ error: "run id required" });
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    const run = runIndex.get(runId, workspaceId);
+    if (run && isMissionRunMeta(run.meta)) {
+      const updated = {
+        ...run.meta,
+        status: "cancelled",
+        end: run.meta?.end ?? new Date().toISOString()
+      };
+      await writeJson(path.join(run.runDir, "run.json"), updated);
+      runIndex.update(run.runId, run.workspaceId, updated);
+      void stateIndex.rebuild().catch(() => undefined);
+      return res.json({ ok: true });
+    }
     await cancelRun(runsDir, runId, workspaceId);
     res.json({ ok: true });
   };
@@ -776,6 +828,34 @@ export async function startService(options: ServiceOptions = {}) {
     }
     void stateIndex.rebuild().catch(() => undefined);
     res.json({ ok: true });
+  });
+
+  app.post("/runs/:id/nodes/:nodeId/import", async (req, res) => {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    const text = typeof req.body?.text === "string" ? req.body.text : "";
+    const targetTool = typeof req.body?.targetTool === "string" ? req.body.targetTool : undefined;
+    if (!workspaceId) return res.status(400).json({ error: "workspaceId required" });
+    if (!text.trim()) return res.status(400).json({ error: "text required" });
+    const run = runIndex.get(req.params.id, workspaceId);
+    if (!run) return res.status(404).json({ error: "Run not found" });
+    if (!isMissionRunMeta(run.meta)) {
+      return res.status(400).json({ error: "Node imports are only supported for mission runs." });
+    }
+    try {
+      const missionRun = await agentPlatform.importMissionNode({
+        runsDir,
+        workspaceId,
+        runId: req.params.id,
+        nodeId: req.params.nodeId,
+        text,
+        targetTool
+      });
+      runIndex.update(run.runId, run.workspaceId, missionRun);
+      void stateIndex.rebuild().catch(() => undefined);
+      res.json({ ok: true, run: missionRun });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Mission node import failed." });
+    }
   });
 
   app.get("/analytics", async (req, res) => {
@@ -860,19 +940,21 @@ export async function startService(options: ServiceOptions = {}) {
   app.post("/opportunities/run", async (req, res) => {
     const workspacePath = await resolveWorkspacePath(rootDir, req.body?.workspaceId);
     if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
-    const repoPath = workspacePath;
-    const config = await loadConfig(repoPath);
-    if (!config?.defaultWorkflow) return res.status(400).json({ error: "defaultWorkflow missing" });
-    const workflowPath = path.resolve(repoPath, config.defaultWorkflow);
+    const workspaceId = String(req.body?.workspaceId ?? "");
     const goal = req.body?.title ?? "Improve project";
-    await runWorkflow({
-      workflowPath,
-      repoPath,
-      runsDir,
-      goal,
-      workspaceId: req.body?.workspaceId
-    });
-    res.json({ ok: true });
+    try {
+      const result = await agentPlatform.startMission({
+        runsDir,
+        workspaceId,
+        repoPath: workspacePath,
+        templateId: "feature-dev",
+        goal
+      });
+      void stateIndex.rebuild().catch(() => undefined);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ ok: false, error: err?.message ?? "Mission start failed" });
+    }
   });
 
   app.get("/roadmap", async (req, res) => {
@@ -1029,84 +1111,19 @@ export async function startService(options: ServiceOptions = {}) {
   });
 
   app.get("/templates", async (req, res) => {
-    const templatesDir = path.join(rootDir, "packages", "core", "workflows", "templates");
-    const manifestPath = path.join(templatesDir, "manifest.json");
-    const raw = await fs.readFile(manifestPath, "utf8").catch(() => "");
-    const manifest = raw ? JSON.parse(raw) : { templates: [] };
-    const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    let custom: any[] = [];
-    if (workspaceId) {
-      const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
-      if (workspacePath) {
-        custom = await loadCustomTemplates(workspacePath);
-      }
-    }
-    res.json({ templates: [...(manifest.templates ?? []), ...custom] });
+    res.json({ templates: listMissionTemplates() });
   });
 
   app.post("/templates/clone", async (req, res) => {
-    const workspacePath = await resolveWorkspacePath(rootDir, req.body?.workspaceId);
-    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
-    const templatesDir = path.join(rootDir, "packages", "core", "workflows", "templates");
-    const name = String(req.body?.name ?? "");
-    const sourceType = String(req.body?.source ?? "");
-    if (!name) return res.status(400).json({ error: "name required" });
-    const targetName = req.body?.targetName ? String(req.body.targetName) : path.basename(name);
-
-    if (sourceType === "custom") {
-      const sourceDir = resolveWorkspaceMetaDir(workspacePath, ["templates", name]);
-      const workflowFile = path.join(sourceDir, "workflow.yaml");
-      if (!fsSync.existsSync(workflowFile)) {
-        return res.status(404).json({ error: "Template workflow missing." });
-      }
-      const destDir = path.join(getWorkspaceMetaDirForWrite(workspacePath), "workflows", targetName);
-      await fs.mkdir(destDir, { recursive: true });
-      await fs.copyFile(workflowFile, path.join(destDir, "workflow.yaml"));
-      const promptsDir = path.join(sourceDir, "prompts");
-      if (fsSync.existsSync(promptsDir)) {
-        await fs.cp(promptsDir, path.join(destDir, "prompts"), { recursive: true });
-      }
-      return res.json({ ok: true, path: path.join(destDir, "workflow.yaml") });
-    }
-
-    const source = path.join(templatesDir, name);
-    const dest = path.join(getWorkspaceMetaDirForWrite(workspacePath), "workflows", targetName);
-    await fs.mkdir(path.dirname(dest), { recursive: true });
-    await fs.copyFile(source, dest);
-    res.json({ ok: true, path: dest });
+    res.status(410).json({ error: "Mission templates are built-in. Template cloning was removed." });
   });
 
   app.post("/templates/export", async (req, res) => {
-    const workflowPath = String(req.body?.workflowPath ?? "");
-    if (!workflowPath) return res.status(400).json({ error: "workflowPath required" });
-    try {
-      const output = await exportTemplate({ workflowPath, outputPath: req.body?.outputPath });
-      res.json({ output });
-    } catch (err: any) {
-      res.status(400).json({ error: err?.message ?? "Template export failed" });
-    }
+    res.status(410).json({ error: "Mission templates are built-in. Template export was removed." });
   });
 
   app.post("/templates/import", async (req, res) => {
-    const workspacePath = await resolveWorkspacePath(rootDir, req.body?.workspaceId);
-    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
-    const data = req.body?.data ? String(req.body.data) : "";
-    const filePath = req.body?.file ? String(req.body.file) : "";
-    let archivePath = filePath;
-    if (!archivePath && data) {
-      const tempDir = path.join(os.tmpdir(), `orchestrum-template-${Date.now()}`);
-      await fs.mkdir(tempDir, { recursive: true });
-      archivePath = path.join(tempDir, "template.orct");
-      await fs.writeFile(archivePath, Buffer.from(data, "base64"));
-    }
-    if (!archivePath) return res.status(400).json({ error: "file or data required" });
-    const targetDir = path.join(getWorkspaceMetaDirForWrite(workspacePath), "templates");
-    try {
-      const result = await importTemplate({ archivePath, targetDir });
-      res.json({ ok: true, result });
-    } catch (err: any) {
-      res.status(400).json({ error: err?.message ?? "Template import failed" });
-    }
+    res.status(410).json({ error: "Template import was removed with mission template unification." });
   });
 
   app.post("/diagnostics/export", async (req, res) => {
@@ -1168,28 +1185,9 @@ export async function startService(options: ServiceOptions = {}) {
   });
 
   app.post("/delivery/start", async (req, res) => {
-    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
-    const workspacePath = await resolveWorkspacePath(rootDir, workspaceId);
-    if (!workspaceId) return res.status(400).json({ error: "workspaceId required" });
-    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
-    const goal = typeof req.body?.goal === "string" ? req.body.goal.trim() : "";
-    if (!goal) return res.status(400).json({ error: "goal required" });
-    try {
-      const result = await runDeliverySessionDetailed({
-        repoPath: workspacePath,
-        runsDir,
-        workspaceId,
-        goal,
-        sprintName: req.body?.sprintName ? String(req.body.sprintName) : undefined,
-        notes: req.body?.notes ? String(req.body.notes) : undefined,
-        selectedPaths: Array.isArray(req.body?.selectedPaths) ? req.body.selectedPaths.map((item: unknown) => String(item)) : [],
-        runId: req.body?.runId ? sanitizeRunId(String(req.body.runId)) : undefined
-      });
-      void stateIndex.rebuild().catch(() => undefined);
-      res.json({ ok: result.ok, runId: result.runId, kind: "delivery" });
-    } catch (err: any) {
-      res.status(400).json({ error: err?.message ?? "Failed to start delivery session." });
-    }
+    res.status(410).json({
+      error: "Standalone delivery sessions were removed. Start the delivery-sprint mission with POST /missions/start."
+    });
   });
 
   app.get("/delivery/summary", async (req, res) => {
@@ -1296,19 +1294,10 @@ export async function startService(options: ServiceOptions = {}) {
   });
 
   app.post("/run", async (req, res) => {
-    const repoPath = String(req.body?.repoPath ?? "");
-    const workflowPath = String(req.body?.workflowPath ?? "");
-    const goal = String(req.body?.goal ?? "");
-    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
-    if (!repoPath || !workflowPath) return res.status(400).json({ error: "repoPath and workflowPath required" });
-    await applySecretsToEnv({
-      names: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
-      scope: workspaceId ? "workspace" : "global",
-      repoPath: workspaceId ? repoPath : undefined,
-      useKeychain: process.env.ORCHESTRUM_USE_KEYCHAIN === "1"
+    res.status(410).json({
+      ok: false,
+      error: "Workflow execution was removed. Use POST /missions/start with missionTemplateId."
     });
-    const ok = await runWorkflow({ repoPath, workflowPath, runsDir, goal, workspaceId });
-    res.json({ ok });
   });
 
   agentPlatform.registerRoutes(app);
@@ -1530,6 +1519,73 @@ function normalizeRunStartOptions(raw: unknown): {
   };
 }
 
+function isMissionRunMeta(run: any): run is {
+  kind: "mission";
+  end?: string | null;
+  graph: {
+    templateId: string;
+    name: string;
+    description: string;
+    nodes: any[];
+  };
+} {
+  return Boolean(
+    run &&
+    run.kind === "mission" &&
+    run.graph &&
+    typeof run.graph.templateId === "string" &&
+    typeof run.graph.name === "string" &&
+    typeof run.graph.description === "string" &&
+    Array.isArray(run.graph.nodes)
+  );
+}
+
+async function loadStepStatesFromDir(stepsDir: string) {
+  const entries = await fs.readdir(stepsDir, { withFileTypes: true }).catch(() => []);
+  return Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry) => {
+        const statusPath = path.join(stepsDir, entry.name, "status.json");
+        const raw = await fs.readFile(statusPath, "utf8").catch(() => null);
+        return raw ? JSON.parse(raw) : { stepId: entry.name, ok: false, error: "Missing status" };
+      })
+  );
+}
+
+async function loadRunSteps(run: RunRecord) {
+  if (isMissionRunMeta(run.meta)) {
+    return missionGraphToStepStates(run.meta.graph);
+  }
+  return loadStepStatesFromDir(path.join(run.runDir, "steps"));
+}
+
+function getRunStepDir(run: RunRecord, stepId: string): string {
+  return isMissionRunMeta(run.meta)
+    ? path.join(run.runDir, "nodes", stepId)
+    : path.join(run.runDir, "steps", stepId);
+}
+
+function resolveRunLogPath(runDir: string, runMeta: any): string {
+  if (isMissionRunMeta(runMeta)) {
+    return path.join(runDir, "events.ndjson");
+  }
+  const runnerLog = path.join(runDir, "logs", "runner.ndjson");
+  return fsSync.existsSync(runnerLog) ? runnerLog : path.join(runDir, "events.ndjson");
+}
+
+function inferMissionResumeNodeId(runMeta: any): string | null {
+  if (!isMissionRunMeta(runMeta)) return null;
+  const resumable = runMeta.graph.nodes.find((node: any) =>
+    node.status === "awaiting_approval" ||
+    node.status === "waiting_input" ||
+    node.status === "failed" ||
+    node.status === "blocked" ||
+    node.status === "pending"
+  );
+  return resumable?.id ?? null;
+}
+
 function normalizeBrowserRunOptions(raw: unknown): {
   baseUrl?: string;
   targetPath?: string;
@@ -1578,9 +1634,9 @@ async function resolveWorkflowPath(workspacePath: string, workflowId: string, ro
   return null;
 }
 
-function createServiceRunId(): string {
+function createServiceRunId(prefix = "run"): string {
   const suffix = crypto.randomUUID().slice(0, 8);
-  return `run-${Date.now()}-${suffix}`;
+  return `${prefix}-${Date.now()}-${suffix}`;
 }
 
 function sanitizeRunId(input: string): string {
@@ -1723,6 +1779,75 @@ async function testOpenAiConnection(apiKey: string): Promise<{ ok: boolean; prov
   }
 }
 
+async function buildProviderDiscovery(options: {
+  rootDir: string;
+  workspacePath?: string;
+  scope: "workspace" | "global";
+  passphrase?: string;
+  useKeychain?: boolean;
+}) {
+  const [openAiKey, claudeKey] = await Promise.all([
+    getSecret({
+      name: "OPENAI_API_KEY",
+      scope: options.scope,
+      repoPath: options.workspacePath,
+      passphrase: options.passphrase,
+      useKeychain: options.useKeychain
+    }).catch(() => null),
+    getSecret({
+      name: "ANTHROPIC_API_KEY",
+      scope: options.scope,
+      repoPath: options.workspacePath,
+      passphrase: options.passphrase,
+      useKeychain: options.useKeychain
+    }).catch(() => null)
+  ]);
+
+  return discoverMissionProviders({
+    cwd: options.workspacePath ?? options.rootDir,
+    env: process.env,
+    apiSecrets: {
+      openai: Boolean(openAiKey),
+      claude: Boolean(claudeKey)
+    }
+  });
+}
+
+async function testClaudeConnection(apiKey: string): Promise<{ ok: boolean; provider: string; model?: string; error?: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-3-5-sonnet-latest",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "ping" }]
+      }),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      if (response.status === 401) {
+        return { ok: false, provider: "claude", error: "Authentication failed. Check ANTHROPIC_API_KEY." };
+      }
+      return { ok: false, provider: "claude", error: `Anthropic API returned ${response.status}.` };
+    }
+    return { ok: true, provider: "claude", model: "claude-3-5-sonnet-latest" };
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      return { ok: false, provider: "claude", error: "Connection timed out." };
+    }
+    return { ok: false, provider: "claude", error: "Unable to reach Anthropic API." };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function listArtifacts(stepPath: string): Promise<string[]> {
   const results: string[] = [];
   const walk = async (dir: string, prefix: string) => {
@@ -1847,17 +1972,9 @@ async function buildSnapshot(runDir: string) {
   const runMetaPath = path.join(runDir, "run.json");
   const runRaw = await fs.readFile(runMetaPath, "utf8").catch(() => null);
   const run = runRaw ? JSON.parse(runRaw) : null;
-  const stepsDir = path.join(runDir, "steps");
-  const entries = await fs.readdir(stepsDir, { withFileTypes: true }).catch(() => []);
-  const steps = await Promise.all(
-    entries
-      .filter((e) => e.isDirectory())
-      .map(async (entry) => {
-        const statusPath = path.join(stepsDir, entry.name, "status.json");
-        const raw = await fs.readFile(statusPath, "utf8").catch(() => null);
-        return raw ? JSON.parse(raw) : { stepId: entry.name, ok: false };
-      })
-  );
+  const steps = isMissionRunMeta(run)
+    ? missionGraphToStepStates(run.graph)
+    : await loadStepStatesFromDir(path.join(runDir, "steps"));
   const total = run?.totalSteps ?? steps.length;
   const done = run?.completedSteps ?? steps.filter((s: any) => s.ok).length;
   const progress = {
@@ -1870,6 +1987,25 @@ async function buildSnapshot(runDir: string) {
 }
 
 async function buildRunDetail(run: RunRecord) {
+  if (isMissionRunMeta(run.meta)) {
+    const missionRun = await loadMissionRun(run.runDir).catch(() => null);
+    const graph = missionRun?.graph ?? run.meta.graph ?? null;
+    const steps = graph ? missionGraphToStepStates(graph) : [];
+    return {
+      run: missionRun ?? run.meta,
+      steps,
+      graph: graph
+        ? {
+            templateId: graph.templateId,
+            name: graph.name,
+            description: graph.description,
+            nodes: graph.nodes
+          }
+        : null,
+      workflow: null,
+      delivery: null
+    };
+  }
   if (run.meta?.kind === "delivery") {
     const delivery = await loadDeliverySession({
       runsDir: path.resolve(run.runDir, "..", ".."),
@@ -1879,21 +2015,12 @@ async function buildRunDetail(run: RunRecord) {
     return {
       run: run.meta,
       steps: [],
+      graph: null,
       workflow: null,
       delivery
     };
   }
-  const stepsDir = path.join(run.runDir, "steps");
-  const entries = await fs.readdir(stepsDir, { withFileTypes: true }).catch(() => []);
-  const steps = await Promise.all(
-    entries
-      .filter((e) => e.isDirectory())
-      .map(async (entry) => {
-        const statusPath = path.join(stepsDir, entry.name, "status.json");
-        const raw = await fs.readFile(statusPath, "utf8").catch(() => null);
-        return raw ? JSON.parse(raw) : { stepId: entry.name, ok: false, error: "Missing status" };
-      })
-  );
+  const steps = await loadStepStatesFromDir(path.join(run.runDir, "steps"));
   let workflow = null;
   const workflowPath = run.meta?.workflow;
   if (workflowPath) {
@@ -1923,7 +2050,7 @@ async function buildRunDetail(run: RunRecord) {
       workflow = null;
     }
   }
-  return { run: run.meta, steps, workflow, delivery: null };
+  return { run: run.meta, steps, graph: null, workflow, delivery: null };
 }
 
 function mimeTypeForExtension(ext: string): string {

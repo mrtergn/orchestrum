@@ -36,7 +36,7 @@ export default function DeliveryPage() {
       if (presetRes.ok) setPreset((await presetRes.json()) as TeamPresetPayload);
       if (runsRes.ok) {
         const payload = (await runsRes.json()) as RunSummary[];
-        setRuns(payload.filter((run) => run.kind === "delivery"));
+        setRuns(payload.filter((run) => run.kind === "mission" && run.missionTemplateId === "delivery-sprint"));
       }
       if (summaryRes.ok) {
         setSummary((await summaryRes.json()) as DeliverySummary);
@@ -69,13 +69,13 @@ export default function DeliveryPage() {
       <section className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">Delivery</h2>
-          <p className="text-sm text-slate-400">Plan, hand off, import, review, and remediate on one delivery control plane.</p>
+          <p className="text-sm text-slate-400">Track delivery-oriented missions and workspace handoff readiness.</p>
         </div>
         <button
-          onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "delivery" })}
+          onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "mission", missionTemplateId: "delivery-sprint" })}
           className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-emerald-200"
         >
-          Start Delivery Session
+          Start Delivery Mission
         </button>
       </section>
 

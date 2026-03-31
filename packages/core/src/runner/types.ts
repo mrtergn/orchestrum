@@ -6,7 +6,17 @@ export type AgentState = {
   currentStepId?: string;
 };
 
-export type StepStatus = "pending" | "running" | "completed" | "failed" | "cached" | "skipped" | "cancelled";
+export type StepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cached"
+  | "skipped"
+  | "cancelled"
+  | "waiting_input"
+  | "awaiting_approval"
+  | "blocked";
 
 export type StepState = {
   stepId: string;
@@ -33,7 +43,7 @@ export type StepState = {
 
 export type RunStatus = "running" | "finished" | "failed" | "cancelled" | "interrupted";
 
-export type RunKind = "workflow" | "qa" | "benchmark" | "canary" | "delivery";
+export type RunKind = "workflow" | "mission" | "qa" | "benchmark" | "canary" | "delivery";
 
 export type RunReadiness = {
   score: number;
@@ -96,6 +106,8 @@ export type RunState = {
     expiresAt?: string | null;
   };
   worktreePath?: string | null;
+  repoPath?: string;
+  missionTemplateId?: string;
   readiness?: RunReadiness | null;
   profile?: {
     risk_tolerance?: string;

@@ -1,6 +1,7 @@
 import { OpenAIProvider } from "../runner/providers/openai.js";
 import { OllamaProvider } from "../runner/providers/ollama.js";
 import { LlamaCppProvider } from "../runner/providers/llamaCpp.js";
+import { ClaudeProvider } from "../runner/providers/claude.js";
 import type { LlmUsage } from "../runner/cost.js";
 
 export type AgentFactoryOptions = {
@@ -75,5 +76,15 @@ export function registerBuiltInAgents() {
   }
   if (!registry.has("llama.cpp")) {
     registerAgent("llama.cpp", llamaFactory);
+  }
+  if (!registry.has("claude")) {
+    registerAgent("claude", (options) => {
+      const apiKey = options.env.ANTHROPIC_API_KEY ?? "";
+      const baseUrl = options.env.ANTHROPIC_API_BASE_URL ?? "https://api.anthropic.com/v1";
+      const client = new ClaudeProvider(apiKey, baseUrl);
+      return {
+        complete: (prompt: string) => client.complete({ model: options.model, prompt })
+      };
+    });
   }
 }

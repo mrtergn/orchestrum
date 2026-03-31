@@ -1,17 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
-import {
-  type DeliveryBinding,
-  type DeliveryCapability,
-  type TeamPresetDraft,
-  normalizeTeamPresetDraft,
-  serializeTeamPresetDraft,
-  targetOptionsForMode,
-  toolLabel
-} from "@/lib/delivery";
+import { preferredTransport, transportLabel, vendorLabel, type ProviderDiscoveryRecord } from "@/lib/providers";
 
 type Workspace = {
   id: string;
@@ -19,62 +11,45 @@ type Workspace = {
   path: string;
 };
 
-type TeamPresetPayload = {
-  preset?: unknown | null;
-  scaffoldPreset?: unknown;
-  suggestedBindings?: DeliveryBinding[];
-  capabilities?: DeliveryCapability[];
-  error?: string;
+type AgentPayload = {
+  agents?: Array<{ id: string }>;
 };
 
-type CapabilityDiscoveryPayload = {
-  capabilities?: DeliveryCapability[];
-  suggestedBindings?: DeliveryBinding[];
-  scaffoldPreset?: unknown;
-};
-
-type DeliverySessionPayload = {
-  runId?: string;
-  packets?: Array<{ id: string; roleId: string; target: string; mode: string; status: string }>;
-  summary?: string;
+type ProviderDiscoveryPayload = {
+  providers?: ProviderDiscoveryRecord[];
 };
 
 const ONBOARDED_KEY = "orchestrum.onboarded";
 
 export function Onboarding() {
   const router = useRouter();
-  const { selectedWorkspaceId, setSelectedWorkspaceId, setOnboardingSkipped, pushToast } = useAppUi();
+  const { selectedWorkspaceId, setSelectedWorkspaceId, setOnboardingSkipped, pushToast, openRunConfig } = useAppUi();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState(1);
-  const [busy, setBusy] = useState("");
-  const [message, setMessage] = useState("");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
-  const [hasOpenAiKey, setHasOpenAiKey] = useState(false);
+  const [provider, setProvider] = useState<"openai" | "claude">("openai");
   const [apiKey, setApiKey] = useState("");
   const [passphrase, setPassphrase] = useState("");
-  const [capabilities, setCapabilities] = useState<DeliveryCapability[]>([]);
-  const [suggestedBindings, setSuggestedBindings] = useState<DeliveryBinding[]>([]);
-  const [presetDraft, setPresetDraft] = useState<TeamPresetDraft | null>(null);
-  const [goal, setGoal] = useState("Sprint 10");
-  const [sprintName, setSprintName] = useState("Sprint 10");
-  const [notes, setNotes] = useState("");
-  const [selectedPathsText, setSelectedPathsText] = useState("");
-  const [createdRunId, setCreatedRunId] = useState("");
-  const [createdSession, setCreatedSession] = useState<DeliverySessionPayload | null>(null);
-
-  const stepCount = 6;
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [hasOpenAiKey, setHasOpenAiKey] = useState(false);
+  const [hasClaudeKey, setHasClaudeKey] = useState(false);
+  const [agentCount, setAgentCount] = useState(0);
+  const [providerDiscovery, setProviderDiscovery] = useState<ProviderDiscoveryRecord[]>([]);
 
   useEffect(() => {
     const load = async () => {
-      const [workspaceRes, secretsRes] = await Promise.all([
+      const [workspaceRes, secretsRes, providersRes] = await Promise.all([
         fetch("/api/workspaces", { cache: "no-store" }),
-        fetch("/api/secrets", { cache: "no-store" })
+        fetch("/api/secrets", { cache: "no-store" }),
+        fetch("/api/providers/discover?scope=global", { cache: "no-store" })
       ]);
       const workspacePayload = workspaceRes.ok ? await workspaceRes.json() : { workspaces: [] };
       const secretsPayload = secretsRes.ok ? await secretsRes.json() : { keys: {} };
+      const providersPayload = providersRes.ok ? await providersRes.json() : { providers: [] };
       const workspaceList = Array.isArray(workspacePayload.workspaces) ? workspacePayload.workspaces as Workspace[] : [];
       const defaultWorkspaceId = selectedWorkspaceId || workspaceList[0]?.id || "";
       const done = localStorage.getItem(ONBOARDED_KEY) === "1";
@@ -82,11 +57,11 @@ export function Onboarding() {
       setWorkspaces(workspaceList);
       setWorkspaceId(defaultWorkspaceId);
       setHasOpenAiKey(Boolean(secretsPayload.keys?.OPENAI_API_KEY));
+      setHasClaudeKey(Boolean(secretsPayload.keys?.ANTHROPIC_API_KEY));
+      setProviderDiscovery(Array.isArray((providersPayload as ProviderDiscoveryPayload).providers) ? (providersPayload as ProviderDiscoveryPayload).providers ?? [] : []);
       if (!done && !skipped) {
         setOpen(true);
-        if (!defaultWorkspaceId) setStep(1);
-        else if (!Boolean(secretsPayload.keys?.OPENAI_API_KEY)) setStep(2);
-        else setStep(3);
+        setStep(defaultWorkspaceId ? 2 : 1);
       }
     };
     void load();
@@ -94,32 +69,16 @@ export function Onboarding() {
 
   useEffect(() => {
     if (!workspaceId) {
-      setCapabilities([]);
-      setSuggestedBindings([]);
-      setPresetDraft(null);
+      setAgentCount(0);
       return;
     }
-    const loadSetup = async () => {
-      const [presetRes, capabilityRes] = await Promise.all([
-        fetch(`/api/team-preset?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" }),
-        fetch(`/api/capabilities?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" })
-      ]);
-      const presetPayload = presetRes.ok ? (await presetRes.json()) as TeamPresetPayload : {};
-      const capabilityPayload = capabilityRes.ok ? (await capabilityRes.json()) as CapabilityDiscoveryPayload : {};
-      const nextCapabilities = capabilityPayload.capabilities ?? presetPayload.capabilities ?? [];
-      const nextBindings = capabilityPayload.suggestedBindings ?? presetPayload.suggestedBindings ?? [];
-      const sourcePreset = presetPayload.preset ?? presetPayload.scaffoldPreset ?? capabilityPayload.scaffoldPreset ?? null;
-      setCapabilities(nextCapabilities);
-      setSuggestedBindings(nextBindings);
-      setPresetDraft(sourcePreset ? normalizeTeamPresetDraft(sourcePreset, nextBindings) : null);
+    const loadAgents = async () => {
+      const res = await fetch(`/api/agents?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" });
+      const payload = res.ok ? ((await res.json()) as AgentPayload) : { agents: [] };
+      setAgentCount(Array.isArray(payload.agents) ? payload.agents.length : 0);
     };
-    void loadSetup();
+    void loadAgents();
   }, [workspaceId]);
-
-  const firstPacket = useMemo(
-    () => createdSession?.packets?.find((packet) => packet.mode !== "auto_cli") ?? createdSession?.packets?.[0] ?? null,
-    [createdSession]
-  );
 
   const addWorkspace = async () => {
     if (!workspacePath.trim()) {
@@ -146,12 +105,13 @@ export function Onboarding() {
     setWorkspaces((prev) => [...prev.filter((item) => item.id !== nextWorkspace.id), nextWorkspace]);
     setWorkspaceId(nextWorkspace.id);
     setSelectedWorkspaceId(nextWorkspace.id);
-    setStep(hasOpenAiKey ? 3 : 2);
+    setStep(2);
   };
 
   const saveProvider = async () => {
+    const keyName = provider === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
     if (!apiKey.trim()) {
-      setMessage("Enter OPENAI_API_KEY or continue without a provider.");
+      setMessage(`Enter ${keyName} or continue without a provider.`);
       return;
     }
     setBusy("provider");
@@ -160,7 +120,7 @@ export function Onboarding() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        keyName: "OPENAI_API_KEY",
+        keyName,
         value: apiKey.trim(),
         scope: "global",
         passphrase: passphrase.trim() || undefined
@@ -169,101 +129,22 @@ export function Onboarding() {
     const payload = await res.json().catch(() => ({}));
     setBusy("");
     if (!res.ok) {
-      setMessage(payload.error ?? "Failed to save OPENAI_API_KEY.");
+      setMessage(payload.error ?? `Failed to save ${keyName}.`);
       return;
     }
-    setHasOpenAiKey(true);
+    if (provider === "claude") setHasClaudeKey(true);
+    else setHasOpenAiKey(true);
     setApiKey("");
     setStep(3);
-  };
-
-  const savePreset = async () => {
-    if (!workspaceId || !presetDraft) {
-      setMessage("Select a workspace and load the preset first.");
-      return false;
-    }
-    setBusy("preset");
-    setMessage("");
-    const res = await fetch("/api/team-preset", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId,
-        preset: serializeTeamPresetDraft(presetDraft)
-      })
-    });
-    const payload = await res.json().catch(() => ({}));
-    setBusy("");
-    if (!res.ok) {
-      setMessage(payload.error ?? "Failed to save the team preset.");
-      return false;
-    }
-    pushToast({
-      tone: "success",
-      title: "Team preset saved",
-      message: "Repo-scoped roles and targets are ready for delivery sessions."
-    });
-    return true;
-  };
-
-  const createFirstDelivery = async () => {
-    if (!workspaceId) {
-      setMessage("Select a workspace first.");
-      return;
-    }
-    if (!goal.trim()) {
-      setMessage("Enter a sprint or goal name first.");
-      return;
-    }
-    setBusy("delivery");
-    setMessage("");
-    const res = await fetch("/api/delivery/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId,
-        goal: goal.trim(),
-        sprintName: sprintName.trim() || undefined,
-        notes: notes.trim() || undefined,
-        selectedPaths: selectedPathsText
-          .split(/\r?\n|,/)
-          .map((item) => item.trim())
-          .filter(Boolean)
-      })
-    });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.runId) {
-      setBusy("");
-      setMessage(payload.error ?? "Failed to start the first delivery session.");
-      return;
-    }
-    const runId = String(payload.runId);
-    const sessionRes = await fetch(`/api/delivery/${encodeURIComponent(runId)}?workspace=${encodeURIComponent(workspaceId)}`, {
-      cache: "no-store"
-    });
-    const sessionPayload = sessionRes.ok ? (await sessionRes.json()) as DeliverySessionPayload : null;
-    setBusy("");
-    setCreatedRunId(runId);
-    setCreatedSession(sessionPayload);
-    setStep(6);
-    pushToast({
-      tone: "success",
-      title: "Delivery session created",
-      message: runId
-    });
   };
 
   const complete = (destination?: string) => {
     localStorage.setItem(ONBOARDED_KEY, "1");
     localStorage.removeItem("orchestrum.onboarding.skipped");
     setOnboardingSkipped(false);
-    if (workspaceId) {
-      setSelectedWorkspaceId(workspaceId);
-    }
+    if (workspaceId) setSelectedWorkspaceId(workspaceId);
     setOpen(false);
-    if (destination) {
-      router.push(destination);
-    }
+    if (destination) router.push(destination);
   };
 
   const skip = () => {
@@ -276,23 +157,19 @@ export function Onboarding() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/92 p-6">
-      <div className="w-full max-w-5xl rounded-3xl border border-slate-800 bg-slate-950/98 p-8 shadow-2xl shadow-slate-950/40">
+      <div className="w-full max-w-4xl rounded-3xl border border-slate-800 bg-slate-950/98 p-8 shadow-2xl shadow-slate-950/40">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h2 className="text-2xl font-semibold text-white">Orchestrum Delivery Setup</h2>
-            <p className="mt-1 text-sm text-slate-400">
-              Set up a workspace, confirm delivery roles, and launch the first work-packet session.
-            </p>
+            <h2 className="text-2xl font-semibold text-white">Orchestrum Mission Setup</h2>
+            <p className="mt-1 text-sm text-slate-400">Set up a workspace, configure a provider, and move into workspace-scoped mission execution.</p>
           </div>
-          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-            Step {step} / {stepCount}
-          </div>
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Step {step} / 3</div>
         </div>
 
         <div className="mt-6 h-2 rounded-full bg-slate-900">
           <div
             className="h-2 rounded-full bg-gradient-to-r from-cyan-400 via-emerald-400 to-amber-300 transition-all"
-            style={{ width: `${(step / stepCount) * 100}%` }}
+            style={{ width: `${(step / 3) * 100}%` }}
           />
         </div>
 
@@ -308,6 +185,7 @@ export function Onboarding() {
                     onClick={() => {
                       setWorkspaceId(workspace.id);
                       setSelectedWorkspaceId(workspace.id);
+                      setStep(2);
                     }}
                     className={`w-full rounded-xl border px-4 py-3 text-left ${
                       workspace.id === workspaceId ? "border-cyan-400/30 bg-cyan-400/10" : "border-slate-800 bg-slate-950/60"
@@ -322,7 +200,7 @@ export function Onboarding() {
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
               <div className="text-sm font-semibold text-white">Add Workspace</div>
-              <div className="mt-1 text-xs text-slate-500">Choose the repo you want Orchestrum to compile into packets.</div>
+              <div className="mt-1 text-xs text-slate-500">Choose the repository that will hold agents, org metadata, and mission runs.</div>
               <div className="mt-4 space-y-3">
                 <input
                   value={workspacePath}
@@ -336,48 +214,61 @@ export function Onboarding() {
                   placeholder="Optional display name"
                   className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
                 />
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    onClick={() => void addWorkspace()}
-                    disabled={busy === "workspace"}
-                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-amber-200 disabled:opacity-50"
-                  >
-                    {busy === "workspace" ? "Adding..." : "Add Workspace"}
-                  </button>
-                  {workspaceId && (
-                    <button
-                      onClick={() => setStep(2)}
-                      className="rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-cyan-200"
-                    >
-                      Continue
-                    </button>
-                  )}
-                </div>
+                <button
+                  onClick={() => void addWorkspace()}
+                  disabled={busy === "workspace"}
+                  className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-amber-200 disabled:opacity-50"
+                >
+                  {busy === "workspace" ? "Adding..." : "Add Workspace"}
+                </button>
               </div>
             </div>
           </section>
         )}
 
         {step === 2 && (
-          <section className="mt-6 grid gap-5 lg:grid-cols-[0.8fr_1.2fr]">
+          <section className="mt-6 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">Provider Check</div>
-              <div className="mt-2 text-xs text-slate-500">
-                Delivery sessions can work in manual handoff mode without a provider, but model-backed flows need a configured key.
-              </div>
-              <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${hasOpenAiKey ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200" : "border-amber-400/20 bg-amber-400/10 text-amber-200"}`}>
-                {hasOpenAiKey ? "OPENAI_API_KEY is already configured." : "No provider key detected yet."}
+              <div className="text-sm font-semibold text-white">CLI-First Provider Status</div>
+              <div className="mt-4 space-y-3 text-sm">
+                {providerDiscovery.filter((record) => ["codex", "claude", "cursor", "openai"].includes(record.vendor)).map((record) => {
+                  const transport = preferredTransport(record);
+                  const ready = Boolean(transport?.configured);
+                  return (
+                    <div
+                      key={record.vendor}
+                      className={`rounded-xl border px-4 py-3 ${ready ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200" : "border-slate-800 bg-slate-950/60 text-slate-400"}`}
+                    >
+                      {vendorLabel(record.vendor)}: {transport ? `${transportLabel(transport.transport)} ${ready ? "ready" : "available"}` : "not detected"}
+                    </div>
+                  );
+                })}
+                <div className={`rounded-xl border px-4 py-3 ${hasOpenAiKey ? "border-sky-400/20 bg-sky-400/10 text-sky-200" : "border-slate-800 bg-slate-950/60 text-slate-400"}`}>
+                  OpenAI API fallback: {hasOpenAiKey ? "configured" : "optional"}
+                </div>
+                <div className={`rounded-xl border px-4 py-3 ${hasClaudeKey ? "border-sky-400/20 bg-sky-400/10 text-sky-200" : "border-slate-800 bg-slate-950/60 text-slate-400"}`}>
+                  Claude API fallback: {hasClaudeKey ? "configured" : "optional"}
+                </div>
               </div>
             </div>
 
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">Configure OPENAI_API_KEY</div>
+              <div className="text-sm font-semibold text-white">Optional API Fallback</div>
+              <div className="mt-1 text-xs text-slate-500">Only needed for API transport or when you want a fallback if local CLI auth is missing.</div>
               <div className="mt-4 space-y-3">
+                <select
+                  value={provider}
+                  onChange={(event) => setProvider(event.target.value as "openai" | "claude")}
+                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="claude">Claude</option>
+                </select>
                 <input
                   value={apiKey}
                   onChange={(event) => setApiKey(event.target.value)}
                   type="password"
-                  placeholder="sk-..."
+                  placeholder={provider === "claude" ? "sk-ant-..." : "sk-..."}
                   className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
                 />
                 <input
@@ -393,13 +284,13 @@ export function Onboarding() {
                     disabled={busy === "provider"}
                     className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-amber-200 disabled:opacity-50"
                   >
-                    {busy === "provider" ? "Saving..." : "Save Provider"}
+                    {busy === "provider" ? "Saving..." : "Save Fallback"}
                   </button>
                   <button
                     onClick={() => setStep(3)}
                     className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
                   >
-                    Continue Without Provider
+                    Continue
                   </button>
                 </div>
               </div>
@@ -408,274 +299,81 @@ export function Onboarding() {
         )}
 
         {step === 3 && (
-          <section className="mt-6 grid gap-5 lg:grid-cols-[1.05fr_0.95fr]">
+          <section className="mt-6 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">Capability Discovery</div>
-              <div className="mt-1 text-xs text-slate-500">This machine is scanned for repo scripts, shells, IDE entry points, and browser handoff capability.</div>
-              <div className="mt-4 grid gap-2">
-                {capabilities.map((capability) => (
-                  <div key={capability.id} className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-white">{capability.label}</div>
-                      <span className={`text-[10px] uppercase tracking-[0.18em] ${capability.available ? "text-emerald-300" : "text-slate-500"}`}>
-                        {capability.available ? "available" : "missing"}
-                      </span>
-                    </div>
-                    {capability.details && <div className="mt-1 text-[11px] text-slate-500">{capability.details}</div>}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">Suggested Role Bindings</div>
-              <div className="mt-1 text-xs text-slate-500">These are suggestions only. You will confirm them in the next step.</div>
-              <div className="mt-4 space-y-2">
-                {suggestedBindings.map((binding) => (
-                  <div key={binding.roleId} className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-white">{binding.roleId}</div>
-                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-400">{binding.mode}</div>
-                    </div>
-                    <div className="mt-1 text-xs text-slate-300">{toolLabel(binding.target)}</div>
-                    {binding.reason && <div className="mt-2 text-[11px] text-slate-500">{binding.reason}</div>}
-                  </div>
-                ))}
-              </div>
-              <div className="mt-5 flex justify-end">
-                <button
-                  onClick={() => setStep(4)}
-                  disabled={!presetDraft}
-                  className="rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-cyan-200 disabled:opacity-50"
-                >
-                  Confirm Roles
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {step === 4 && presetDraft && (
-          <section className="mt-6 space-y-5">
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="grid gap-4 lg:grid-cols-[0.7fr_1.3fr]">
-                <div>
-                  <div className="text-sm font-semibold text-white">Team Preset</div>
-                  <div className="mt-1 text-xs text-slate-500">Confirm repo-scoped roles and their primary handoff targets. No JSON editing required here.</div>
+              <div className="text-sm font-semibold text-white">Workspace Ready</div>
+              <div className="mt-4 space-y-3 text-sm text-slate-300">
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                  Workspace: <span className="text-white">{workspaceId || "not selected"}</span>
                 </div>
-                <div>
-                  <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Preset Name</label>
-                  <input
-                    value={presetDraft.name}
-                    onChange={(event) => setPresetDraft((prev) => prev ? { ...prev, name: event.target.value } : prev)}
-                    className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                  />
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                  Agents: <span className="text-white">{agentCount}</span>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                  Providers: <span className="text-white">{
+                    [
+                      ...providerDiscovery
+                        .map((record) => preferredTransport(record)?.configured ? vendorLabel(record.vendor) : null)
+                        .filter(Boolean),
+                      hasOpenAiKey ? "OpenAI API" : null,
+                      hasClaudeKey ? "Claude API" : null
+                    ].filter(Boolean).join(", ") || "manual/local only"
+                  }</span>
                 </div>
               </div>
             </div>
 
-            <div className="grid gap-4 lg:grid-cols-2">
-              {presetDraft.roles.map((role) => {
-                const options = targetOptionsForMode(role.mode, capabilities);
-                return (
-                  <div key={role.id} className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-semibold text-white">{role.label}</div>
-                        <div className="mt-1 text-xs text-slate-500">{role.description || role.id}</div>
-                      </div>
-                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{role.id}</div>
-                    </div>
-                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                      <div>
-                        <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Mode</label>
-                        <select
-                          value={role.mode}
-                          onChange={(event) => {
-                            const nextMode = event.target.value as TeamPresetDraft["roles"][number]["mode"];
-                            setPresetDraft((prev) => {
-                              if (!prev) return prev;
-                              return {
-                                ...prev,
-                                roles: prev.roles.map((item) => item.id === role.id ? {
-                                  ...item,
-                                  mode: nextMode,
-                                  target: targetOptionsForMode(nextMode, capabilities)[0] ?? item.target
-                                } : item)
-                              };
-                            });
-                          }}
-                          className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                        >
-                          <option value="manual_browser">manual_browser</option>
-                          <option value="manual_ide">manual_ide</option>
-                          <option value="auto_cli">auto_cli</option>
-                          <option value="disabled">disabled</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Primary Target</label>
-                        <select
-                          value={role.target}
-                          onChange={(event) => {
-                            const nextTarget = event.target.value;
-                            setPresetDraft((prev) => prev ? {
-                              ...prev,
-                              roles: prev.roles.map((item) => item.id === role.id ? { ...item, target: nextTarget } : item)
-                            } : prev);
-                          }}
-                          className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                        >
-                          {options.map((option) => (
-                            <option key={option} value={option}>{toolLabel(option)}</option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="flex flex-wrap justify-between gap-3">
-              <button
-                onClick={() => setStep(3)}
-                className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
-              >
-                Back
-              </button>
-              <button
-                onClick={() => void (async () => {
-                  const ok = await savePreset();
-                  if (ok) setStep(5);
-                })()}
-                disabled={busy === "preset"}
-                className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-emerald-200 disabled:opacity-50"
-              >
-                {busy === "preset" ? "Saving..." : "Save and Continue"}
-              </button>
-            </div>
-          </section>
-        )}
-
-        {step === 5 && (
-          <section className="mt-6 grid gap-5 lg:grid-cols-[0.85fr_1.15fr]">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">First Delivery Session</div>
-              <div className="mt-1 text-xs text-slate-500">This creates the first sprint-style session and generates work packets for the confirmed team preset.</div>
+              <div className="text-sm font-semibold text-white">Next Steps</div>
               <div className="mt-4 space-y-3">
-                <input
-                  value={goal}
-                  onChange={(event) => setGoal(event.target.value)}
-                  placeholder="Sprint 10"
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                />
-                <input
-                  value={sprintName}
-                  onChange={(event) => setSprintName(event.target.value)}
-                  placeholder="Optional sprint label"
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-200"
-                />
-                <textarea
-                  value={notes}
-                  onChange={(event) => setNotes(event.target.value)}
-                  rows={5}
-                  placeholder="Context, tickets, or repo notes..."
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 text-sm text-slate-200"
-                />
-                <textarea
-                  value={selectedPathsText}
-                  onChange={(event) => setSelectedPathsText(event.target.value)}
-                  rows={4}
-                  placeholder="src/app/page.tsx&#10;packages/core/src/delivery"
-                  className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 text-sm text-slate-200"
-                />
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">What happens next</div>
-              <div className="mt-4 space-y-3 text-sm text-slate-300">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">1. Orchestrum compiles repo context into role-specific work packets.</div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">2. Manual tools like ChatGPT, Cursor, Codex, Copilot, or Claude receive exported packets.</div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">3. Imported responses turn into findings, remediation tasks, and evidence on the same delivery session.</div>
-              </div>
-              <div className="mt-5 flex flex-wrap justify-between gap-3">
                 <button
-                  onClick={() => setStep(4)}
-                  className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
+                  onClick={() => complete("/agents")}
+                  className="w-full rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-left"
                 >
-                  Back
+                  <div className="text-sm font-medium text-white">Configure workspace agents</div>
+                  <div className="mt-1 text-xs text-slate-400">Create PM, dev, audit, and optional security roles under workspace-scoped metadata.</div>
                 </button>
                 <button
-                  onClick={() => void createFirstDelivery()}
-                  disabled={busy === "delivery"}
-                  className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-emerald-200 disabled:opacity-50"
+                  onClick={() => complete("/templates")}
+                  className="w-full rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-left"
                 >
-                  {busy === "delivery" ? "Creating..." : "Create First Delivery Session"}
+                  <div className="text-sm font-medium text-white">Browse mission templates</div>
+                  <div className="mt-1 text-xs text-slate-400">Start from `feature-dev`, `delivery-sprint`, or another built-in mission graph.</div>
+                </button>
+                <button
+                  onClick={() => {
+                    complete();
+                    openRunConfig({ workspaceId, missionTemplateId: "feature-dev", runKind: "mission" });
+                  }}
+                  disabled={agentCount === 0}
+                  className="w-full rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-left disabled:opacity-50"
+                >
+                  <div className="text-sm font-medium text-white">Launch first mission</div>
+                  <div className="mt-1 text-xs text-slate-400">Requires at least one configured workspace agent.</div>
                 </button>
               </div>
             </div>
           </section>
         )}
 
-        {step === 6 && (
-          <section className="mt-6 grid gap-5 lg:grid-cols-[0.85fr_1.15fr]">
-            <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-5">
-              <div className="text-sm font-semibold text-emerald-100">Delivery session ready</div>
-              <div className="mt-2 text-sm text-emerald-50">{createdRunId || "Your first session is ready."}</div>
-              {createdSession?.summary && <div className="mt-2 text-xs text-emerald-100/80">{createdSession.summary}</div>}
-              {firstPacket && (
-                <div className="mt-4 rounded-xl border border-emerald-300/20 bg-slate-950/30 px-4 py-3 text-sm text-slate-100">
-                  First packet: <span className="font-medium">{firstPacket.roleId}</span> via <span className="font-medium">{toolLabel(firstPacket.target)}</span>
-                </div>
-              )}
-            </div>
+        {message && <div className="mt-6 rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">{message}</div>}
 
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-5">
-              <div className="text-sm font-semibold text-white">Next actions</div>
-              <div className="mt-4 space-y-3 text-sm text-slate-300">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">Open the session detail page and export the first packet for its target tool.</div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">Paste the response back into Orchestrum to generate findings and remediation tasks.</div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">Use Delivery as the control center and Metrics/Diagnostics for session health.</div>
-              </div>
-              <div className="mt-5 flex flex-wrap gap-2">
-                {createdRunId && (
-                  <button
-                    onClick={() => complete(`/runs/${encodeURIComponent(createdRunId)}?workspace=${encodeURIComponent(workspaceId)}`)}
-                    className="rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-cyan-200"
-                  >
-                    Open Session
-                  </button>
-                )}
-                <button
-                  onClick={() => complete("/delivery")}
-                  className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-emerald-200"
-                >
-                  Open Delivery
-                </button>
-                <button
-                  onClick={() => complete()}
-                  className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
-                >
-                  Finish
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {message && <div className="mt-5 rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">{message}</div>}
-
-        <div className="mt-6 flex items-center justify-between gap-3">
+        <div className="mt-8 flex items-center justify-between">
           <button
             onClick={skip}
             className="text-xs uppercase tracking-[0.18em] text-slate-500 hover:text-slate-300"
           >
             Skip for now
           </button>
-          <div className="text-xs text-slate-500">
-            Workspace: {workspaces.find((workspace) => workspace.id === workspaceId)?.name || workspaceId || "not selected"}
+          <div className="flex gap-2">
+            {step > 1 && (
+              <button
+                onClick={() => setStep((prev) => Math.max(1, prev - 1))}
+                className="rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs uppercase tracking-[0.18em] text-slate-300"
+              >
+                Back
+              </button>
+            )}
           </div>
         </div>
       </div>

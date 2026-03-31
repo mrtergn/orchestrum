@@ -23,7 +23,7 @@ type StartResponse = {
   error?: string;
 };
 
-type RunKind = "workflow" | "qa" | "benchmark" | "canary" | "delivery";
+type RunKind = "mission" | "qa" | "benchmark" | "canary";
 
 export function RunConfigModal() {
   const router = useRouter();
@@ -41,12 +41,9 @@ export function RunConfigModal() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
-  const [runKind, setRunKind] = useState<RunKind>("workflow");
-  const [workflowId, setWorkflowId] = useState("feature-dev.yaml");
+  const [runKind, setRunKind] = useState<RunKind>("mission");
+  const [missionTemplateId, setMissionTemplateId] = useState("feature-dev");
   const [goal, setGoal] = useState("");
-  const [sprintName, setSprintName] = useState("");
-  const [notes, setNotes] = useState("");
-  const [selectedPathsText, setSelectedPathsText] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [targetPath, setTargetPath] = useState("");
   const [iterations, setIterations] = useState("3");
@@ -59,8 +56,7 @@ export function RunConfigModal() {
   const [auditModel, setAuditModel] = useState("");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
-  const isWorkflowRun = runKind === "workflow";
-  const isDeliveryRun = runKind === "delivery";
+  const isMissionRun = runKind === "mission";
   const isBrowserRun = runKind === "qa" || runKind === "benchmark" || runKind === "canary";
 
   useEffect(() => {
@@ -81,16 +77,13 @@ export function RunConfigModal() {
   useEffect(() => {
     if (!runConfigOpen) return;
     const seedWorkspace = runConfigSeed?.workspaceId ?? selectedWorkspaceId;
-    const seedWorkflow = runConfigSeed?.workflowId ?? lastTemplate ?? "feature-dev.yaml";
+    const seedTemplate = runConfigSeed?.missionTemplateId ?? lastTemplate ?? "feature-dev";
     const seedGoal = runConfigSeed?.userGoal ?? "";
-    const seedKind = runConfigSeed?.runKind ?? "workflow";
+    const seedKind = runConfigSeed?.runKind ?? "mission";
     setWorkspaceId(seedWorkspace || "");
     setRunKind(seedKind);
-    setWorkflowId(seedWorkflow);
+    setMissionTemplateId(seedTemplate);
     setGoal(seedGoal);
-    setSprintName(runConfigSeed?.sprintName ?? "");
-    setNotes(runConfigSeed?.notes ?? "");
-    setSelectedPathsText((runConfigSeed?.selectedPaths ?? []).join("\n"));
     setBaseUrl(runConfigSeed?.baseUrl ?? "");
     setTargetPath(runConfigSeed?.targetPath ?? "");
     setIterations("3");
@@ -106,7 +99,7 @@ export function RunConfigModal() {
 
   const templateOptions = useMemo(() => {
     if (templates.length === 0) {
-      return [{ name: "feature-dev.yaml", title: "Feature Dev Loop", description: "" }];
+      return [{ name: "feature-dev", title: "Feature Dev Loop", description: "" }];
     }
     return templates;
   }, [templates]);
@@ -119,11 +112,11 @@ export function RunConfigModal() {
       setError("Select a workspace.");
       return;
     }
-    if (isWorkflowRun && !workflowId) {
-      setError("Select a workflow.");
+    if (isMissionRun && !missionTemplateId) {
+      setError("Select a mission template.");
       return;
     }
-    if ((isWorkflowRun || isDeliveryRun) && !goal.trim()) {
+    if (isMissionRun && !goal.trim()) {
       setError("Enter a goal.");
       return;
     }
@@ -141,15 +134,9 @@ export function RunConfigModal() {
       : undefined;
     const parsedIterations = Number(iterations);
     const parsedIntervalMs = Number(intervalMs);
-    const selectedPaths = selectedPathsText
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const endpoint = isWorkflowRun
-      ? "/api/runs/start"
-      : isDeliveryRun
-        ? "/api/delivery/start"
-        : runKind === "qa"
+    const endpoint = isMissionRun
+      ? "/api/missions/start"
+      : runKind === "qa"
         ? "/api/qa/run"
         : runKind === "benchmark"
           ? "/api/qa/benchmark"
@@ -160,9 +147,9 @@ export function RunConfigModal() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         workspaceId,
-        ...(isWorkflowRun
+        ...(isMissionRun
           ? {
-              workflowId,
+              missionTemplateId,
               userGoal: goal.trim(),
               options: {
                 sandbox: sandboxEnabled,
@@ -170,13 +157,6 @@ export function RunConfigModal() {
                 modelOverrides
               }
             }
-          : isDeliveryRun
-            ? {
-                goal: goal.trim(),
-                sprintName: sprintName.trim() || undefined,
-                notes: notes.trim() || undefined,
-                selectedPaths
-              }
           : {
               baseUrl: baseUrl.trim(),
               targetPath: targetPath.trim() || undefined,
@@ -196,12 +176,12 @@ export function RunConfigModal() {
       return;
     }
     setSelectedWorkspaceId(workspaceId);
-    if (runKind === "workflow") {
-      setLastTemplate(workflowId);
+    if (runKind === "mission") {
+      setLastTemplate(missionTemplateId);
     }
     pushToast({
       tone: "success",
-      title: `${runKind === "workflow" ? "Run" : runKind === "delivery" ? "Delivery session" : runKind} started`,
+      title: `${runKind === "mission" ? "Mission" : runKind} started`,
       message: `Run ${payload.runId} started.`,
       actionLabel: "Open Run",
       actionHref: `/runs/${payload.runId}?workspace=${encodeURIComponent(workspaceId)}`
@@ -216,7 +196,7 @@ export function RunConfigModal() {
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-lg font-semibold text-white">New Run</h3>
-            <p className="text-xs text-slate-400">Configure and launch a workflow from the UI.</p>
+            <p className="text-xs text-slate-400">Configure and launch a mission from the UI.</p>
           </div>
           <button
             onClick={closeRunConfig}
@@ -250,20 +230,19 @@ export function RunConfigModal() {
               onChange={(event) => setRunKind(event.target.value as RunKind)}
               className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
             >
-              <option value="workflow">Workflow</option>
-              <option value="delivery">Delivery / Sprint Run</option>
+              <option value="mission">Mission</option>
               <option value="qa">Browser QA</option>
               <option value="benchmark">Benchmark</option>
               <option value="canary">Canary</option>
             </select>
           </div>
 
-          {isWorkflowRun ? (
+          {isMissionRun ? (
             <div>
-              <label className="text-xs text-slate-400">Workflow</label>
+              <label className="text-xs text-slate-400">Mission Template</label>
               <select
-                value={workflowId}
-                onChange={(event) => setWorkflowId(event.target.value)}
+                value={missionTemplateId}
+                onChange={(event) => setMissionTemplateId(event.target.value)}
                 className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
               >
                 {templateOptions.map((template) => (
@@ -296,13 +275,13 @@ export function RunConfigModal() {
             </div>
           ) : null}
 
-          {isWorkflowRun || isDeliveryRun ? (
+          {isMissionRun ? (
             <div>
-              <label className="text-xs text-slate-400">{isDeliveryRun ? "Delivery Goal" : "Goal / Task"}</label>
+              <label className="text-xs text-slate-400">Goal / Task</label>
               <textarea
                 value={goal}
                 onChange={(event) => setGoal(event.target.value)}
-                placeholder="Describe what this run should accomplish."
+                placeholder="Describe what this mission should accomplish."
                 className="mt-2 h-28 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
               />
             </div>
@@ -329,41 +308,7 @@ export function RunConfigModal() {
             </div>
           ) : null}
 
-          {isDeliveryRun && (
-            <div className="grid gap-3 md:grid-cols-2">
-              <div>
-                <label className="text-xs text-slate-400">Sprint / Label</label>
-                <input
-                  value={sprintName}
-                  onChange={(event) => setSprintName(event.target.value)}
-                  placeholder="Sprint 10"
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400">Relevant Paths</label>
-                <textarea
-                  value={selectedPathsText}
-                  onChange={(event) => setSelectedPathsText(event.target.value)}
-                  rows={3}
-                  placeholder="packages/service/src/server.ts&#10;apps/ui/src/components/RunConfigModal.tsx"
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-slate-400">Notes</label>
-                <textarea
-                  value={notes}
-                  onChange={(event) => setNotes(event.target.value)}
-                  rows={4}
-                  placeholder="Constraints, open questions, links, or current branch notes."
-                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
-                />
-              </div>
-            </div>
-          )}
-
-          {isWorkflowRun && (
+          {isMissionRun && (
             <div className="rounded-xl border border-slate-800 bg-slate-900/20 p-4">
             <button
               onClick={() => setAdvancedOpen((prev) => !prev)}
@@ -432,7 +377,7 @@ export function RunConfigModal() {
             disabled={starting}
             className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs uppercase tracking-[0.3em] text-amber-200 disabled:opacity-50"
           >
-            {starting ? "Starting..." : runKind === "workflow" ? "Start Run" : runKind === "delivery" ? "Start Delivery" : `Start ${runKind}`}
+            {starting ? "Starting..." : runKind === "mission" ? "Start Mission" : `Start ${runKind}`}
           </button>
         </div>
       </div>

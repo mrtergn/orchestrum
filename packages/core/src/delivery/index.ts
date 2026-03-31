@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
 import { ensureDir, appendLine, readJsonIfExists, safeRunId, writeJson, writeText } from "../runner/fs.js";
+import { lookupBinary, runBinary } from "../runner/bin.js";
 import { loadConfig } from "../runner/config.js";
 import { formatLearningsForContext, loadRelevantLearnings } from "../runner/learnings.js";
 import { prepareWorktreeContext } from "../runner/worktrees.js";
@@ -1836,48 +1836,11 @@ async function loadSelectedPathNotes(repoPath: string, selectedPaths: string[]):
 
 async function getCurrentBranch(repoPath: string): Promise<string | null> {
   try {
-    const result = await runBinary("git", ["rev-parse", "--abbrev-ref", "HEAD"], repoPath);
+    const result = await runBinary("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoPath });
     return result.stdout.trim() || null;
   } catch {
     return null;
   }
-}
-
-async function lookupBinary(name: string): Promise<{ available: boolean; path?: string }> {
-  const command = process.platform === "win32" ? "where" : "which";
-  try {
-    const result = await runBinary(command, [name]);
-    const resolved = result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    return resolved ? { available: true, path: resolved } : { available: false };
-  } catch {
-    return { available: false };
-  }
-}
-
-function runBinary(command: string, args: string[], cwd?: string): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(stderr.trim() || `${command} ${args.join(" ")} failed`));
-      }
-    });
-  });
 }
 
 function createScaffoldTeamPreset(capabilities: MachineCapability[]): TeamPreset {

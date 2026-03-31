@@ -16,14 +16,11 @@ export type AppToast = {
 
 export type RunConfigSeed = {
   workspaceId?: string;
-  workflowId?: string;
+  missionTemplateId?: string;
   userGoal?: string;
-  runKind?: "workflow" | "qa" | "benchmark" | "canary" | "delivery";
+  runKind?: "mission" | "qa" | "benchmark" | "canary";
   baseUrl?: string;
   targetPath?: string;
-  sprintName?: string;
-  notes?: string;
-  selectedPaths?: string[];
 };
 
 type RunFiltersState = {
@@ -72,7 +69,7 @@ const AppUiContext = createContext<AppUiContextValue | null>(null);
 
 export function AppUiProvider({ children }: { children: React.ReactNode }) {
   const [selectedWorkspaceId, setSelectedWorkspaceIdState] = useState("");
-  const [lastTemplate, setLastTemplateState] = useState("feature-dev.yaml");
+  const [lastTemplate, setLastTemplateState] = useState("feature-dev");
   const [runFilters, setRunFiltersState] = useState<RunFiltersState>(DEFAULT_FILTERS);
   const [runConfigOpen, setRunConfigOpen] = useState(false);
   const [runConfigSeed, setRunConfigSeed] = useState<RunConfigSeed | null>(null);
@@ -82,7 +79,7 @@ export function AppUiProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const workspace = localStorage.getItem(STORAGE_KEYS.workspace) ?? "";
-    const template = localStorage.getItem(STORAGE_KEYS.lastTemplate) ?? "feature-dev.yaml";
+    const template = localStorage.getItem(STORAGE_KEYS.lastTemplate) ?? "feature-dev";
     const savedFilters = localStorage.getItem(STORAGE_KEYS.runFilters);
     const skipped = localStorage.getItem(STORAGE_KEYS.onboardingSkipped) === "1";
     setSelectedWorkspaceIdState(workspace);

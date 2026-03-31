@@ -11,6 +11,16 @@ type Agent = {
   role: string;
   status: { state: string; currentTaskId?: string; lastHeartbeatAt: string };
 };
+type Mission = {
+  runId: string;
+  workspaceId: string;
+  templateId: string;
+  title: string;
+  goal: string;
+  status: string;
+  updatedAt: string;
+  activeNodeIds: string[];
+};
 type Task = { id: string; title: string; status: string; assignedToAgentId: string };
 type Message = { id: string; fromAgentId: string; toAgentId: string; topic: string; ts: string };
 type OrgNode = { id: string; agentId: string; parentId?: string };
@@ -18,6 +28,7 @@ type OrgNode = { id: string; agentId: string; parentId?: string };
 type Snapshot = {
   agents: Agent[];
   org: OrgNode[];
+  missions: Mission[];
   tasks: Task[];
   messages: Message[];
   queue: { queued: number; running: number };
@@ -31,7 +42,7 @@ function stateColor(state: string) {
 
 export default function MissionPage() {
   const { selectedWorkspaceId, openRunConfig } = useAppUi();
-  const [snapshot, setSnapshot] = useState<Snapshot>({ agents: [], org: [], tasks: [], messages: [], queue: { queued: 0, running: 0 } });
+  const [snapshot, setSnapshot] = useState<Snapshot>({ agents: [], org: [], missions: [], tasks: [], messages: [], queue: { queued: 0, running: 0 } });
   const [events, setEvents] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
 
@@ -44,6 +55,7 @@ export default function MissionPage() {
         setSnapshot({
           agents: (payload.agents as Agent[]) ?? [],
           org: (payload.org as OrgNode[]) ?? [],
+          missions: (payload.missions as Mission[]) ?? [],
           tasks: (payload.tasks as Task[]) ?? [],
           messages: (payload.messages as Message[]) ?? [],
           queue: (payload.queue as Snapshot["queue"]) ?? { queued: 0, running: 0 }
@@ -84,9 +96,13 @@ export default function MissionPage() {
 
   const queuedTasks = useMemo(() => snapshot.tasks.filter((task) => normalizeTaskStatus(task.status) === "queued"), [snapshot.tasks]);
   const runningTasks = useMemo(() => snapshot.tasks.filter((task) => normalizeTaskStatus(task.status) === "running"), [snapshot.tasks]);
+  const activeMissions = useMemo(
+    () => snapshot.missions.filter((mission) => mission.status === "running").length,
+    [snapshot.missions]
+  );
   const agentNameById = useMemo(() => new Map(snapshot.agents.map((agent) => [agent.id, agent.name])), [snapshot.agents]);
 
-  const hasData = snapshot.agents.length > 0;
+  const hasData = snapshot.agents.length > 0 || snapshot.missions.length > 0;
 
   return (
     <main className="space-y-6">
@@ -98,10 +114,10 @@ export default function MissionPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "benchmark" })}
+            onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "mission" })}
             className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-cyan-200"
           >
-            Launch Benchmark
+            Launch Mission
           </button>
           <div className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-400"}`} />
           <span className={`text-[10px] uppercase tracking-[0.2em] ${connected ? "text-emerald-300" : "text-rose-300"}`}>
@@ -115,13 +131,13 @@ export default function MissionPage() {
         <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-500/20 to-cyan-500/5 text-2xl text-cyan-400">◎</div>
           <h3 className="mt-3 text-base font-semibold text-white">Nothing running yet</h3>
-          <p className="mt-1 text-sm text-slate-400">Create agents and assign tasks to see the live feed populate.</p>
+          <p className="mt-1 text-sm text-slate-400">Create workspace agents and start a mission to see the live feed populate.</p>
           <div className="mt-4 flex justify-center gap-3">
             <Link href="/agents" className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-amber-200 hover:bg-amber-400/20 transition-colors">
               Create Agents
             </Link>
-            <Link href="/tasks" className="rounded-lg border border-slate-700 px-4 py-2 text-xs uppercase tracking-[0.2em] text-slate-300 hover:bg-slate-800/40 transition-colors">
-              Assign Task
+            <Link href="/templates" className="rounded-lg border border-slate-700 px-4 py-2 text-xs uppercase tracking-[0.2em] text-slate-300 hover:bg-slate-800/40 transition-colors">
+              Browse Templates
             </Link>
           </div>
         </section>
@@ -140,8 +156,8 @@ export default function MissionPage() {
           <div className="rounded-xl border border-amber-500/20 bg-slate-950/40 p-3 flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/10 text-amber-400 text-sm font-bold">▶</div>
             <div>
-              <div className="text-lg font-bold text-amber-300">{runningTasks.length}</div>
-              <div className="text-[9px] uppercase tracking-wider text-slate-500">Running</div>
+              <div className="text-lg font-bold text-amber-300">{activeMissions}</div>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500">Missions</div>
             </div>
           </div>
           <div className="rounded-xl border border-sky-500/20 bg-slate-950/40 p-3 flex items-center gap-3">
@@ -163,7 +179,27 @@ export default function MissionPage() {
 
       {/* Main grid */}
       {hasData && (
-        <section className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr]">
+        <section className="grid gap-4 xl:grid-cols-4">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+            <div className="mb-3 text-xs font-medium uppercase tracking-[0.15em] text-slate-500">Active Missions</div>
+            <div className="space-y-2">
+              {snapshot.missions.slice(0, 8).map((mission) => (
+                <Link
+                  key={`${mission.workspaceId}:${mission.runId}`}
+                  href={`/runs/${mission.runId}?workspace=${encodeURIComponent(mission.workspaceId)}`}
+                  className="block rounded-lg border border-slate-800/60 bg-slate-900/30 px-3 py-2 transition hover:border-slate-700"
+                >
+                  <div className="text-xs font-medium text-white">{mission.title}</div>
+                  <div className="mt-1 text-[10px] text-slate-500">{mission.templateId} · {mission.status}</div>
+                  <div className="mt-1 text-[10px] text-slate-600">{mission.activeNodeIds.join(", ") || "idle"}</div>
+                </Link>
+              ))}
+              {snapshot.missions.length === 0 && (
+                <div className="py-4 text-center text-xs text-slate-600">No mission activity yet</div>
+              )}
+            </div>
+          </div>
+
           {/* Agents */}
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
             <div className="mb-3 text-xs font-medium uppercase tracking-[0.15em] text-slate-500">Agents</div>
@@ -183,9 +219,9 @@ export default function MissionPage() {
             </div>
           </div>
 
-          {/* Running tasks */}
+          {/* Runtime */}
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
-            <div className="mb-3 text-xs font-medium uppercase tracking-[0.15em] text-slate-500">Active Tasks</div>
+            <div className="mb-3 text-xs font-medium uppercase tracking-[0.15em] text-slate-500">Runtime</div>
             <div className="space-y-2">
               {runningTasks.map((task) => (
                 <div key={task.id} className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2">

@@ -9,6 +9,7 @@ import "./learnings.test.ts";
 import "./docs.test.ts";
 import "./state.test.ts";
 import "./delivery.test.ts";
+import "./mission.test.ts";
 import "./updates.test.ts";
 import "./licensing.test.ts";
 import "./tailer.test.ts";

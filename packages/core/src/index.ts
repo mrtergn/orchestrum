@@ -1,10 +1,29 @@
 export { runWorkflow, runWorkflowDetailed, resumeWorkflow, cancelRun, replayRun } from "./runner/run.js";
 export { loadWorkflow } from "./runner/workflow.js";
 export { registerAgent } from "./agents/index.js";
+export {
+  runMissionDetailed,
+  resumeMissionRun,
+  importMissionNodeInput,
+  loadMissionRun,
+  missionGraphToStepStates
+} from "./mission/runtime.js";
+export { loadMissionTemplate, listMissionTemplates } from "./mission/templates.js";
+export {
+  completeWithProvider,
+  defaultApiKeyRef,
+  defaultProviderForRole,
+  discoverMissionProviders,
+  listProviderProfiles,
+  normalizeCanonicalProvider,
+  normalizeMissionProvider,
+  normalizeProviderTransport
+} from "./mission/providers.js";
 export * from "./runner/types.js";
 export { normalizeUsage, resolvePricing, estimateCostUsd } from "./runner/cost.js";
 export type { LlmUsage, Pricing } from "./runner/cost.js";
 export { writeJson, writeText, ensureDir, appendLine } from "./runner/fs.js";
+export { runBinary, lookupBinary } from "./runner/bin.js";
 export { Logger } from "./runner/logger.js";
 export { readAppendedLines, readTailLines } from "./runner/tailer.js";
 export { recoverInterruptedRuns } from "./runner/recovery.js";
@@ -201,6 +220,8 @@ export {
   isAgentRuntimeBusy
 } from "./contracts/service.js";
 export type {
+  MissionGraphSummary,
+  MissionNodeSummary,
   TaskRuntimeStatus,
   AgentRuntimeState,
   WorkflowSummary,
@@ -231,6 +252,31 @@ export type {
   ReleaseReadiness,
   WorkspaceProfileShape
 } from "./contracts/service.js";
+export type {
+  CanonicalProvider,
+  ProviderVendor,
+  ProviderTransport,
+  ProviderEffort,
+  ProviderAuthConfig,
+  ProviderSpec as MissionProviderSpec,
+  ProviderCapabilitySummary,
+  ProviderProfile,
+  ProviderDiscoveryTransport,
+  ProviderDiscoveryRecord,
+  MissionAgent,
+  MissionTemplate,
+  MissionNodeTemplate,
+  MissionNodeStatus,
+  NodeExecutorKind,
+  NodeArtifactRef,
+  MissionApprovalGate,
+  MissionImportFinding,
+  MissionNode,
+  MissionGraph,
+  MissionRun,
+  NodeExecutorResult,
+  MissionRunResult
+} from "./mission/types.js";
 export { runTournament } from "./orchestration/tournament.js";
 export type { TournamentResult } from "./orchestration/tournament.js";
 export { evaluateWorkflow } from "./orchestration/evaluate.js";

@@ -5,22 +5,32 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import type express from "express";
+import {
+  completeWithProvider,
+  defaultProviderForRole,
+  normalizeMissionProvider,
+  loadWorkspaces,
+  findWorkspaceById,
+  runMissionDetailed,
+  resumeMissionRun,
+  importMissionNodeInput,
+  loadMissionRun,
+  type MissionAgent,
+  type MissionRun,
+  type MissionProviderSpec
+} from "@orchestrum/core";
 
 type AgentState = "idle" | "active" | "sleeping" | "error";
-type ProviderType = "openai" | "claude" | "ollama" | "local";
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 type TaskType = "spec" | "implement" | "audit" | "generic";
 
 type AgentRecord = {
   id: string;
+  workspaceId?: string;
   name: string;
   role: string;
   tags: string[];
-  provider: {
-    type: ProviderType;
-    model: string;
-    apiKeyRef?: string;
-  };
+  provider: MissionProviderSpec;
   capabilities: {
     shell: boolean;
     fs: boolean;
@@ -37,12 +47,24 @@ type AgentRecord = {
 
 type OrgNode = {
   id: string;
+  workspaceId?: string;
   agentId: string;
   parentId?: string;
   department?: string;
   position?: string;
   x?: number;
   y?: number;
+};
+
+type MissionRecord = {
+  runId: string;
+  workspaceId: string;
+  templateId: string;
+  title: string;
+  goal: string;
+  status: string;
+  updatedAt: string;
+  activeNodeIds: string[];
 };
 
 type TaskRecord = {
@@ -100,6 +122,7 @@ export class AgentPlatform {
   private orgNodes: OrgNode[] = [];
   private tasks: TaskRecord[] = [];
   private messages: MessageRecord[] = [];
+  private missions: MissionRecord[] = [];
   private runningTaskIds = new Set<string>();
   private schedulerTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -121,10 +144,9 @@ export class AgentPlatform {
     await fs.mkdir(this.dataDir, { recursive: true });
     await fs.mkdir(this.tasksDir, { recursive: true });
     await fs.mkdir(path.dirname(this.eventsPath), { recursive: true });
-    this.agents = await this.readJson<AgentRecord[]>(this.agentsPath, []);
-    this.orgNodes = await this.readJson<OrgNode[]>(this.orgPath, []);
     this.tasks = await this.readJson<TaskRecord[]>(this.tasksPath, []);
     this.messages = await this.readJson<MessageRecord[]>(this.messagesPath, []);
+    await this.refreshWorkspaceState();
     this.startRuntime();
     await this.emit({ t: "platform.ready", ts: Date.now(), dataDir: this.dataDir });
   }
@@ -143,40 +165,28 @@ export class AgentPlatform {
   registerRoutes(app: express.Express) {
     const agentRoutes = ["/agents", "/api/agents"] as const;
     for (const route of agentRoutes) {
-      app.get(route, async (_req, res) => {
-        res.json({ agents: this.agents });
+      app.get(route, async (req, res) => {
+        const workspaceId = typeof req.query.workspace === "string" ? req.query.workspace : undefined;
+        const agents = workspaceId
+          ? await this.loadAgentsForWorkspaceId(workspaceId)
+          : this.agents;
+        res.json({ agents });
       });
       app.post(route, async (req, res) => {
+        const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+        if (!workspaceId) return res.status(400).json({ error: "workspaceId is required" });
+        const workspacePath = await this.resolveWorkspacePath(workspaceId);
+        if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
         const now = new Date().toISOString();
         const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
-        const providerTypeRaw =
-          body.provider && typeof body.provider === "object"
-            ? (body.provider as Record<string, unknown>).type
-            : undefined;
-        const providerType: ProviderType =
-          providerTypeRaw === "local" || providerTypeRaw === "ollama" || providerTypeRaw === "claude" ? providerTypeRaw : "openai";
-        const defaultModel =
-          providerType === "claude" ? "claude-3-5-sonnet-latest" : providerType === "ollama" || providerType === "local" ? "llama3.1:8b" : "gpt-4.1-mini";
-        const defaultApiKeyRef = providerType === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+        const role = String(body.role ?? "general");
         const agent: AgentRecord = {
           id: crypto.randomUUID(),
+          workspaceId,
           name: String(body.name ?? "Agent"),
-          role: String(body.role ?? "general"),
+          role,
           tags: this.normalizeStringArray(body.tags),
-          provider: {
-            type: providerType,
-            model: String(
-              body.provider && typeof body.provider === "object"
-                ? ((body.provider as Record<string, unknown>).model ?? defaultModel)
-                : defaultModel
-            ),
-            apiKeyRef:
-              body.provider && typeof body.provider === "object" && typeof (body.provider as Record<string, unknown>).apiKeyRef === "string"
-                ? String((body.provider as Record<string, unknown>).apiKeyRef)
-                : providerType === "local" || providerType === "ollama"
-                  ? undefined
-                  : defaultApiKeyRef
-          },
+          provider: normalizeMissionProvider(body.provider ?? defaultProviderForRole(role), role),
           capabilities: {
             shell: this.readBoolean(body.capabilities, "shell", false),
             fs: this.readBoolean(body.capabilities, "fs", true),
@@ -186,8 +196,10 @@ export class AgentPlatform {
           createdAt: now,
           updatedAt: now
         };
-        this.agents.push(agent);
-        await this.persistAgents();
+        const agents = await this.loadAgentsForWorkspacePath(workspacePath);
+        agents.push(agent);
+        await this.saveAgentsForWorkspacePath(workspacePath, agents);
+        await this.refreshWorkspaceState();
         await this.emit({ t: "agent.created", ts: Date.now(), agent });
         res.status(201).json({ agent });
       });
@@ -196,23 +208,19 @@ export class AgentPlatform {
     const agentItemRoutes = ["/agents/:id", "/api/agents/:id"] as const;
     for (const route of agentItemRoutes) {
       app.patch(route, async (req, res) => {
-        const agent = this.agents.find((item) => item.id === req.params.id);
+        const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+        const workspacePath = workspaceId ? await this.resolveWorkspacePath(workspaceId) : null;
+        if (workspaceId && !workspacePath) return res.status(404).json({ error: "Workspace not found" });
+        const agent = workspaceId
+          ? (await this.loadAgentsForWorkspacePath(workspacePath!)).find((item) => item.id === req.params.id)
+          : this.agents.find((item) => item.id === req.params.id);
         if (!agent) return res.status(404).json({ error: "Agent not found" });
         const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
         if (typeof body.name === "string") agent.name = body.name;
         if (typeof body.role === "string") agent.role = body.role;
         if (Array.isArray(body.tags)) agent.tags = this.normalizeStringArray(body.tags);
         if (body.provider && typeof body.provider === "object") {
-          const provider = body.provider as Record<string, unknown>;
-          if (provider.type === "openai" || provider.type === "claude" || provider.type === "local" || provider.type === "ollama") {
-            agent.provider.type = provider.type;
-          }
-          if (typeof provider.model === "string" && provider.model.trim()) {
-            agent.provider.model = provider.model.trim();
-          }
-          if (typeof provider.apiKeyRef === "string" && provider.apiKeyRef.trim()) {
-            agent.provider.apiKeyRef = provider.apiKeyRef.trim();
-          }
+          agent.provider = normalizeMissionProvider(body.provider, agent.role);
         }
         if (body.capabilities && typeof body.capabilities === "object") {
           const caps = body.capabilities as Record<string, unknown>;
@@ -221,17 +229,40 @@ export class AgentPlatform {
           if (typeof caps.network === "boolean") agent.capabilities.network = caps.network;
         }
         agent.updatedAt = new Date().toISOString();
-        await this.persistAgents();
+        if (workspacePath) {
+          const agents = await this.loadAgentsForWorkspacePath(workspacePath);
+          const index = agents.findIndex((item) => item.id === req.params.id);
+          if (index >= 0) agents[index] = agent;
+          await this.saveAgentsForWorkspacePath(workspacePath, agents);
+          await this.refreshWorkspaceState();
+        } else {
+          await this.persistAgents();
+        }
         await this.emit({ t: "agent.updated", ts: Date.now(), agent });
         res.json({ agent });
       });
 
       app.delete(route, async (req, res) => {
-        const before = this.agents.length;
-        this.agents = this.agents.filter((item) => item.id !== req.params.id);
-        if (this.agents.length === before) return res.status(404).json({ error: "Agent not found" });
-        this.orgNodes = this.orgNodes.filter((node) => node.agentId !== req.params.id && node.id !== req.params.id && node.parentId !== req.params.id);
-        await Promise.all([this.persistAgents(), this.persistOrg()]);
+        const workspaceId =
+          typeof req.query.workspace === "string"
+            ? req.query.workspace
+            : typeof req.body?.workspaceId === "string"
+              ? req.body.workspaceId
+              : undefined;
+        if (!workspaceId) return res.status(400).json({ error: "workspaceId is required" });
+        const workspacePath = await this.resolveWorkspacePath(workspaceId);
+        if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+        const agents = await this.loadAgentsForWorkspacePath(workspacePath);
+        const before = agents.length;
+        const nextAgents = agents.filter((item) => item.id !== req.params.id);
+        if (nextAgents.length === before) return res.status(404).json({ error: "Agent not found" });
+        await this.saveAgentsForWorkspacePath(workspacePath, nextAgents);
+        const org = await this.loadOrgForWorkspacePath(workspacePath);
+        await this.saveOrgForWorkspacePath(
+          workspacePath,
+          org.filter((node) => node.agentId !== req.params.id && node.id !== req.params.id && node.parentId !== req.params.id)
+        );
+        await this.refreshWorkspaceState();
         await this.emit({ t: "agent.deleted", ts: Date.now(), agentId: req.params.id });
         res.json({ ok: true });
       });
@@ -239,30 +270,45 @@ export class AgentPlatform {
 
     const orgRoutes = ["/org", "/api/org"] as const;
     for (const route of orgRoutes) {
-      app.get(route, async (_req, res) => {
-        res.json({ nodes: this.orgNodes });
+      app.get(route, async (req, res) => {
+        const workspaceId = typeof req.query.workspace === "string" ? req.query.workspace : undefined;
+        const nodes = workspaceId
+          ? await this.loadOrgForWorkspaceId(workspaceId)
+          : this.orgNodes;
+        res.json({ nodes });
       });
       app.put(route, async (req, res) => {
+        const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+        if (!workspaceId) return res.status(400).json({ error: "workspaceId is required" });
+        const workspacePath = await this.resolveWorkspacePath(workspaceId);
+        if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
         const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
         const nodesRaw = Array.isArray(body.nodes) ? body.nodes : [];
-        this.orgNodes = nodesRaw
+        const nodes = nodesRaw
           .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-          .map((item) => this.normalizeOrgNode(item))
+          .map((item) => this.normalizeOrgNode(item, workspaceId))
           .filter((item): item is OrgNode => item !== null);
-        await this.persistOrg();
-        await this.emit({ t: "org.updated", ts: Date.now(), nodes: this.orgNodes });
-        res.json({ ok: true, nodes: this.orgNodes });
+        await this.saveOrgForWorkspacePath(workspacePath, nodes);
+        await this.refreshWorkspaceState();
+        await this.emit({ t: "org.updated", ts: Date.now(), workspaceId, nodes });
+        res.json({ ok: true, nodes });
       });
     }
 
     const orgNodeRoutes = ["/org/nodes", "/api/org/nodes"] as const;
     for (const route of orgNodeRoutes) {
       app.post(route, async (req, res) => {
-        const node = this.normalizeOrgNode(req.body as Record<string, unknown>);
+        const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+        if (!workspaceId) return res.status(400).json({ error: "workspaceId is required" });
+        const workspacePath = await this.resolveWorkspacePath(workspaceId);
+        if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+        const node = this.normalizeOrgNode(req.body as Record<string, unknown>, workspaceId);
         if (!node) return res.status(400).json({ error: "Invalid node payload" });
-        this.orgNodes.push(node);
-        await this.persistOrg();
-        await this.emit({ t: "org.updated", ts: Date.now(), nodes: this.orgNodes });
+        const nodes = await this.loadOrgForWorkspacePath(workspacePath);
+        nodes.push(node);
+        await this.saveOrgForWorkspacePath(workspacePath, nodes);
+        await this.refreshWorkspaceState();
+        await this.emit({ t: "org.updated", ts: Date.now(), workspaceId, nodes });
         res.status(201).json({ node });
       });
     }
@@ -270,11 +316,17 @@ export class AgentPlatform {
     const orgNodeItemRoutes = ["/org/nodes/:id", "/api/org/nodes/:id"] as const;
     for (const route of orgNodeItemRoutes) {
       app.delete(route, async (req, res) => {
-        const before = this.orgNodes.length;
-        this.orgNodes = this.orgNodes.filter((node) => node.id !== req.params.id && node.parentId !== req.params.id);
-        if (this.orgNodes.length === before) return res.status(404).json({ error: "Node not found" });
-        await this.persistOrg();
-        await this.emit({ t: "org.updated", ts: Date.now(), nodes: this.orgNodes });
+        const workspaceId = typeof req.query.workspace === "string" ? req.query.workspace : undefined;
+        if (!workspaceId) return res.status(400).json({ error: "workspaceId is required" });
+        const workspacePath = await this.resolveWorkspacePath(workspaceId);
+        if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+        const nodes = await this.loadOrgForWorkspacePath(workspacePath);
+        const before = nodes.length;
+        const nextNodes = nodes.filter((node) => node.id !== req.params.id && node.parentId !== req.params.id);
+        if (nextNodes.length === before) return res.status(404).json({ error: "Node not found" });
+        await this.saveOrgForWorkspacePath(workspacePath, nextNodes);
+        await this.refreshWorkspaceState();
+        await this.emit({ t: "org.updated", ts: Date.now(), workspaceId, nodes: nextNodes });
         res.json({ ok: true });
       });
     }
@@ -424,6 +476,140 @@ export class AgentPlatform {
     }
   }
 
+  async startMission(options: {
+    runsDir: string;
+    workspaceId: string;
+    repoPath: string;
+    templateId: string;
+    goal: string;
+    runId?: string;
+  }): Promise<{ ok: boolean; runId: string }> {
+    const agents = await this.loadAgentsForWorkspaceId(options.workspaceId);
+    if (agents.length === 0) {
+      throw new Error(`No agents configured for workspace ${options.workspaceId}.`);
+    }
+    const runId = options.runId ?? `mission-${Date.now()}`;
+    const workspaceId = options.workspaceId;
+    const title = options.templateId;
+    const missionRecord: MissionRecord = {
+      runId,
+      workspaceId,
+      templateId: options.templateId,
+      title,
+      goal: options.goal,
+      status: "running",
+      updatedAt: new Date().toISOString(),
+      activeNodeIds: []
+    };
+    this.upsertMissionRecord(missionRecord);
+    await this.emit({
+      t: "mission.queued",
+      ts: Date.now(),
+      runId,
+      workspaceId,
+      templateId: options.templateId
+    });
+
+    void runMissionDetailed({
+      templateId: options.templateId,
+      repoPath: options.repoPath,
+      runsDir: options.runsDir,
+      workspaceId,
+      goal: options.goal,
+      runId,
+      agents: agents.map((agent) => this.toMissionAgent(agent)),
+      onEvent: (event) => this.handleMissionEvent(event)
+    })
+      .then(async (result) => {
+        this.upsertMissionFromRun(result.run);
+        await this.emit({
+          t: "mission.completed",
+          ts: Date.now(),
+          runId,
+          workspaceId,
+          status: result.run.status
+        });
+      })
+      .catch(async (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.upsertMissionRecord({
+          ...missionRecord,
+          status: "failed",
+          updatedAt: new Date().toISOString()
+        });
+        await this.emit({
+          t: "mission.failed",
+          ts: Date.now(),
+          runId,
+          workspaceId,
+          error: message
+        });
+      });
+
+    return { ok: true, runId };
+  }
+
+  async resumeMission(options: {
+    runsDir: string;
+    workspaceId: string;
+    runId: string;
+  }): Promise<{ ok: boolean; runId: string }> {
+    const agents = await this.loadAgentsForWorkspaceId(options.workspaceId);
+    void resumeMissionRun({
+      runsDir: options.runsDir,
+      workspaceId: options.workspaceId,
+      runId: options.runId,
+      agents: agents.map((agent) => this.toMissionAgent(agent)),
+      onEvent: (event) => this.handleMissionEvent(event)
+    })
+      .then((result) => {
+        this.upsertMissionFromRun(result.run);
+      })
+      .catch(async (err: unknown) => {
+        await this.emit({
+          t: "mission.failed",
+          ts: Date.now(),
+          runId: options.runId,
+          workspaceId: options.workspaceId,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
+    return { ok: true, runId: options.runId };
+  }
+
+  async importMissionNode(options: {
+    runsDir: string;
+    workspaceId: string;
+    runId: string;
+    nodeId: string;
+    text: string;
+    targetTool?: string;
+  }): Promise<MissionRun> {
+    const run = await importMissionNodeInput({
+      runsDir: options.runsDir,
+      workspaceId: options.workspaceId,
+      runId: options.runId,
+      nodeId: options.nodeId,
+      text: options.text,
+      targetTool: options.targetTool,
+      onEvent: (event) => this.handleMissionEvent(event)
+    });
+    this.upsertMissionFromRun(run);
+    if (run.status === "running") {
+      await this.resumeMission({
+        runsDir: options.runsDir,
+        workspaceId: options.workspaceId,
+        runId: options.runId
+      });
+    }
+    return run;
+  }
+
+  async getMissionRun(options: { runsDir: string; workspaceId?: string; runId: string }): Promise<MissionRun | null> {
+    const runDir = path.join(options.runsDir, options.workspaceId ?? "default", options.runId);
+    return loadMissionRun(runDir);
+  }
+
   private startRuntime() {
     if (!this.schedulerTimer) {
       this.schedulerTimer = setInterval(() => {
@@ -509,7 +695,7 @@ export class AgentPlatform {
   }
 
   private async executeTask(task: TaskRecord, agent: AgentRecord) {
-    await this.appendLog(task, `Executing ${task.type} task with ${agent.provider.type}/${agent.provider.model}`);
+    await this.appendLog(task, `Executing ${task.type} task with ${this.describeProvider(agent.provider)}`);
     const prompt = this.buildPrompt(task, agent);
     const modelOutput = await this.invokeProvider(agent, prompt);
     const artifactsDir = task.artifactsPath;
@@ -578,80 +764,18 @@ export class AgentPlatform {
   }
 
   private async invokeProvider(agent: AgentRecord, prompt: string): Promise<string> {
-    if (agent.provider.type === "local" || agent.provider.type === "ollama") {
-      const response = await fetch("http://localhost:11434/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: agent.provider.model, prompt, stream: false })
-      }).catch(() => null);
-      if (!response || !response.ok) {
-        return `# Local model unavailable\n\nCould not reach local provider.\n\nPrompt:\n\n${prompt}`;
-      }
-      const body = (await response.json().catch(() => ({}))) as { response?: string };
-      return body.response?.trim() || "No output from local model.";
+    try {
+      const repoPath = agent.workspaceId ? await this.resolveWorkspacePath(agent.workspaceId) : null;
+      const execution = await completeWithProvider(agent.provider, prompt, process.env, {
+        repoPath: repoPath ?? this.options.rootDir,
+        role: agent.role,
+        executor: this.executorForRole(agent.role)
+      });
+      return execution.text?.trim() || "No output produced.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `# Provider request failed\n\n${message}\n\nPrompt:\n\n${prompt}`;
     }
-
-    if (agent.provider.type === "claude") {
-      const keyRef = agent.provider.apiKeyRef?.trim() || "ANTHROPIC_API_KEY";
-      const apiKey = process.env[keyRef] ?? "";
-      if (!apiKey) {
-        return `# Provider not configured\n\nMissing API key in env var ${keyRef}.\n\nPrompt:\n\n${prompt}`;
-      }
-
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01"
-        },
-        body: JSON.stringify({
-          model: agent.provider.model,
-          max_tokens: 4096,
-          messages: [{ role: "user", content: prompt }]
-        })
-      }).catch(() => null);
-
-      if (!response || !response.ok) {
-        return `# Claude request failed\n\nCould not generate output from ${agent.provider.model}.\n\nPrompt:\n\n${prompt}`;
-      }
-
-      const body = (await response.json().catch(() => ({}))) as {
-        content?: Array<{ type?: string; text?: string }>;
-      };
-      const text = body.content?.find((item) => item.type === "text")?.text;
-      return text?.trim() || "No output produced.";
-    }
-
-    const keyRef = agent.provider.apiKeyRef?.trim() || "OPENAI_API_KEY";
-    const apiKey = process.env[keyRef] ?? "";
-    if (!apiKey) {
-      return `# Provider not configured\n\nMissing API key in env var ${keyRef}.\n\nPrompt:\n\n${prompt}`;
-    }
-
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: agent.provider.model,
-        input: prompt
-      })
-    }).catch(() => null);
-
-    if (!response || !response.ok) {
-      return `# OpenAI request failed\n\nCould not generate output from ${agent.provider.model}.\n\nPrompt:\n\n${prompt}`;
-    }
-
-    const body = (await response.json().catch(() => ({}))) as {
-      output_text?: string;
-      output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-    };
-    if (typeof body.output_text === "string" && body.output_text.trim()) return body.output_text;
-    const text = body.output?.flatMap((item) => item.content ?? []).find((entry) => entry.type === "output_text" || entry.type === "text")?.text;
-    return text?.trim() || "No output produced.";
   }
 
   private ensureUnifiedDiff(output: string, task: TaskRecord): string {
@@ -724,6 +848,7 @@ export class AgentPlatform {
     return {
       agents: this.agents,
       org: this.orgNodes,
+      missions: this.missions.slice(-40),
       tasks: this.tasks.slice(-100),
       messages: this.messages.slice(-100),
       queue: { queued: queue, running }
@@ -737,12 +862,13 @@ export class AgentPlatform {
     return "generic";
   }
 
-  private normalizeOrgNode(input: Record<string, unknown> | null): OrgNode | null {
+  private normalizeOrgNode(input: Record<string, unknown> | null, workspaceId?: string): OrgNode | null {
     if (!input) return null;
     const agentId = typeof input.agentId === "string" ? input.agentId : "";
     if (!agentId) return null;
     const node: OrgNode = {
       id: typeof input.id === "string" && input.id ? input.id : crypto.randomUUID(),
+      workspaceId,
       agentId,
       parentId: typeof input.parentId === "string" && input.parentId ? input.parentId : undefined,
       department: typeof input.department === "string" ? input.department : undefined,
@@ -811,5 +937,175 @@ export class AgentPlatform {
 
   private async persistMessages() {
     await fs.writeFile(this.messagesPath, JSON.stringify(this.messages, null, 2), "utf8");
+  }
+
+  private async refreshWorkspaceState() {
+    const workspaces = await loadWorkspaces(this.options.rootDir).catch(() => []);
+    const agents: AgentRecord[] = [];
+    const orgNodes: OrgNode[] = [];
+    for (const workspace of workspaces) {
+      const workspaceAgents = await this.loadAgentsForWorkspacePath(workspace.path);
+      const workspaceOrg = await this.loadOrgForWorkspacePath(workspace.path);
+      agents.push(...workspaceAgents);
+      orgNodes.push(...workspaceOrg);
+    }
+    this.agents = agents;
+    this.orgNodes = orgNodes;
+    await this.persistAgents();
+    await this.persistOrg();
+  }
+
+  private async resolveWorkspacePath(workspaceId: string): Promise<string | null> {
+    const workspaces = await loadWorkspaces(this.options.rootDir).catch(() => []);
+    return findWorkspaceById(workspaces, workspaceId)?.path ?? null;
+  }
+
+  private getWorkspaceAgentsPath(workspacePath: string): string {
+    return path.join(workspacePath, ".orchestrum", "agents.json");
+  }
+
+  private getWorkspaceOrgPath(workspacePath: string): string {
+    return path.join(workspacePath, ".orchestrum", "org.json");
+  }
+
+  private async loadAgentsForWorkspaceId(workspaceId: string): Promise<AgentRecord[]> {
+    const workspacePath = await this.resolveWorkspacePath(workspaceId);
+    if (!workspacePath) return [];
+    return this.loadAgentsForWorkspacePath(workspacePath);
+  }
+
+  private async loadAgentsForWorkspacePath(workspacePath: string): Promise<AgentRecord[]> {
+    const raw = await this.readJson<unknown[]>(this.getWorkspaceAgentsPath(workspacePath), []);
+    if (!Array.isArray(raw)) return [];
+    return raw.map((entry) => this.normalizeAgentRecord(entry));
+  }
+
+  private async saveAgentsForWorkspacePath(workspacePath: string, agents: AgentRecord[]) {
+    await fs.mkdir(path.dirname(this.getWorkspaceAgentsPath(workspacePath)), { recursive: true });
+    const normalized = agents.map((agent) => ({
+      ...agent,
+      provider: normalizeMissionProvider(agent.provider, agent.role)
+    }));
+    await fs.writeFile(this.getWorkspaceAgentsPath(workspacePath), JSON.stringify(normalized, null, 2), "utf8");
+  }
+
+  private async loadOrgForWorkspaceId(workspaceId: string): Promise<OrgNode[]> {
+    const workspacePath = await this.resolveWorkspacePath(workspaceId);
+    if (!workspacePath) return [];
+    return this.loadOrgForWorkspacePath(workspacePath);
+  }
+
+  private async loadOrgForWorkspacePath(workspacePath: string): Promise<OrgNode[]> {
+    const raw = await this.readJson<OrgNode[]>(this.getWorkspaceOrgPath(workspacePath), []);
+    return Array.isArray(raw) ? raw : [];
+  }
+
+  private async saveOrgForWorkspacePath(workspacePath: string, nodes: OrgNode[]) {
+    await fs.mkdir(path.dirname(this.getWorkspaceOrgPath(workspacePath)), { recursive: true });
+    await fs.writeFile(this.getWorkspaceOrgPath(workspacePath), JSON.stringify(nodes, null, 2), "utf8");
+  }
+
+  private toMissionAgent(agent: AgentRecord): MissionAgent {
+    return {
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      name: agent.name,
+      role: agent.role,
+      tags: agent.tags,
+      provider: normalizeMissionProvider(agent.provider, agent.role),
+      capabilities: agent.capabilities
+    };
+  }
+
+  private normalizeAgentRecord(input: unknown): AgentRecord {
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const now = new Date().toISOString();
+    const role = typeof record.role === "string" ? record.role : "general";
+    return {
+      id: typeof record.id === "string" && record.id.trim() ? record.id : crypto.randomUUID(),
+      workspaceId: typeof record.workspaceId === "string" ? record.workspaceId : undefined,
+      name: typeof record.name === "string" && record.name.trim() ? record.name : "Agent",
+      role,
+      tags: this.normalizeStringArray(record.tags),
+      provider: normalizeMissionProvider(record.provider ?? defaultProviderForRole(role), role),
+      capabilities: {
+        shell: this.readBoolean(record.capabilities, "shell", false),
+        fs: this.readBoolean(record.capabilities, "fs", true),
+        network: this.readBoolean(record.capabilities, "network", true)
+      },
+      status: {
+        state: this.normalizeAgentState(record.status),
+        currentTaskId:
+          record.status && typeof record.status === "object" && typeof (record.status as Record<string, unknown>).currentTaskId === "string"
+            ? String((record.status as Record<string, unknown>).currentTaskId)
+            : undefined,
+        lastHeartbeatAt:
+          record.status && typeof record.status === "object" && typeof (record.status as Record<string, unknown>).lastHeartbeatAt === "string"
+            ? String((record.status as Record<string, unknown>).lastHeartbeatAt)
+            : now
+      },
+      createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
+      updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : now
+    };
+  }
+
+  private normalizeAgentState(input: unknown): AgentState {
+    const state =
+      input && typeof input === "object" && typeof (input as Record<string, unknown>).state === "string"
+        ? String((input as Record<string, unknown>).state)
+        : "";
+    if (state === "active" || state === "sleeping" || state === "error") return state;
+    return "idle";
+  }
+
+  private describeProvider(provider: MissionProviderSpec): string {
+    const normalized = normalizeMissionProvider(provider);
+    const model = normalized.modelOverride?.trim() || normalized.profileId || "default";
+    return `${normalized.vendor}/${normalized.transport}/${model}`;
+  }
+
+  private executorForRole(role: string): "prompt" | "patch" | "audit" {
+    const normalized = role.trim().toLowerCase();
+    if (normalized.includes("audit")) return "audit";
+    if (normalized.includes("dev")) return "patch";
+    return "prompt";
+  }
+
+  private async handleMissionEvent(event: Record<string, unknown>) {
+    await this.emit({
+      ...event,
+      ts: typeof event.ts === "number" ? event.ts : Date.now()
+    } as RuntimeEvent);
+    const runId = typeof event.runId === "string" ? event.runId : "";
+    if (!runId) return;
+    const workspaceId = typeof event.workspaceId === "string" ? event.workspaceId : undefined;
+    if (!workspaceId) return;
+    const runDir = path.join(this.options.rootDir, "runs", workspaceId, runId);
+    const run = await loadMissionRun(runDir).catch(() => null);
+    if (run) {
+      this.upsertMissionFromRun(run);
+    }
+  }
+
+  private upsertMissionRecord(record: MissionRecord) {
+    const index = this.missions.findIndex((item) => item.runId === record.runId && item.workspaceId === record.workspaceId);
+    if (index >= 0) this.missions[index] = record;
+    else this.missions.unshift(record);
+    this.missions = this.missions.slice(0, 100);
+  }
+
+  private upsertMissionFromRun(run: MissionRun) {
+    this.upsertMissionRecord({
+      runId: run.runId,
+      workspaceId: run.workspaceId ?? "default",
+      templateId: run.missionTemplateId,
+      title: run.graph.name,
+      goal: run.goal ?? "",
+      status: run.status,
+      updatedAt: run.end ?? new Date().toISOString(),
+      activeNodeIds: run.graph.nodes
+        .filter((node) => node.status === "running" || node.status === "waiting_input" || node.status === "awaiting_approval")
+        .map((node) => node.id)
+    });
   }
 }
