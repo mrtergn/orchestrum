@@ -196,7 +196,7 @@ export default function PluginsPage() {
             {/* Footer */}
             <div className="flex items-center justify-between pt-1 border-t border-slate-800/50">
               {plugin.manifest?.min_tier && (
-                <span className="text-[9px] text-slate-600 uppercase tracking-wider">Min: {plugin.manifest.min_tier}</span>
+                <span className="text-[9px] text-slate-600 uppercase tracking-wider">Manifest: {plugin.manifest.min_tier}</span>
               )}
               {!plugin.manifest?.min_tier && <span />}
               <button

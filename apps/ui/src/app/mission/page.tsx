@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { normalizeAgentRuntimeState, normalizeTaskStatus } from "@/lib/runtime";
 
 type Agent = {
   id: string;
@@ -22,8 +23,8 @@ type Snapshot = {
 };
 
 function stateColor(state: string) {
-  if (state === "running") return "bg-amber-400";
-  if (state === "sleeping" || state === "idle") return "bg-emerald-400";
+  if (normalizeAgentRuntimeState(state) === "active") return "bg-amber-400";
+  if (normalizeAgentRuntimeState(state) === "sleeping" || normalizeAgentRuntimeState(state) === "idle") return "bg-emerald-400";
   return "bg-slate-600";
 }
 
@@ -79,8 +80,8 @@ export default function MissionPage() {
     return () => source.close();
   }, []);
 
-  const queuedTasks = useMemo(() => snapshot.tasks.filter((task) => task.status === "queued"), [snapshot.tasks]);
-  const runningTasks = useMemo(() => snapshot.tasks.filter((task) => task.status === "running"), [snapshot.tasks]);
+  const queuedTasks = useMemo(() => snapshot.tasks.filter((task) => normalizeTaskStatus(task.status) === "queued"), [snapshot.tasks]);
+  const runningTasks = useMemo(() => snapshot.tasks.filter((task) => normalizeTaskStatus(task.status) === "running"), [snapshot.tasks]);
   const agentNameById = useMemo(() => new Map(snapshot.agents.map((agent) => [agent.id, agent.name])), [snapshot.agents]);
 
   const hasData = snapshot.agents.length > 0;
@@ -165,7 +166,7 @@ export default function MissionPage() {
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-xs font-medium text-white">{agent.name}</div>
                     <div className="text-[10px] text-slate-500">
-                      {agent.role} · {agent.status.state}
+                      {agent.role} · {normalizeAgentRuntimeState(agent.status.state)}
                       {agent.status.currentTaskId ? ` · ${agent.status.currentTaskId.slice(0, 8)}` : ""}
                     </div>
                   </div>

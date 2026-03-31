@@ -8,6 +8,7 @@ import { AgentOnboarding } from "@/components/AgentOnboarding";
 import { RunConfigModal } from "@/components/RunConfigModal";
 import { CommandPalette } from "@/components/CommandPalette";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Notifications } from "@/components/Notifications";
 
 export const metadata: Metadata = {
   title: {
@@ -47,6 +48,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <header className="mb-6 flex flex-wrap items-center justify-end gap-3">
                 <StatusBar />
               </header>
+              <div className="mb-4">
+                <Notifications />
+              </div>
               <div className="mb-6">
                 <StatusCenter />
               </div>

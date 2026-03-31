@@ -54,6 +54,13 @@ orchestrum secrets unset OPENAI_API_KEY --scope global
 orchestrum diagnostics export --workspace <id> --run <runId>
 ```
 
+## Updates
+```bash
+orchestrum update check --remote
+orchestrum update install --remote
+orchestrum update install ./orchestrum-update.tar.gz
+```
+
 ## Cluster
 ```bash
 orchestrum cluster start --workers 4 --workspace default

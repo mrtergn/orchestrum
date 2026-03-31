@@ -1,0 +1,11 @@
+import "./approvals.test.ts";
+import "./cache.test.ts";
+import "./migrations.test.ts";
+import "./recovery.test.ts";
+import "./resume.test.ts";
+import "./secrets.test.ts";
+import "./security.test.ts";
+import "./updates.test.ts";
+import "./licensing.test.ts";
+import "./tailer.test.ts";
+import "./workflow.test.ts";

@@ -8,13 +8,21 @@
     "orch": "packages/cli/bin/orchestrum.js"
   },
   "scripts": {
+    "bootstrap": "npm ci && npm install --no-package-lock --prefix packages/core && npm install --no-package-lock --prefix packages/service && npm ci --prefix apps/ui && npm install --no-package-lock --prefix apps/desktop",
     "dev": "npm --prefix apps/ui run dev",
-    "build": "npm --prefix apps/ui run build",
+    "build": "npm run build:ui",
+    "build:ui": "npm --prefix apps/ui run build",
+    "build:service": "npm --prefix packages/service run build",
+    "build:all": "npm run build:ui && npm run build:service",
     "lint": "npm --prefix apps/ui run lint",
-    "ui": "node --import tsx packages/core/src/cli.ts ui",
-    "service": "node --import tsx packages/service/src/server.ts",
+    "test": "npm run --prefix packages/core test",
+    "typecheck": "npm run --prefix packages/core typecheck && npm run build:service",
+    "verify": "npm run test && npm run typecheck && npm run lint && npm run build:desktop",
+    "ui": "node packages/core/node_modules/tsx/dist/cli.mjs packages/core/src/cli.ts ui",
+    "service": "node packages/service/node_modules/tsx/dist/cli.mjs packages/service/src/server.ts",
+    "desktop": "npm --prefix apps/desktop run dev",
     "changelog": "node scripts/changelog.mjs",
-    "build:desktop": "npm --prefix apps/ui run build && npm --prefix packages/service run build && npm --prefix apps/desktop run build",
+    "build:desktop": "npm run build:ui && npm run build:service && npm --prefix apps/desktop run build",
     "dist:desktop": "npm --prefix apps/desktop run dist"
   },
   "dependencies": {

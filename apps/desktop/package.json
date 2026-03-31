@@ -2,6 +2,8 @@
   "name": "@orchestrum/desktop",
   "version": "0.1.0",
   "private": true,
+  "description": "Desktop shell for the local-first Orchestrum engineering OS.",
+  "author": "Murat Ergin",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
@@ -9,21 +11,85 @@
     "build": "electron-builder --dir",
     "dist": "electron-builder"
   },
-  "dependencies": {
+  "devDependencies": {
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
   },
   "build": {
     "appId": "local.orchestrum.desktop",
     "productName": "Orchestrum",
+    "artifactName": "orchestrum-${os}-${arch}.${ext}",
     "directories": {
       "output": "dist"
     },
     "files": [
-      "**/*",
-      "../ui/.next/**/*",
-      "../service/dist/**/*"
+      "main.js",
+      "preload.js",
+      {
+        "from": "../ui/.next/standalone",
+        "to": "bundle/ui",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../ui/.next/static",
+        "to": "bundle/ui/.next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../ui/public",
+        "to": "bundle/ui/public",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../service",
+        "to": "bundle/service",
+        "filter": [
+          "dist/**/*",
+          "package.json",
+          "node_modules/**/*"
+        ]
+      },
+      {
+        "from": "../../packages/core",
+        "to": "bundle/core",
+        "filter": [
+          "src/**/*",
+          "package.json",
+          "node_modules/**/*"
+        ]
+      },
+      {
+        "from": "../..",
+        "to": "bundle",
+        "filter": [
+          "version.json",
+          "CHANGELOG.md",
+          "LICENSE",
+          "EULA.md"
+        ]
+      }
     ],
-    "asar": true
+    "asar": false,
+    "mac": {
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ]
+    },
+    "win": {
+      "target": [
+        "dir"
+      ]
+    }
   }
 }

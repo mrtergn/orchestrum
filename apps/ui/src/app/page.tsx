@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
+import { normalizeAgentRuntimeState } from "@/lib/runtime";
 
 type SetupStatus = {
   hasProvider: boolean;
@@ -216,7 +217,7 @@ export default function HomePage() {
         {[
           { label: "Agents", value: setup.agentCount, href: "/agents" },
           { label: "Tasks", value: setup.taskCount, href: "/tasks" },
-          { label: "Runs", value: setup.runCount, href: "/mission" },
+          { label: "Runs", value: setup.runCount, href: "/runs" },
           { label: "Workspaces", value: setup.workspaceCount, href: "/workspaces" },
         ].map((stat) => (
           <Link
@@ -243,13 +244,13 @@ export default function HomePage() {
             {agents.map((agent) => (
               <div key={agent.id} className="flex items-center gap-3 rounded-lg border border-slate-800/60 bg-slate-900/30 px-3 py-2">
                 <div className={`h-2 w-2 rounded-full ${
-                  agent.status.state === "running" ? "bg-amber-400" :
-                  agent.status.state === "sleeping" || agent.status.state === "idle" ? "bg-emerald-400" :
+                  normalizeAgentRuntimeState(agent.status.state) === "active" ? "bg-amber-400" :
+                  normalizeAgentRuntimeState(agent.status.state) === "sleeping" || normalizeAgentRuntimeState(agent.status.state) === "idle" ? "bg-emerald-400" :
                   "bg-slate-600"
                 }`} />
                 <div>
                   <div className="text-xs font-medium text-white">{agent.name}</div>
-                  <div className="text-[10px] text-slate-500">{agent.role} · {agent.status.state}</div>
+                  <div className="text-[10px] text-slate-500">{agent.role} · {normalizeAgentRuntimeState(agent.status.state)}</div>
                 </div>
               </div>
             ))}

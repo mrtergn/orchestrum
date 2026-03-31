@@ -2,21 +2,89 @@
 
 import { useEffect, useState } from "react";
 
+type VersionMeta = {
+  version: string;
+  channel: string;
+  buildDate?: string;
+  notes?: string;
+};
+
+type ReleaseAsset = {
+  name: string;
+  platform: string;
+  arch: string;
+};
+
+type UpdateStatus = {
+  current: VersionMeta | null;
+  available: (VersionMeta & { releaseUrl?: string; notes?: string }) | null;
+  updateAvailable: boolean;
+  checkedRemotely?: boolean;
+  selectedAsset?: ReleaseAsset | null;
+  reason?: string;
+};
+
 export default function AboutPage() {
   const [data, setData] = useState<any>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
 
   useEffect(() => {
     const load = async () => {
-      const res = await fetch("/api/meta/about", { cache: "no-store" });
-      if (!res.ok) return;
-      const payload = await res.json();
-      setData(payload);
+      const [aboutRes, updateRes] = await Promise.all([
+        fetch("/api/meta/about", { cache: "no-store" }),
+        fetch("/api/updates/status", { cache: "no-store" })
+      ]);
+      if (aboutRes.ok) {
+        const payload = await aboutRes.json();
+        setData(payload);
+      }
+      if (updateRes.ok) {
+        const payload = await updateRes.json();
+        setUpdate(payload);
+      }
     };
     load();
   }, []);
 
   const version = data?.version?.version ?? "—";
   const buildDate = data?.version?.buildDate ?? "—";
+  const updateSource = update?.checkedRemotely ? "GitHub Releases" : "Local cache";
+
+  const handleCheckUpdates = async () => {
+    setChecking(true);
+    setUpdateMessage("");
+    const res = await fetch("/api/updates/status?remote=1", { cache: "no-store" });
+    const payload = await res.json().catch(() => ({}));
+    setChecking(false);
+    if (!res.ok) {
+      setUpdateMessage(payload.error ?? "Update check failed.");
+      return;
+    }
+    setUpdate(payload);
+    setUpdateMessage(payload.updateAvailable ? "A newer release is available." : "Already up to date.");
+  };
+
+  const handleInstallUpdate = async () => {
+    setInstalling(true);
+    setUpdateMessage("");
+    const res = await fetch("/api/updates/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remote: true })
+    });
+    const payload = await res.json().catch(() => ({}));
+    setInstalling(false);
+    if (!res.ok) {
+      setUpdateMessage(payload.error ?? "Update install failed.");
+      return;
+    }
+    setUpdateMessage(
+      `Installed ${payload.version ?? update?.available?.version ?? "update"} (${payload.updatedFiles ?? 0} files). Restart Orchestrum to load the new build.`
+    );
+  };
 
   return (
     <main className="space-y-6">
@@ -58,6 +126,84 @@ export default function AboutPage() {
         </div>
       </section>
 
+      <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Updater</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Checks are manual. Cached release metadata is shown until you refresh from GitHub Releases.
+            </p>
+          </div>
+          <span className="rounded-full border border-slate-800 bg-slate-900/60 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-500">
+            {updateSource}
+          </span>
+        </div>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Current</div>
+            <div className="mt-2 text-sm font-semibold text-white">{update?.current?.version ?? version}</div>
+            <div className="mt-1 text-[11px] text-slate-500">{update?.current?.channel ?? data?.version?.channel ?? "stable"}</div>
+          </div>
+          <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Available</div>
+            <div className="mt-2 text-sm font-semibold text-white">{update?.available?.version ?? "—"}</div>
+            <div className="mt-1 text-[11px] text-slate-500">
+              {update?.selectedAsset ? `${update.selectedAsset.platform}/${update.selectedAsset.arch}` : update?.reason ?? "No cached release metadata"}
+            </div>
+          </div>
+          <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Status</div>
+            <div className={`mt-2 text-sm font-semibold ${update?.updateAvailable ? "text-amber-200" : "text-emerald-200"}`}>
+              {update?.updateAvailable ? "Update available" : "Up to date"}
+            </div>
+            <div className="mt-1 text-[11px] text-slate-500">{update?.selectedAsset?.name ?? "No installable asset selected"}</div>
+          </div>
+        </div>
+
+        {(update?.available?.notes || update?.available?.releaseUrl) && (
+          <div className="mt-4 rounded-xl border border-slate-800/60 bg-slate-900/30 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Release Notes</div>
+              {update?.available?.releaseUrl && (
+                <a
+                  href={update.available.releaseUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] text-amber-300 hover:text-amber-200"
+                >
+                  Open release →
+                </a>
+              )}
+            </div>
+            {update?.available?.notes && (
+              <pre className="mt-3 max-h-44 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-slate-300">
+                {update.available.notes}
+              </pre>
+            )}
+          </div>
+        )}
+
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button
+            onClick={() => void handleCheckUpdates()}
+            disabled={checking}
+            className="rounded-lg border border-sky-400/40 bg-sky-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-sky-200 disabled:opacity-50"
+          >
+            {checking ? "Checking…" : "Check for Updates"}
+          </button>
+          <button
+            onClick={() => void handleInstallUpdate()}
+            disabled={!update?.updateAvailable || !update?.selectedAsset || installing}
+            className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-amber-200 disabled:opacity-40"
+          >
+            {installing ? "Installing…" : "Install Update"}
+          </button>
+        </div>
+
+        {updateMessage && <div className="mt-3 text-xs text-slate-400">{updateMessage}</div>}
+      </section>
+
       {/* Key principles */}
       <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
         <h3 className="text-sm font-semibold text-white">Core Principles</h3>
@@ -91,7 +237,7 @@ export default function AboutPage() {
         <h3 className="text-sm font-semibold text-white">Resources</h3>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <a
-            href="https://github.com/nicholasconfer/orchestrum"
+            href="https://github.com/mrtergn/orchestrum"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-3 rounded-xl border border-slate-800/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 transition-colors hover:border-amber-400/30 hover:bg-amber-400/5"
@@ -103,7 +249,7 @@ export default function AboutPage() {
             </div>
           </a>
           <a
-            href="https://github.com/nicholasconfer/orchestrum/blob/main/docs/ARCHITECTURE.md"
+            href="https://github.com/mrtergn/orchestrum/blob/main/docs/ARCHITECTURE.md"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-3 rounded-xl border border-slate-800/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 transition-colors hover:border-amber-400/30 hover:bg-amber-400/5"
@@ -115,7 +261,7 @@ export default function AboutPage() {
             </div>
           </a>
           <a
-            href="https://github.com/nicholasconfer/orchestrum/blob/main/CHANGELOG.md"
+            href="https://github.com/mrtergn/orchestrum/blob/main/CHANGELOG.md"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-3 rounded-xl border border-slate-800/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 transition-colors hover:border-amber-400/30 hover:bg-amber-400/5"
@@ -127,7 +273,7 @@ export default function AboutPage() {
             </div>
           </a>
           <a
-            href="https://github.com/nicholasconfer/orchestrum/blob/main/CONTRIBUTING.md"
+            href="https://github.com/mrtergn/orchestrum/blob/main/CONTRIBUTING.md"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-3 rounded-xl border border-slate-800/60 bg-slate-900/30 px-4 py-3 text-sm text-slate-200 transition-colors hover:border-amber-400/30 hover:bg-amber-400/5"

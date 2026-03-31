@@ -104,6 +104,27 @@ export {
 export type { SandboxConfig } from "./runner/sandbox.js";
 export { computeRiskScore, extractVulnerabilityScore } from "./security/risk.js";
 export { scanCommands, scanDiff, requiresApproval, summarizeFindings } from "./security/safety.js";
+export {
+  normalizeTaskStatus,
+  normalizeAgentRuntimeState,
+  isAgentRuntimeBusy
+} from "./contracts/service.js";
+export type {
+  TaskRuntimeStatus,
+  AgentRuntimeState,
+  WorkflowSummary,
+  RunSummary,
+  RunDetail,
+  RunProgressSnapshot,
+  RunStartOptions,
+  RunStartRequest,
+  RunStartResponse,
+  RunResumeRequest,
+  RunResumeResponse,
+  RunActionResponse,
+  DiagnosticsExportRequest,
+  DiagnosticsExportResponse
+} from "./contracts/service.js";
 export { runTournament } from "./orchestration/tournament.js";
 export type { TournamentResult } from "./orchestration/tournament.js";
 export { evaluateWorkflow } from "./orchestration/evaluate.js";
@@ -127,8 +148,24 @@ export {
   enforceFeature
 } from "./licensing/index.js";
 export type { LicenseTier, LicenseStatus, LicensePayload, LicenseFile, LicenseFeature } from "./licensing/index.js";
-export { checkForUpdates, installUpdate, getCurrentVersion, getAvailableVersion } from "./updates/index.js";
-export type { VersionInfo, UpdateStatus } from "./updates/index.js";
+export {
+  checkForUpdates,
+  installUpdate,
+  getCurrentVersion,
+  getAvailableVersion,
+  cacheAvailableVersion,
+  fetchReleaseVersion,
+  selectUpdateAsset,
+  getCachedVersionPath
+} from "./updates/index.js";
+export type {
+  VersionInfo,
+  UpdateStatus,
+  ReleaseAsset,
+  ReleaseAssetKind,
+  ReleaseAssetPlatform,
+  ReleaseAssetArch
+} from "./updates/index.js";
 export { loadWorkspaceProfile, saveWorkspaceProfile, getProfilePath } from "./profiles/index.js";
 export type { WorkspaceProfile } from "./profiles/index.js";
 export { emitTelemetry } from "./telemetry/index.js";

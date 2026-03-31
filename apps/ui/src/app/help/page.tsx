@@ -122,9 +122,9 @@ export default function HelpPage() {
         </h3>
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {[
-            ["📖 Documentation", "https://github.com/nicholasconfer/orchestrum#readme", "README & architecture docs"],
-            ["🐛 Report an Issue", "https://github.com/nicholasconfer/orchestrum/issues", "Bug reports & feature requests"],
-            ["💬 Discussions", "https://github.com/nicholasconfer/orchestrum/discussions", "Community Q&A"],
+            ["📖 Documentation", "https://github.com/mrtergn/orchestrum#readme", "README & architecture docs"],
+            ["🐛 Report an Issue", "https://github.com/mrtergn/orchestrum/issues", "Bug reports & feature requests"],
+            ["💬 Discussions", "https://github.com/mrtergn/orchestrum/discussions", "Community Q&A"],
             ["📋 Changelog", "/changelog", "Release history & updates"],
           ].map(([label, href, desc]) => (
             <a

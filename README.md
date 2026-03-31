@@ -187,12 +187,12 @@
 
 ```bash
 # Clone and install
-git clone https://github.com/mrtergn/orcherstrum.git
-cd orcherstrum
-npm install
+git clone https://github.com/mrtergn/orchestrum.git
+cd orchestrum
+npm run bootstrap
 
 # 🚀 One command to start everything
-npx orchestrum ui
+npm run ui
 ```
 
 Then open **[http://localhost:3000](http://localhost:3000)** — that's it.
@@ -412,7 +412,8 @@ orchestrum roadmap run roadmap.yaml --repo /path  # Milestone exec
 orchestrum backup create
 orchestrum backup restore <file> --into /path
 orchestrum diagnostics export --workspace <id>
-orchestrum update check
+orchestrum update check --remote
+orchestrum update install --remote
 orchestrum update install /path/to/update.tar.gz
 orchestrum telemetry enable|disable
 ```
@@ -530,8 +531,8 @@ We welcome contributions! Before you start:
 
 ```bash
 # Dev workflow
-git clone https://github.com/mrtergn/orcherstrum.git
-cd orcherstrum
+git clone https://github.com/mrtergn/orchestrum.git
+cd orchestrum
 npm install
 npm run dev     # Starts Next.js dev server
 ```

@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
+import { normalizeTaskStatus } from "@/lib/runtime";
 
 type Agent = { id: string; name: string; role: string };
 type Task = {
@@ -20,8 +21,7 @@ type Task = {
 
 const STATUS: Record<string, { bg: string; text: string; icon: string; ring: string }> = {
   running:   { bg: "bg-amber-400/15",   text: "text-amber-300",   icon: "↻", ring: "border-amber-400/40" },
-  completed: { bg: "bg-emerald-400/15",  text: "text-emerald-300", icon: "✓", ring: "border-emerald-400/40" },
-  done:      { bg: "bg-emerald-400/15",  text: "text-emerald-300", icon: "✓", ring: "border-emerald-400/40" },
+  succeeded: { bg: "bg-emerald-400/15",  text: "text-emerald-300", icon: "✓", ring: "border-emerald-400/40" },
   failed:    { bg: "bg-rose-400/15",     text: "text-rose-300",    icon: "✗", ring: "border-rose-400/40" },
   cancelled: { bg: "bg-slate-400/15",    text: "text-slate-400",   icon: "⊘", ring: "border-slate-500/40" },
   queued:    { bg: "bg-cyan-400/15",     text: "text-cyan-300",    icon: "◦", ring: "border-cyan-400/40" },
@@ -50,7 +50,7 @@ export default function TasksPage() {
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [showForm, setShowForm] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     const [agentRes, taskRes] = await Promise.all([
       fetch("/api/agents", { cache: "no-store" }),
       fetch("/api/tasks", { cache: "no-store" })
@@ -63,13 +63,13 @@ export default function TasksPage() {
     if (!assignedToAgentId && loadedAgents[0]?.id) {
       setAssignedToAgentId(loadedAgents[0].id);
     }
-  };
+  }, [assignedToAgentId]);
 
   useEffect(() => {
     void load();
     const timer = setInterval(() => void load(), 3000);
     return () => clearInterval(timer);
-  }, []);
+  }, [load]);
 
   const createTask = async (event: FormEvent) => {
     event.preventDefault();
@@ -116,9 +116,9 @@ export default function TasksPage() {
   const agentNameById = useMemo(() => new Map(agents.map((a) => [a.id, a.name])), [agents]);
 
   /* ---- Summary stats ---- */
-  const running = tasks.filter((t) => t.status === "running").length;
-  const completed = tasks.filter((t) => t.status === "completed" || t.status === "done").length;
-  const failed = tasks.filter((t) => t.status === "failed").length;
+  const running = tasks.filter((t) => normalizeTaskStatus(t.status) === "running").length;
+  const completed = tasks.filter((t) => normalizeTaskStatus(t.status) === "succeeded").length;
+  const failed = tasks.filter((t) => normalizeTaskStatus(t.status) === "failed").length;
 
   return (
     <main className="space-y-6">
@@ -252,7 +252,8 @@ export default function TasksPage() {
               </div>
             )}
             {tasks.map((task) => {
-              const st = sts(task.status);
+              const normalizedStatus = normalizeTaskStatus(task.status);
+              const st = sts(normalizedStatus);
               const tp = tIcon(task.type);
               const progress = task.maxAttempts > 0 ? Math.round((task.attempts / task.maxAttempts) * 100) : 0;
               return (
@@ -274,7 +275,7 @@ export default function TasksPage() {
                       <div className="flex items-center gap-2">
                         <span className="truncate text-xs font-medium text-white">{task.title}</span>
                         <span className={`ml-auto flex flex-shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase ${st.bg} ${st.text}`}>
-                          <span>{st.icon}</span> {task.status}
+                          <span>{st.icon}</span> {normalizedStatus}
                         </span>
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-500">
@@ -287,7 +288,7 @@ export default function TasksPage() {
                       {/* Attempts progress bar */}
                       {task.maxAttempts > 1 && (
                         <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-slate-800">
-                          <div className={`h-full rounded-full transition-all ${task.status === "failed" ? "bg-rose-400" : task.status === "running" ? "bg-amber-400" : "bg-emerald-400"}`} style={{ width: `${progress}%` }} />
+                          <div className={`h-full rounded-full transition-all ${normalizedStatus === "failed" ? "bg-rose-400" : normalizedStatus === "running" ? "bg-amber-400" : "bg-emerald-400"}`} style={{ width: `${progress}%` }} />
                         </div>
                       )}
                       {task.resultSummary && (
@@ -302,7 +303,8 @@ export default function TasksPage() {
 
           {/* Task detail */}
           {selectedTask && (() => {
-            const st = sts(selectedTask.status);
+            const normalizedStatus = normalizeTaskStatus(selectedTask.status);
+            const st = sts(normalizedStatus);
             const tp = tIcon(selectedTask.type);
             return (
               <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
@@ -318,13 +320,13 @@ export default function TasksPage() {
                         <span>{agentNameById.get(selectedTask.assignedToAgentId) ?? "?"}</span>
                         <span className="text-slate-700">·</span>
                         <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-px ${st.bg} ${st.text}`}>
-                          {st.icon} {selectedTask.status}
+                          {st.icon} {normalizedStatus}
                         </span>
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {(selectedTask.status === "queued" || selectedTask.status === "running") && (
+                    {(normalizedStatus === "queued" || normalizedStatus === "running") && (
                       <button
                         onClick={() => void cancelTask(selectedTask.id)}
                         className="rounded-md border border-rose-500/40 bg-rose-500/5 px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.15em] text-rose-200 transition-colors hover:bg-rose-500/10"
@@ -332,7 +334,7 @@ export default function TasksPage() {
                         Cancel
                       </button>
                     )}
-                    {(selectedTask.status === "failed" || selectedTask.status === "cancelled") && (
+                    {(normalizedStatus === "failed" || normalizedStatus === "cancelled") && (
                       <button
                         onClick={() => void retryTask(selectedTask.id)}
                         className="rounded-md border border-emerald-500/40 bg-emerald-500/5 px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.15em] text-emerald-200 transition-colors hover:bg-emerald-500/10"
@@ -347,7 +349,7 @@ export default function TasksPage() {
                 <div className="mt-4 flex items-center gap-3">
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
                     <div
-                      className={`h-full rounded-full transition-all ${selectedTask.status === "failed" ? "bg-gradient-to-r from-rose-500 to-rose-400" : selectedTask.status === "running" ? "bg-gradient-to-r from-amber-500 to-amber-400" : "bg-gradient-to-r from-emerald-500 to-emerald-400"}`}
+                      className={`h-full rounded-full transition-all ${normalizedStatus === "failed" ? "bg-gradient-to-r from-rose-500 to-rose-400" : normalizedStatus === "running" ? "bg-gradient-to-r from-amber-500 to-amber-400" : "bg-gradient-to-r from-emerald-500 to-emerald-400"}`}
                       style={{ width: `${selectedTask.maxAttempts > 0 ? Math.round((selectedTask.attempts / selectedTask.maxAttempts) * 100) : 0}%` }}
                     />
                   </div>

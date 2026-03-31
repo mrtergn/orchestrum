@@ -70,8 +70,10 @@ export default function MetricsPage() {
     : 0;
 
   const latestEvaluation = evaluations[0];
-  const modelUsage = analytics?.modelUsage ?? {};
-  const modelUsageList = useMemo(() => Object.entries(modelUsage).sort((a, b) => b[1] - a[1]), [modelUsage]);
+  const modelUsageList = useMemo(
+    () => Object.entries(analytics?.modelUsage ?? {}).sort((a, b) => b[1] - a[1]),
+    [analytics?.modelUsage]
+  );
   const modelMax = useMemo(() => Math.max(...modelUsageList.map(([, c]) => c), 1), [modelUsageList]);
 
   const failureMax = analytics

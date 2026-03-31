@@ -119,7 +119,7 @@ export default function OrgPage() {
   const agentById = useMemo(() => new Map(agents.map((a) => [a.id, a])), [agents]);
 
   /* load */
-  const load = async () => {
+  const load = useCallback(async () => {
     const [agentRes, orgRes] = await Promise.all([
       fetch("/api/agents", { cache: "no-store" }),
       fetch("/api/org", { cache: "no-store" }),
@@ -131,11 +131,11 @@ export default function OrgPage() {
     setAgents(loadedAgents);
     setOrgNodes(loadedOrgNodes);
     if (!selectedAgentId && loadedAgents[0]?.id) setSelectedAgentId(loadedAgents[0].id);
-  };
+  }, [selectedAgentId]);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   /* report counts */
   const reportCounts = useMemo(() => {

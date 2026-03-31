@@ -31,6 +31,7 @@ export function CommandPalette() {
       { id: "nav-workspaces", label: "Go to Workspaces", section: "Navigation", run: () => router.push("/workspaces") },
       { id: "nav-templates", label: "Go to Templates", section: "Navigation", run: () => router.push("/templates") },
       { id: "nav-plugins", label: "Go to Plugins", section: "Navigation", run: () => router.push("/plugins") },
+      { id: "nav-runs", label: "Go to Runs", section: "Navigation", run: () => router.push("/runs") },
       { id: "nav-mission", label: "Go to Live Feed", section: "Navigation", run: () => router.push("/mission") },
       { id: "nav-metrics", label: "Go to Metrics", section: "Navigation", run: () => router.push("/metrics") },
       { id: "nav-roadmap", label: "Go to Roadmap", section: "Navigation", run: () => router.push("/roadmap") },

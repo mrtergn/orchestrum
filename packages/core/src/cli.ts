@@ -316,11 +316,15 @@ const updateCmd = program.command("update").description("Manage local updates");
 updateCmd
   .command("check")
   .option("--file <path>", "Path to version.json for update metadata")
+  .option("--remote", "Check GitHub Releases and refresh the local update cache")
+  .option("--repo <owner/name>", "Override the GitHub repository for update metadata")
   .action(async (options) => {
     try {
       const status = await checkForUpdates({
         rootDir: process.cwd(),
-        sourcePath: options.file ? path.resolve(options.file) : undefined
+        sourcePath: options.file ? path.resolve(options.file) : undefined,
+        remote: Boolean(options.remote),
+        repo: options.repo ? String(options.repo) : undefined
       });
       if (!status.current) {
         console.log("Current version metadata missing.");
@@ -332,6 +336,12 @@ updateCmd
       }
       console.log(`Current: ${status.current.version} (${status.current.channel})`);
       console.log(`Available: ${status.available.version} (${status.available.channel})`);
+      if (status.available.releaseUrl) {
+        console.log(`Release: ${status.available.releaseUrl}`);
+      }
+      if (status.selectedAsset?.name) {
+        console.log(`Asset: ${status.selectedAsset.name}`);
+      }
       if (status.updateAvailable) {
         console.log("Update available.");
       } else {
@@ -344,9 +354,38 @@ updateCmd
 
 updateCmd
   .command("install")
-  .argument("<file>", "Update package (.tar.gz)")
-  .action(async (file) => {
+  .argument("[file]", "Update package (.tar.gz)")
+  .option("--remote", "Download the newest compatible release asset from GitHub Releases")
+  .option("--repo <owner/name>", "Override the GitHub repository for update metadata")
+  .action(async (file, options) => {
     try {
+      if (!file && !options.remote) {
+        throw new Error("Provide a local update archive or use --remote.");
+      }
+
+      if (options.remote) {
+        const status = await checkForUpdates({
+          rootDir: process.cwd(),
+          remote: true,
+          repo: options.repo ? String(options.repo) : undefined
+        });
+        if (!status.available || !status.updateAvailable) {
+          console.log(status.reason ?? "No update available.");
+          return;
+        }
+        if (!status.selectedAsset) {
+          throw new Error("No installable archive asset found for this platform.");
+        }
+        const result = await installUpdate({
+          downloadUrl: status.selectedAsset.url,
+          expectedSha256: status.selectedAsset.sha256,
+          assetName: status.selectedAsset.name,
+          targetDir: process.cwd()
+        });
+        console.log(`Installed ${status.available.version}. Files updated: ${result.updatedFiles}`);
+        return;
+      }
+
       const result = await installUpdate({
         archivePath: path.resolve(file),
         targetDir: process.cwd()
@@ -849,23 +888,25 @@ function killProcessOnPort(port: number): void {
 
 async function startUiWithService(options: { port: number; servicePort: number; prod?: boolean }) {
   const require = createRequire(import.meta.url);
+  const invocationRoot = resolveInvocationRoot();
   let serviceEntry: string | null = null;
+  let serviceRoot: string | null = null;
   try {
     const serviceModule = require.resolve("@orchestrum/service");
-    const serviceBase = findPackageRoot(serviceModule);
-    if (!serviceBase) {
+    serviceRoot = findPackageRoot(serviceModule);
+    if (!serviceRoot) {
       throw new Error("Service package root not found.");
     }
     serviceEntry = options.prod
-      ? path.join(serviceBase, "dist", "server.js")
-      : path.join(serviceBase, "src", "server.ts");
+      ? path.join(serviceRoot, "dist", "server.js")
+      : path.join(serviceRoot, "src", "server.ts");
   } catch {
-    const repoRoot = process.cwd();
-    const localServiceBase = path.join(repoRoot, "packages", "service");
+    const localServiceBase = path.join(invocationRoot, "packages", "service");
     const localEntry = options.prod
       ? path.join(localServiceBase, "dist", "server.js")
       : path.join(localServiceBase, "src", "server.ts");
     if (fsSync.existsSync(localEntry)) {
+      serviceRoot = localServiceBase;
       serviceEntry = localEntry;
     } else {
       throw new Error("@orchestrum/service not found. Install orchestrum with service package.");
@@ -876,9 +917,10 @@ async function startUiWithService(options: { port: number; servicePort: number; 
   killProcessOnPort(options.port);
   killProcessOnPort(options.servicePort);
 
-  const serviceArgs = options.prod ? [serviceEntry] : ["--import", "tsx", serviceEntry];
+  const serviceArgs = [resolveTsxBin(serviceRoot ?? path.dirname(serviceEntry)), serviceEntry];
   const service = spawn(process.execPath, serviceArgs, {
     stdio: "inherit",
+    cwd: invocationRoot,
     env: {
       ...process.env,
       ORCHESTRUM_SERVICE_PORT: String(options.servicePort)
@@ -886,13 +928,11 @@ async function startUiWithService(options: { port: number; servicePort: number; 
   });
 
   const uiRoot = resolveUiRoot();
-  const npmCommand = resolveNpmCommand();  
   const uiArgs = options.prod
-    ? ["--no-workspaces", "run", "start", "--", "-p", String(options.port)]
-    : ["--no-workspaces", "run", "dev", "--", "-p", String(options.port)];
-  const ui = spawn(npmCommand, uiArgs, {
+    ? [resolveNextBin(uiRoot), "start", "-p", String(options.port)]
+    : [resolveNextBin(uiRoot), "dev", "-p", String(options.port)];
+  const ui = spawn(process.execPath, uiArgs, {
     stdio: "inherit",
-    shell: true,
     cwd: uiRoot,
     env: {
       ...process.env,
@@ -945,6 +985,40 @@ function resolveUiRoot(): string {
   }
 
   throw new Error("UI app not found. Run this command from the orchestrum repository or install a build that includes the UI app.");
+}
+
+function resolveInvocationRoot(): string {
+  const cwd = process.cwd();
+  if (fsSync.existsSync(path.join(cwd, "version.json"))) {
+    return cwd;
+  }
+
+  const coreDir = path.dirname(fileURLToPath(import.meta.url));
+  const repoRoot = path.resolve(coreDir, "..", "..", "..");
+  if (fsSync.existsSync(path.join(repoRoot, "version.json"))) {
+    return repoRoot;
+  }
+
+  return cwd;
+}
+
+function resolveTsxBin(packageRoot: string): string {
+  const resolver = createRequire(path.join(packageRoot, "package.json"));
+  const tsxPkgPath = resolver.resolve("tsx/package.json");
+  const tsxPkg = JSON.parse(fsSync.readFileSync(tsxPkgPath, "utf8"));
+  const binRel =
+    typeof tsxPkg.bin === "string"
+      ? tsxPkg.bin
+      : tsxPkg.bin?.tsx ?? Object.values(tsxPkg.bin ?? {})[0];
+  if (!binRel) {
+    throw new Error("tsx binary not found.");
+  }
+  return path.resolve(path.dirname(tsxPkgPath), String(binRel));
+}
+
+function resolveNextBin(uiRoot: string): string {
+  const resolver = createRequire(path.join(uiRoot, "package.json"));
+  return resolver.resolve("next/dist/bin/next");
 }
 
 function resolveNpmCommand(): string {
