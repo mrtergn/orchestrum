@@ -12,8 +12,8 @@
 
 1. Fully autonomous feature delivery with low operator involvement.
 2. Deep multi-agent execution beyond the mission-backed coordination shell.
-3. Release-grade browser QA.
-4. Mature plugin, telemetry, learnings, cluster, or desktop runtime support.
+3. Release-grade browser smoke or scenario assurance.
+4. Mature desktop runtime support or release-grade browser smoke assurance.
 
 ## What changed from the starting point
 

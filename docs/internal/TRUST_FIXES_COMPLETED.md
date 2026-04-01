@@ -33,7 +33,7 @@
 
 ## What remains unfixed
 
-1. Browser QA remains smoke-level.
+1. Browser Smoke remains smoke-level.
 2. Governance still uses limited rule depth.
-3. Plugins, telemetry, learnings, and cluster are still outside the trust-critical path.
+3. Browser Smoke is still smoke-level and the broader coordination shell still exposes more surface than execution depth.
 4. Agent/org/task surfaces still over-represent the maturity of the coordination layer compared with the mission runtime.

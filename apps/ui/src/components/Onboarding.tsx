@@ -8,6 +8,7 @@ import { ProviderDiscoveryLoadingState } from "@/components/providers/ProviderDi
 import { ProviderDiscoveryStatusSummary } from "@/components/providers/ProviderDiscoveryStatusSummary";
 import { preferredTransport, vendorLabel } from "@/lib/providers";
 import { useProviderDiscovery } from "@/lib/queries/useProviderDiscovery";
+import { buildWorkspaceApiPath, rememberRecentWorkspacePath } from "@/lib/workspaces";
 
 type Workspace = {
   id: string;
@@ -66,7 +67,7 @@ export function Onboarding({ onVisibilityChange }: OnboardingProps) {
   useEffect(() => {
     const loadBootstrap = async () => {
       const [workspaceRes, secretsRes] = await Promise.all([
-        fetch("/api/workspaces", { cache: "no-store" }),
+        fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" }),
         fetch("/api/secrets", { cache: "no-store" })
       ]);
       const workspacePayload = workspaceRes.ok ? await workspaceRes.json() : { workspaces: [] };
@@ -127,6 +128,7 @@ export function Onboarding({ onVisibilityChange }: OnboardingProps) {
       return;
     }
     const nextWorkspace = payload.workspace as Workspace;
+    rememberRecentWorkspacePath(nextWorkspace.path);
     setWorkspaces((prev) => [...prev.filter((item) => item.id !== nextWorkspace.id), nextWorkspace]);
     setWorkspaceId(nextWorkspace.id);
     setSelectedWorkspaceId(nextWorkspace.id);

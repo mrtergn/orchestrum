@@ -9,28 +9,36 @@ type NavGroup = { title: string; items: NavItem[] };
 
 const navGroups: NavGroup[] = [
   {
-    title: "Command",
+    title: "Primary",
     items: [
-      { href: "/", label: "Dashboard", icon: "◉" },
-      { href: "/agents", label: "Agents", icon: "◆" },
-      { href: "/org", label: "Org Chart", icon: "⬡" },
+      { href: "/work", label: "Work", icon: "▣" },
+      { href: "/runs", label: "Runs", icon: "◌" },
+      { href: "/delivery", label: "Delivery", icon: "◍" },
+      { href: "/browser", label: "Browser Smoke", icon: "◔" },
+      { href: "/diagnostics", label: "Diagnostics", icon: "⚙" },
     ],
   },
   {
-    title: "Operations",
+    title: "Coordination",
     items: [
+      { href: "/agents", label: "Specialists", icon: "◆" },
+      { href: "/org", label: "Team Map", icon: "⬡" },
+      { href: "/mission", label: "Execution Feed", icon: "◈" },
+    ],
+  },
+  {
+    title: "Workspace",
+    items: [
+      { href: "/", label: "Dashboard", icon: "◉" },
       { href: "/workspaces", label: "Workspaces", icon: "◫" },
       { href: "/templates", label: "Missions", icon: "❖" },
       { href: "/plugins", label: "Plugins", icon: "⧉" },
     ],
   },
   {
-    title: "Observe",
+    title: "Signals",
     items: [
-      { href: "/runs", label: "Runs", icon: "◌" },
-      { href: "/mission", label: "Mission Feed", icon: "◈" },
       { href: "/metrics", label: "Metrics", icon: "▤" },
-      { href: "/diagnostics", label: "Diagnostics", icon: "⚙" },
     ],
   },
   {

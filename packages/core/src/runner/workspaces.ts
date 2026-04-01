@@ -1,20 +1,13 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import { ensureDir, writeJson } from "./fs.js";
-import { getAppHome } from "../appHome.js";
+import {
+  discoverWorkspaceManifests,
+  ensureWorkspaceManifest,
+  type WorkspaceManifest
+} from "./control.js";
 
-export type Workspace = {
-  id: string;
-  path: string;
-  name?: string;
-  createdAt?: string;
-  updatedAt?: string;
-};
-
-type WorkspaceFile = {
-  workspaces: Workspace[];
-};
+export type Workspace = WorkspaceManifest;
 
 export type WorkspacePathValidation = {
   exists: boolean;
@@ -25,29 +18,22 @@ export type WorkspacePathValidation = {
 };
 
 export function getWorkspacesPath(rootDir: string): string {
-  void rootDir;
-  return path.join(getAppHome(), "workspaces.json");
+  return path.join(path.resolve(rootDir), ".orchestrum", "control", "workspace.json");
 }
 
-export async function loadWorkspaces(rootDir: string): Promise<Workspace[]> {
-  const filePath = getWorkspacesPath(rootDir);
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as WorkspaceFile;
-    return normalizeWorkspaces(parsed.workspaces);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw err;
-  }
+export async function loadWorkspaces(rootDir: string, options: { repoPaths?: string[] } = {}): Promise<Workspace[]> {
+  return discoverWorkspaceManifests(rootDir, options.repoPaths ?? []);
 }
 
 export async function saveWorkspaces(rootDir: string, workspaces: Workspace[]): Promise<void> {
-  const filePath = getWorkspacesPath(rootDir);
-  await ensureDir(path.dirname(filePath));
-  const payload: WorkspaceFile = { workspaces: normalizeWorkspaces(workspaces) };
-  await writeJson(filePath, payload);
+  await Promise.all(
+    workspaces.map((workspace) =>
+      ensureWorkspaceManifest(workspace.path, {
+        id: workspace.id,
+        name: workspace.name
+      })
+    )
+  );
 }
 
 export async function addWorkspace(
@@ -57,64 +43,33 @@ export async function addWorkspace(
 ): Promise<Workspace> {
   const id = typeof options === "string" ? options : options?.id;
   const name = typeof options === "string" ? undefined : options?.name;
-  const workspaces = await loadWorkspaces(rootDir);
   const resolvedPath = path.resolve(repoPath);
   const validation = await validateWorkspacePath(resolvedPath);
   if (!validation.exists || !validation.isDirectory || !validation.readable) {
     throw new Error(validation.error ?? "Workspace path must exist, be a directory, and be readable.");
   }
-  const existing = workspaces.find((ws) => path.resolve(ws.path) === resolvedPath);
-  if (existing) {
-    if (name && name.trim() && existing.name !== name.trim()) {
-      existing.name = name.trim();
-      existing.updatedAt = new Date().toISOString();
-      await saveWorkspaces(rootDir, workspaces);
-    }
-    return existing;
-  }
 
-  const baseId = id ?? slugify(path.basename(resolvedPath));
-  const nextId = ensureUniqueId(baseId, workspaces.map((ws) => ws.id));
-  const timestamp = new Date().toISOString();
-  const workspace: Workspace = {
-    id: nextId,
-    path: resolvedPath,
-    name: name?.trim() || undefined,
-    createdAt: timestamp,
-    updatedAt: timestamp
-  };
-  workspaces.push(workspace);
-  await saveWorkspaces(rootDir, workspaces);
-  return workspace;
+  const manifest = await ensureWorkspaceManifest(resolvedPath, { id, name });
+  return manifest;
 }
 
 export async function updateWorkspace(
   rootDir: string,
   workspaceId: string,
-  patch: { name?: string }
+  patch: { name?: string },
+  options: { repoPaths?: string[] } = {}
 ): Promise<Workspace | null> {
-  const workspaces = await loadWorkspaces(rootDir);
-  const index = workspaces.findIndex((ws) => ws.id === workspaceId);
-  if (index < 0) return null;
-  const current = workspaces[index]!;
-  const name = typeof patch.name === "string" ? patch.name.trim() : current.name;
-  const updated: Workspace = {
-    ...current,
-    name: name || undefined,
-    updatedAt: new Date().toISOString()
-  };
-  workspaces[index] = updated;
-  await saveWorkspaces(rootDir, workspaces);
-  return updated;
+  const workspaces = await loadWorkspaces(rootDir, options);
+  const current = workspaces.find((workspace) => workspace.id === workspaceId);
+  if (!current) return null;
+  return ensureWorkspaceManifest(current.path, { id: current.id, name: typeof patch.name === "string" ? patch.name : current.name });
 }
 
-export async function removeWorkspace(rootDir: string, workspaceId: string): Promise<Workspace | null> {
-  const workspaces = await loadWorkspaces(rootDir);
-  const index = workspaces.findIndex((ws) => ws.id === workspaceId);
-  if (index < 0) return null;
-  const [removed] = workspaces.splice(index, 1);
-  await saveWorkspaces(rootDir, workspaces);
-  return removed ?? null;
+export async function removeWorkspace(rootDir: string, workspaceId: string, options: { repoPaths?: string[] } = {}): Promise<Workspace | null> {
+  const workspaces = await loadWorkspaces(rootDir, options);
+  const current = workspaces.find((workspace) => workspace.id === workspaceId);
+  if (!current) return null;
+  return current;
 }
 
 export function findWorkspaceById(workspaces: Workspace[], id: string): Workspace | undefined {
@@ -124,25 +79,6 @@ export function findWorkspaceById(workspaces: Workspace[], id: string): Workspac
 export function findWorkspaceByPath(workspaces: Workspace[], repoPath: string): Workspace | undefined {
   const resolvedPath = path.resolve(repoPath);
   return workspaces.find((ws) => path.resolve(ws.path) === resolvedPath);
-}
-
-function slugify(input: string): string {
-  return input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32) || "workspace";
-}
-
-function ensureUniqueId(baseId: string, existingIds: string[]): string {
-  if (!existingIds.includes(baseId)) {
-    return baseId;
-  }
-  let counter = 2;
-  while (existingIds.includes(`${baseId}-${counter}`)) {
-    counter += 1;
-  }
-  return `${baseId}-${counter}`;
 }
 
 export async function validateWorkspacePath(repoPath: string): Promise<WorkspacePathValidation> {
@@ -199,30 +135,4 @@ export async function validateWorkspacePath(repoPath: string): Promise<Workspace
       error: (err as Error).message
     };
   }
-}
-
-function normalizeWorkspaces(workspaces: unknown): Workspace[] {
-  if (!Array.isArray(workspaces)) return [];
-  return workspaces
-    .map((entry) => {
-      if (!entry || typeof entry !== "object") return null;
-      const id = typeof (entry as Workspace).id === "string" ? (entry as Workspace).id.trim() : "";
-      const rawPath = typeof (entry as Workspace).path === "string" ? (entry as Workspace).path.trim() : "";
-      if (!id || !rawPath) return null;
-      const normalized: Workspace = {
-        id,
-        path: path.resolve(rawPath)
-      };
-      if (typeof (entry as Workspace).name === "string" && (entry as Workspace).name?.trim()) {
-        normalized.name = (entry as Workspace).name!.trim();
-      }
-      if (typeof (entry as Workspace).createdAt === "string") {
-        normalized.createdAt = (entry as Workspace).createdAt;
-      }
-      if (typeof (entry as Workspace).updatedAt === "string") {
-        normalized.updatedAt = (entry as Workspace).updatedAt;
-      }
-      return normalized;
-    })
-    .filter((workspace): workspace is Workspace => Boolean(workspace));
 }

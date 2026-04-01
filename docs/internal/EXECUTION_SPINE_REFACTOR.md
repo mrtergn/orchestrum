@@ -26,7 +26,7 @@ The repo now converges around one repo-changing spine:
 ### 3. Task execution was narrowed to truthful behavior
 
 - `spec`, `implement`, and `audit` tasks are mission-backed.
-- `generic` tasks are manual coordination only.
+- Unsupported manual-only task fallbacks were removed from the task layer.
 - Task state mirrors linked mission truth instead of artifact existence.
 
 ### 4. State and readiness now derive from explicit evidence
@@ -38,7 +38,7 @@ The repo now converges around one repo-changing spine:
 
 - `mission`: primary execution
 - `delivery`: mission-backed handoff/evidence/remediation
-- `browser QA`: validation evidence producer
+- `browser smoke`: validation evidence producer
 - `agent/task/org`: coordination shell around missions
 
 This is still a transitional state, but it is now one coherent runtime story instead of several competing ones.

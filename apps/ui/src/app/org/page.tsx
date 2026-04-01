@@ -242,7 +242,7 @@ export default function OrgPage() {
       {/* Header */}
       <section className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-white">Org Chart</h2>
+          <h2 className="text-xl font-semibold text-white">Team Map</h2>
           <p className="text-sm text-slate-400">
             Build your agent hierarchy visually. Click a node to edit its reporting line.
           </p>
@@ -268,13 +268,13 @@ export default function OrgPage() {
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 text-2xl text-slate-500">
             ⬡
           </div>
-          <h3 className="mt-3 text-lg font-semibold text-white">Create agents first</h3>
+          <h3 className="mt-3 text-lg font-semibold text-white">Create specialists first</h3>
           <p className="mt-1 text-sm text-slate-400">You need at least one agent before you can build an org chart.</p>
           <Link
             href="/agents"
             className="mt-4 inline-block rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs uppercase tracking-[0.3em] text-amber-200 hover:bg-amber-400/20 transition-colors"
           >
-            Go to Agents
+            Go to Specialists
           </Link>
         </section>
       )}

@@ -7,6 +7,7 @@ import { AgentOnboarding } from "@/components/AgentOnboarding";
 import { useAppUi } from "@/components/AppUiProvider";
 import { preferredTransport, type ProviderDiscoveryRecord } from "@/lib/providers";
 import { normalizeAgentRuntimeState } from "@/lib/runtime";
+import { buildWorkspaceApiPath } from "@/lib/workspaces";
 
 type SetupStatus = {
   hasRunnableProvider: boolean;
@@ -129,7 +130,7 @@ export default function HomePage() {
     const load = async () => {
       try {
         const [workspacesRes, tasksRes, orgRes, runsRes, agentsRes, secretsRes] = await Promise.all([
-          fetch("/api/workspaces", { cache: "no-store" }),
+          fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" }),
           fetch("/api/tasks", { cache: "no-store" }),
           fetch("/api/org", { cache: "no-store" }),
           fetch("/api/runs", { cache: "no-store" }),
@@ -202,7 +203,7 @@ export default function HomePage() {
     const providerHref = setup.guideWorkspaceId
       ? `/settings?tab=Providers&scope=workspace${workspaceQuery}`
       : "/settings?tab=Providers&scope=workspace";
-    const agentHref = `/agents?intent=create&preset=dev${workspaceQuery}`;
+    const agentHref = `/agents?intent=create&preset=fullstack${workspaceQuery}`;
 
     return [
       {
@@ -408,7 +409,7 @@ export default function HomePage() {
               href="/org"
               className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-cyan-200"
             >
-              Open Org Chart
+              Open Team Map
             </Link>
           </div>
         </section>
@@ -443,7 +444,7 @@ export default function HomePage() {
 
       <section className="grid gap-4 sm:grid-cols-4">
         {[
-          { label: "Agents", value: setup.guideAgentCount, href: "/agents" },
+          { label: "Specialists", value: setup.guideAgentCount, href: "/agents" },
           { label: "Tasks", value: setup.taskCount, href: "/tasks" },
           { label: "Runs", value: setup.totalRunCount, href: "/runs" },
           { label: "Workspaces", value: setup.workspaceCount, href: "/workspaces" }

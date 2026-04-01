@@ -23,9 +23,9 @@ npm test
 1. `packages/core` typecheck passed.
 2. `packages/service` build passed.
 3. `apps/ui` production build passed.
-4. Core test suite passed with 50 tests.
+4. Core test suite passed with 51 tests.
 5. Service test suite passed with 2 mission/task trust tests.
-6. Root test workspace passed with 52 total tests.
+6. Root test workspace passed with 53 total tests.
 
 ## Scenarios proven
 
@@ -35,6 +35,7 @@ npm test
 4. Delivery import with valid external diff applies changes and resumes to a truthful `ready_for_review` verdict.
 5. Service `implement` tasks fail when mission execution fails.
 6. Service `implement` tasks mirror linked mission truth instead of claiming success from artifacts.
+7. Mission runs emit plugin hooks, telemetry, and workspace learnings automatically.
 
 ## Key artifacts inspected
 
@@ -48,6 +49,6 @@ npm test
 
 1. Live external provider auth on a real developer machine beyond mocked test providers.
 2. Complex patch conflict recovery in large dirty repos.
-3. Browser QA as a high-signal regression suite.
+3. Browser Smoke as a high-signal regression suite.
 4. Desktop packaging as a production distribution path.
-5. Plugin, telemetry, learnings, and cluster behavior inside the trust-critical runtime path.
+5. Browser Smoke as a high-signal regression suite beyond smoke evidence.

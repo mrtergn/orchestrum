@@ -121,7 +121,7 @@ export default function DeliveryPage() {
       <section className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">Delivery</h2>
-          <p className="text-sm text-slate-400">Track delivery-oriented missions and workspace handoff readiness.</p>
+          <p className="text-sm text-slate-400">Track mission-backed delivery sessions, packet handoffs, and indexed workspace readiness.</p>
         </div>
         <button
           onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "mission", missionTemplateId: "delivery-sprint" })}
@@ -218,7 +218,7 @@ export default function DeliveryPage() {
 
         <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
           <div className="mb-3 flex items-center justify-between">
-            <div className="text-sm font-semibold text-white">Recent Delivery Sessions</div>
+            <div className="text-sm font-semibold text-white">Recent Delivery Missions</div>
             <span className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{runs.length}</span>
           </div>
           <div className="mb-4 rounded-xl border border-slate-800 bg-slate-900/30 p-4">

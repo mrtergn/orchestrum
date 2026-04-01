@@ -4,7 +4,7 @@
 - Run `npm run bootstrap`.
 - Run `npm run verify`.
 - Confirm `version.json` and `CHANGELOG.md` match the release.
-- Confirm desktop packaging succeeds on macOS, Linux, and Windows.
+- If shipping the Electron preview shell, confirm desktop packaging succeeds on macOS, Linux, and Windows.
 
 ## Update Feed
 - Create a GitHub Release in `mrtergn/orchestrum`.
@@ -19,6 +19,7 @@
 - Open `/runs/[id]` and confirm live stream, logs, artifacts, cancel/resume, and approval flows.
 - Open `/diagnostics` and export a bundle.
 
-## Desktop
+## Desktop Preview Shell
 - Build `npm run build:desktop`.
-- Launch the unpacked desktop app and verify service boot, UI boot, and graceful shutdown.
+- Launch the unpacked desktop app and verify service boot, UI boot, dynamic port selection, and graceful shutdown.
+- If code signing is intentionally disabled for the build, treat the output as a preview artifact rather than a signed release.

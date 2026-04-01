@@ -4,6 +4,7 @@ import { useEffect, useMemo, useReducer } from "react";
 import { useRouter } from "next/navigation";
 import { useAppUi } from "@/components/AppUiProvider";
 import { ModalFrame } from "@/components/ModalFrame";
+import { buildWorkspaceApiPath } from "@/lib/workspaces";
 
 type Workspace = {
   id: string;
@@ -173,7 +174,7 @@ export function RunConfigModal() {
     if (!runConfigOpen) return;
     const load = async () => {
       const [workspacesRes, templatesRes] = await Promise.all([
-        fetch("/api/workspaces", { cache: "no-store" }),
+        fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" }),
         fetch("/api/templates", { cache: "no-store" })
       ]);
       const workspacesData = workspacesRes.ok ? await workspacesRes.json() : { workspaces: [] };
@@ -354,7 +355,7 @@ export function RunConfigModal() {
               className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
             >
               <option value="mission">Mission</option>
-              <option value="qa">Browser QA</option>
+              <option value="qa">Browser Smoke</option>
               <option value="benchmark">Benchmark</option>
               <option value="canary">Canary</option>
             </select>

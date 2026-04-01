@@ -19,14 +19,14 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 
 ### **The Local-First AI Engineering Control Plane**
 
-*Mission orchestration, delivery handoff, and browser QA for teams that want AI leverage without surrendering the repo.*
+*Mission orchestration, delivery handoff, and browser smoke evidence for teams that want AI leverage without surrendering the repo.*
 
 [![Local-First](https://img.shields.io/badge/Local--First-runs%20on%20your%20machine-0f766e?style=for-the-badge)](docs/ARCHITECTURE.md)
 [![MIT License](https://img.shields.io/badge/license-MIT-10b981?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-5fa04e?style=for-the-badge&logo=node.js&logoColor=white)](package.json)
-[![Electron Desktop](https://img.shields.io/badge/Electron-Desktop-47848f?style=for-the-badge&logo=electron&logoColor=white)](apps/desktop/package.json)
+[![Electron Shell](https://img.shields.io/badge/Electron-Shell-47848f?style=for-the-badge&logo=electron&logoColor=white)](apps/desktop/package.json)
 
-<sub>TypeScript strict | Next.js UI | local service | plugin hooks | filesystem-backed runs</sub>
+<sub>TypeScript strict | Next.js UI | local service | mission/browser plugin hooks | filesystem-backed runs</sub>
 
 <p>
   <a href="#showcase">Showcase</a> |
@@ -39,7 +39,9 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 
 </div>
 
-> **Orchestrum is not a SaaS.** It runs on your machine, keeps packets, findings, diagnostics, and run artifacts local, and gives AI-assisted engineering a deliberate operator workflow.
+> **Orchestrum is not a SaaS.** It runs on your machine, keeps control state and run artifacts local, and gives AI-assisted engineering a deliberate operator workflow. API-backed providers can still receive prompts and repo context when you choose them.
+>
+> Repo-local operational truth lives under `.orchestrum/control/`. Only secrets, licensing, and update cache remain under `~/.orchestrum`.
 
 ## Showcase
 
@@ -65,10 +67,10 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 </td>
 <td width="33%" valign="top" align="center">
 
-<img alt="Browser QA and diagnostics panel" src=".github/assets/readme/panel-browser.svg" width="100%">
+<img alt="Browser smoke and diagnostics panel" src=".github/assets/readme/panel-browser.svg" width="100%">
 
-<p><strong>Browser QA + Diagnostics</strong></p>
-<sub>Readiness, recovery, QA runs, and evidence surfaces that keep the system explainable.</sub>
+<p><strong>Browser Smoke + Diagnostics</strong></p>
+<sub>Smoke evidence, recovery signals, and browser artifacts that keep the system explainable.</sub>
 
 </td>
 </tr>
@@ -90,7 +92,7 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 
 <p><strong><code>mission</code></strong></p>
 
-<p>Built-in execution graphs for autonomous or semi-autonomous engineering work.</p>
+<p>Built-in execution graphs for supervised engineering work with explicit patch, validation, and evidence truth.</p>
 
 <p><code>orchestrum mission start --template feature-dev ...</code></p>
 
@@ -108,11 +110,11 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 </td>
 <td width="33%" valign="top" align="center">
 
-<img alt="Browser QA icon" src=".github/assets/readme/icon-browser-qa.svg" width="56">
+<img alt="Browser smoke icon" src=".github/assets/readme/icon-browser-qa.svg" width="56">
 
-<p><strong><code>browser qa</code></strong></p>
+<p><strong><code>browser smoke</code></strong></p>
 
-<p>Local <code>qa</code>, <code>benchmark</code>, and <code>canary</code> runs against a live application.</p>
+<p>Local <code>qa</code>, <code>benchmark</code>, and <code>canary</code> runs against a live application, with optional scripted browser scenarios.</p>
 
 <p><code>orchestrum qa --base-url http://localhost:3000 ...</code></p>
 
@@ -156,11 +158,11 @@ Legacy YAML workflow execution has been removed from the project.
 <tr>
 <td width="50%" valign="top">
 
-<img alt="Browser QA icon" src=".github/assets/readme/icon-browser-qa.svg" width="34">
-<strong>Browser QA and Diagnostics</strong>
+<img alt="Browser smoke icon" src=".github/assets/readme/icon-browser-qa.svg" width="34">
+<strong>Browser Smoke and Diagnostics</strong>
 <ul>
   <li>Run <code>qa</code>, <code>benchmark</code>, and <code>canary</code> sessions against a local base URL.</li>
-  <li>Capture browser artifacts, readiness signals, and diagnostics in the same control plane.</li>
+  <li>Capture browser artifacts, scripted scenario steps, and operator-facing smoke evidence in the same control plane.</li>
   <li>Keep QA evidence alongside mission and delivery data.</li>
 </ul>
 
@@ -170,9 +172,10 @@ Legacy YAML workflow execution has been removed from the project.
 <img alt="Orchestrum mark" src="apps/ui/public/favicon.svg" width="30">
 <strong>Local Platform</strong>
 <ul>
-  <li>Operate through the CLI, the Next.js UI, or the Electron desktop shell.</li>
+  <li>Operate through the CLI, the Next.js UI, or the experimental Electron shell.</li>
   <li>Use the local service for API access, indexing, recovery, and SSE streaming.</li>
-  <li>Install local plugins and keep workspace state under <code>.orchestrum/</code> and <code>.memory/</code>.</li>
+  <li>Install workspace-scoped plugins and keep operational truth under <code>.orchestrum/control/</code>.</li>
+  <li>Treat plugins as trusted local JS hooks; they are capability-checked, but not sandboxed.</li>
 </ul>
 
 </td>
@@ -191,7 +194,7 @@ flowchart LR
         direction LR
         M[Mission]
         D[Delivery]
-        Q[Browser QA]
+        Q[Browser Smoke]
     end
 
     E[Packets / Findings / Artifacts / Diagnostics]
@@ -216,7 +219,7 @@ flowchart LR
     X[apps/desktop]
     SVC[packages/service]
     CORE[packages/core]
-    P["runs/ · .orchestrum/ · .memory/ · logs/diagnostics"]
+    P["runs/ · .orchestrum/control/ · logs/diagnostics"]
 
     U --> SVC
     X --> SVC
@@ -254,6 +257,14 @@ runs/<workspaceId>/<runId>/
 | **Node.js** | 18+ |
 | **npm** | 9+ |
 | **Git** | Any recent version |
+| **patch** | Any recent version |
+| **lsof** | Recommended for diagnostics |
+
+Additional local prerequisites, depending on how you run Orchestrum:
+- Playwright browsers for browser smoke runs
+- Provider CLI auth or API keys for OpenAI, Anthropic, Codex, Copilot, Cursor, or local HTTP providers
+- Optional `keytar` for secure local secret storage
+- Optional Docker for sandboxed execution paths
 
 ### Install and Launch
 
@@ -264,7 +275,7 @@ npm run bootstrap
 npm run ui
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+`orchestrum ui` now picks free local ports for the service and UI, then prints the resolved URLs.
 
 ### First Session
 
@@ -291,7 +302,7 @@ npm run dist:desktop
 ### CLI Snapshot
 
 <details>
-<summary><strong>Mission, delivery, and browser QA</strong></summary>
+<summary><strong>Mission, delivery, and browser smoke</strong></summary>
 
 ```bash
 orchestrum mission start --template feature-dev --workspace demo --goal "Ship the feature"
@@ -334,7 +345,7 @@ orchestrum docs sync --repo /path/to/repo
 
 | Document | What it covers |
 | --- | --- |
-| [CLI](docs/CLI.md) | Commands for mission, delivery, browser QA, secrets, backups, and updates |
+| [CLI](docs/CLI.md) | Commands for mission, delivery, browser smoke, secrets, backups, and updates |
 | [Architecture](docs/ARCHITECTURE.md) | System layers, data flow, storage model, and recovery |
 | [Examples](docs/EXAMPLES.md) | Concrete mission, delivery, QA, and diagnostics usage |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common startup, import, approval, patch, and stream issues |
@@ -373,9 +384,9 @@ Orchestrum is available under the [MIT License](LICENSE).
   <img alt="Orchestrum mark" src="apps/ui/public/favicon.svg" width="34">
 </p>
 
-**Built with love for developers who want AI workflows that stay close to their code.**
+**Built for developers who want AI workflows that stay close to their code.**
 
-*Your repo, packets, findings, and artifacts stay on your machine.*
+*Your run state, artifacts, and delivery evidence stay on your machine. API-backed providers still receive prompts and repo context when selected.*
 
 <sub>If Orchestrum helps your workflow, consider giving it a star.</sub>
 

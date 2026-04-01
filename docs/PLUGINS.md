@@ -1,6 +1,8 @@
 # Plugins
 
-Plugins run locally and are loaded from `~/.orchestrum/plugins`.
+Plugins run locally and are loaded per workspace from `.orchestrum/control/plugins/`.
+Enabled plugins receive lifecycle hooks for mission runs and browser runs.
+Plugins are registry-only: install them into the current workspace, then enable them by name.
 
 ## Plugin Interface
 ```ts
@@ -19,7 +21,7 @@ export interface OrchestrumPlugin {
   "name": "security-audit-plus",
   "version": "1.0.0",
   "entry": "index.js",
-  "capabilities_required": ["audit"]
+  "capabilities_required": ["run.start", "step.finish"]
 }
 ```
 
@@ -33,5 +35,7 @@ orchestrum plugin remove security-audit-plus
 ```
 
 ## Notes
-- Plugins are sandboxed and do not have direct access to secrets.
-- Use explicit capabilities to declare what a plugin requires.
+- Plugins are trusted workspace-local JavaScript hooks, not sandboxed extensions.
+- Direct path plugin imports are not supported in runtime config.
+- Plugin hook failures are non-fatal, but they are recorded in workspace signals and visible in observability surfaces.
+- `capabilities_required` is validated at install and enable time; unsupported capabilities are rejected.

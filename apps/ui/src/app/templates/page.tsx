@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
+import { buildWorkspaceApiPath } from "@/lib/workspaces";
 
 type TemplateEntry = {
   name: string;
@@ -39,7 +40,7 @@ export default function TemplatesPage() {
     const load = async () => {
       const [templateRes, workspaceRes] = await Promise.all([
         fetch("/api/templates", { cache: "no-store" }),
-        fetch("/api/workspaces", { cache: "no-store" })
+        fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" })
       ]);
       const templateData = templateRes.ok ? ((await templateRes.json()) as TemplateManifest) : { templates: [] };
       const workspaceData = workspaceRes.ok ? await workspaceRes.json() : { workspaces: [] };

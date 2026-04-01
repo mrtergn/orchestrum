@@ -55,5 +55,5 @@ Example: "Add feature X, update tests, validate it, surface findings, and leave 
 ## Current limits
 
 1. Validation depends on repo scripts or explicit `repo_execution.commands`.
-2. Browser QA is still optional smoke evidence.
+2. Browser Smoke is still optional smoke evidence.
 3. External patch import works, but merge readiness still depends on explicit validation and operator review.

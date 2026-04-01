@@ -4,9 +4,9 @@ The open-source build exposes the same local-first product surface that ships in
 
 - mission templates
 - delivery sessions and packet handoff
-- browser QA runs
+- browser smoke runs
 - analytics, readiness, and learnings
 - plugins, diagnostics, and recovery
-- desktop shell and local service
+- local service and the optional Electron shell
 
 Feature enforcement currently allows all listed surfaces in OSS mode.

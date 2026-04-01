@@ -2,7 +2,7 @@
   "name": "@orchestrum/desktop",
   "version": "0.4.0",
   "private": true,
-  "description": "Desktop shell for the local-first Orchestrum engineering OS.",
+  "description": "Desktop preview shell for the local-first Orchestrum control plane.",
   "author": "Murat Ergin",
   "main": "main.js",
   "type": "commonjs",
@@ -27,7 +27,9 @@
     },
     "files": [
       "main.js",
-      "preload.js",
+      "preload.js"
+    ],
+    "extraResources": [
       {
         "from": "../ui/.next/standalone",
         "to": "bundle/ui",
@@ -50,7 +52,7 @@
         ]
       },
       {
-        "from": "../service",
+        "from": "../../packages/service",
         "to": "bundle/service",
         "filter": [
           "dist/**/*",
@@ -78,7 +80,7 @@
         ]
       }
     ],
-    "asar": false,
+    "asar": true,
     "mac": {
       "target": [
         "dmg",

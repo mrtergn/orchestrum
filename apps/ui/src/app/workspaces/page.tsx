@@ -4,6 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useAppUi } from "@/components/AppUiProvider";
 import { useConfirm } from "@/components/ConfirmDialog";
+import {
+  buildWorkspaceApiPath,
+  forgetRecentWorkspacePath,
+  rememberRecentWorkspacePath
+} from "@/lib/workspaces";
 
 type WorkspaceSummary = {
   id: string;
@@ -53,7 +58,7 @@ export default function WorkspacesPage() {
   );
 
   const loadWorkspaces = async () => {
-    const res = await fetch("/api/workspaces", { cache: "no-store" });
+    const res = await fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" });
     const data = res.ok ? await res.json() : { workspaces: [] };
     setWorkspaces(data.workspaces ?? []);
     setLoading(false);
@@ -96,6 +101,7 @@ export default function WorkspacesPage() {
     setNameInput("");
     const workspace = payload.workspace as WorkspaceSummary | undefined;
     if (workspace?.id) {
+      rememberRecentWorkspacePath(workspace.path);
       setSelectedWorkspaceId(workspace.id);
       pushToast({
         tone: "success",
@@ -130,12 +136,17 @@ export default function WorkspacesPage() {
       tone: "danger",
     });
     if (!confirmed) return;
-    const res = await fetch(`/api/workspaces/${workspace.id}`, { method: "DELETE" });
+    const res = await fetch(`/api/workspaces/${workspace.id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: workspace.path })
+    });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
       setMessage(payload.error ?? "Failed to remove workspace.");
       return;
     }
+    forgetRecentWorkspacePath(workspace.path);
     if (selectedWorkspaceId === workspace.id) {
       setSelectedWorkspaceId("");
     }
@@ -179,8 +190,8 @@ export default function WorkspacesPage() {
           <h2 className="text-xl font-semibold text-white">Workspaces</h2>
           <p className="text-sm text-slate-400">
             {workspaces.length > 0
-              ? `${workspaces.length} workspace${workspaces.length !== 1 ? "s" : ""} registered`
-              : "Connect local repositories to run missions, delivery loops, and QA runs."}
+              ? `${workspaces.length} workspace${workspaces.length !== 1 ? "s" : ""} connected`
+              : "Connect local repositories to run missions, delivery loops, and browser smoke checks."}
           </p>
         </div>
         {selected && (

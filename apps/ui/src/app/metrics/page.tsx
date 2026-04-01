@@ -26,7 +26,6 @@ type AnalyticsData = {
   };
   testStability: { total: number; failed: number; index: number };
   modelUsage: Record<string, number>;
-  workerStats?: Array<{ ts: string; active: number; queue: number }>;
 };
 
 /* ---------- page ---------- */
@@ -295,8 +294,8 @@ export default function MetricsPage() {
             </div>
           </section>
 
-          {/* Model usage + worker stats */}
-          <section className="grid gap-4 lg:grid-cols-2">
+          {/* Model usage */}
+          <section className="grid gap-4 lg:grid-cols-1">
             <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
               <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Model Usage</div>
               {modelUsageList.length === 0 && (
@@ -318,15 +317,6 @@ export default function MetricsPage() {
                   </div>
                 ))}
               </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Worker Utilization</div>
-              {analytics.workerStats && analytics.workerStats.length > 0 ? (
-                <SparkBars data={analytics.workerStats.map((s) => s.active)} color="cyan" />
-              ) : (
-                <div className="text-xs text-slate-500 py-4 text-center">No worker stats yet.</div>
-              )}
             </div>
           </section>
         </>
@@ -434,6 +424,5 @@ function normalizeAnalytics(input: any): AnalyticsData {
       index: to(input?.testStability?.index),
     },
     modelUsage: (input?.modelUsage ?? {}) as Record<string, number>,
-    workerStats: Array.isArray(input?.workerStats) ? input.workerStats : [],
   };
 }

@@ -120,9 +120,10 @@ test("delivery import with invalid external patch becomes explicit apply failure
       ].join("\n")
     });
 
-    assert.equal(imported.status, "failed");
+    assert.equal(imported.status, "blocked");
     assert.equal(imported.change?.status, "apply_failed");
     assert.equal(imported.graph.nodes.find((node) => node.id === "handoff_wait")?.change?.status, "apply_failed");
+    assert.ok(fsSync.existsSync(path.join(started.runDir, "nodes", "handoff_wait", "conflict-summary.md")));
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OPENAI_API_KEY = originalKey;

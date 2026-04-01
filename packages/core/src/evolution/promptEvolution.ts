@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { writeJson, writeText } from "../runner/fs.js";
 import { MAX_PROMPT_VERSIONS } from "../constants.js";
+import { getWorkspaceControlDir } from "../runner/control.js";
 
 export type PromptHistoryFile = {
   prompts: Record<string, PromptRecord>;
@@ -36,7 +37,7 @@ export type PromptSuggestion = {
 const DEFAULT_HISTORY: PromptHistoryFile = { prompts: {} };
 
 export async function loadPromptHistory(workspacePath: string): Promise<PromptHistoryFile> {
-  const filePath = path.join(workspacePath, ".memory", "prompt_history.json");
+  const filePath = path.join(getWorkspaceControlDir(workspacePath), "prompt_history.json");
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw) as PromptHistoryFile;
@@ -50,9 +51,9 @@ export async function loadPromptHistory(workspacePath: string): Promise<PromptHi
 }
 
 export async function savePromptHistory(workspacePath: string, history: PromptHistoryFile): Promise<void> {
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await writeJson(path.join(memoryDir, "prompt_history.json"), history);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await writeJson(path.join(controlDir, "prompt_history.json"), history);
 }
 
 export async function approvePromptSuggestion(options: {

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { RunState } from "./types.js";
 import { writeJson, writeText } from "./fs.js";
+import { getWorkspaceControlDir } from "./control.js";
 
 export type RunSummary = {
   runId: string;
@@ -21,10 +22,10 @@ export async function appendSummary(workspacePath: string, summary: RunSummary):
   const summaries = await loadSummaries(workspacePath);
   summaries.push(summary);
   const trimmed = summaries.slice(-SUMMARY_LIMIT);
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await ensureEmbeddingsFile(memoryDir);
-  await writeJson(path.join(memoryDir, "summaries.json"), trimmed);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await ensureEmbeddingsFile(controlDir);
+  await writeJson(path.join(controlDir, "summaries.json"), trimmed);
 }
 
 export function buildRunSummary(runMeta: RunState, steps: Array<{ stepId: string; ok: boolean }>): RunSummary {
@@ -43,7 +44,7 @@ export function buildRunSummary(runMeta: RunState, steps: Array<{ stepId: string
 }
 
 async function loadSummaries(workspacePath: string): Promise<RunSummary[]> {
-  const memoryPath = path.join(workspacePath, ".memory", "summaries.json");
+  const memoryPath = path.join(getWorkspaceControlDir(workspacePath), "summaries.json");
   try {
     const raw = await fs.readFile(memoryPath, "utf8");
     const data = JSON.parse(raw);
@@ -56,8 +57,8 @@ async function loadSummaries(workspacePath: string): Promise<RunSummary[]> {
   }
 }
 
-async function ensureEmbeddingsFile(memoryDir: string): Promise<void> {
-  const embeddingsPath = path.join(memoryDir, "embeddings.json");
+async function ensureEmbeddingsFile(controlDir: string): Promise<void> {
+  const embeddingsPath = path.join(controlDir, "embeddings.json");
   try {
     const stat = await fs.stat(embeddingsPath);
     if (!stat.isFile()) {

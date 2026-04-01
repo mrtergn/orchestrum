@@ -1,15 +1,16 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
-import os from "node:os";
 import crypto from "node:crypto";
 import type express from "express";
 import {
+  appendWorkspaceSignal,
   defaultProviderForRole,
   normalizeMissionProvider,
   loadWorkspaces,
   findWorkspaceById,
   runMissionDetailed,
+  runBrowserRunDetailed,
   resumeMissionRun,
   importMissionNodeInput,
   loadMissionRun,
@@ -21,12 +22,21 @@ import {
   type PauseReason,
   type RunStartOptions,
   type RunVerdict,
-  type ValidationState
+  type ValidationState,
+  type WorkItemPlanningDetail,
+  type WorkItemRecord,
+  type WorkPlanTask,
+  getWorkspaceAgentsPath as getWorkspaceAgentsFilePath,
+  getWorkspaceOrgPath as getWorkspaceOrgFilePath,
+  getWorkspaceTasksPath as getWorkspaceTasksFilePath,
+  getWorkspaceTaskArtifactsRoot,
+  getWorkspaceMessagesPath as getWorkspaceMessagesFilePath,
+  getOperatorControlDir
 } from "@orchestrum/core";
 
 type AgentState = "idle" | "active" | "sleeping" | "error";
 type TaskStatus = "queued" | "running" | "paused" | "blocked" | "succeeded" | "failed" | "cancelled";
-type TaskType = "spec" | "implement" | "audit" | "generic";
+type TaskType = "spec" | "implement" | "validate" | "qa" | "audit";
 
 type AgentRecord = {
   id: string;
@@ -34,6 +44,11 @@ type AgentRecord = {
   name: string;
   role: string;
   tags: string[];
+  profile: {
+    specialization: string;
+    seniority: string;
+    maxParallelWork: number;
+  };
   provider: MissionProviderSpec;
   capabilities: {
     shell: boolean;
@@ -43,6 +58,7 @@ type AgentRecord = {
   status: {
     state: AgentState;
     currentTaskId?: string;
+    currentTaskIds: string[];
     lastHeartbeatAt: string;
   };
   createdAt: string;
@@ -73,17 +89,27 @@ type MissionRecord = {
 
 const TASK_MISSION_TEMPLATES = {
   spec: "spec-only",
-  implement: "feature-dev",
+  implement: "implement-only",
+  validate: "validation-only",
   audit: "audit-only"
 } as const;
 
 type TaskRecord = {
   id: string;
+  workspaceId?: string;
   title: string;
   description: string;
   type: TaskType;
   payload: Record<string, unknown>;
   assignedToAgentId: string;
+  dependsOnTaskIds: string[];
+  linkedWorkItemId?: string;
+  linkedWorkItemTitle?: string;
+  plannerTaskId?: string;
+  laneId?: string;
+  laneLabel?: string;
+  waitingOnTaskIds: string[];
+  blockedByTaskIds: string[];
   status: TaskStatus;
   createdAt: string;
   startedAt?: string;
@@ -103,6 +129,7 @@ type TaskRecord = {
 
 type MessageRecord = {
   id: string;
+  workspaceId?: string;
   fromAgentId: string;
   toAgentId: string;
   topic: string;
@@ -118,6 +145,7 @@ type RuntimeEvent = {
 
 type AgentPlatformOptions = {
   rootDir: string;
+  listWorkspacePaths?: () => Promise<string[]>;
 };
 
 type LoggerLike = {
@@ -128,12 +156,7 @@ type LoggerLike = {
 
 export class AgentPlatform {
   private dataDir: string;
-  private tasksDir: string;
   private eventsPath: string;
-  private agentsPath: string;
-  private orgPath: string;
-  private tasksPath: string;
-  private messagesPath: string;
   private agents: AgentRecord[] = [];
   private orgNodes: OrgNode[] = [];
   private tasks: TaskRecord[] = [];
@@ -142,27 +165,17 @@ export class AgentPlatform {
   private runningTaskIds = new Set<string>();
   private schedulerTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
-  private streamClients = new Set<express.Response>();
   private logger: LoggerLike | null = null;
 
   constructor(private options: AgentPlatformOptions) {
-    this.dataDir = path.join(os.homedir(), ".orchestrum");
-    this.tasksDir = path.join(this.dataDir, "tasks");
-    this.eventsPath = path.join(options.rootDir, "logs", "agent-events.ndjson");
-    this.agentsPath = path.join(this.dataDir, "agents.json");
-    this.orgPath = path.join(this.dataDir, "org.json");
-    this.tasksPath = path.join(this.dataDir, "tasks.json");
-    this.messagesPath = path.join(this.dataDir, "messages.json");
+    this.dataDir = getOperatorControlDir(options.rootDir);
+    this.eventsPath = path.join(this.dataDir, "agent-events.ndjson");
   }
 
   async init(logger?: LoggerLike) {
     this.logger = logger ?? null;
     await fs.mkdir(this.dataDir, { recursive: true });
-    await fs.mkdir(this.tasksDir, { recursive: true });
     await fs.mkdir(path.dirname(this.eventsPath), { recursive: true });
-    const storedTasks = await this.readJson<unknown[]>(this.tasksPath, []);
-    this.tasks = Array.isArray(storedTasks) ? storedTasks.map((task) => this.normalizeTaskRecord(task)) : [];
-    this.messages = await this.readJson<MessageRecord[]>(this.messagesPath, []);
     await this.refreshWorkspaceState();
     this.startRuntime();
     await this.emit({ t: "platform.ready", ts: Date.now(), dataDir: this.dataDir });
@@ -173,10 +186,10 @@ export class AgentPlatform {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.schedulerTimer = null;
     this.heartbeatTimer = null;
-    for (const client of this.streamClients) {
-      client.end();
-    }
-    this.streamClients.clear();
+  }
+
+  async reload() {
+    await this.refreshWorkspaceState();
   }
 
   registerRoutes(app: express.Express) {
@@ -197,19 +210,21 @@ export class AgentPlatform {
         const now = new Date().toISOString();
         const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
         const role = String(body.role ?? "general");
+        const profile = this.normalizeAgentProfile(body.profile, role);
         const agent: AgentRecord = {
           id: crypto.randomUUID(),
           workspaceId,
           name: String(body.name ?? "Agent"),
           role,
           tags: this.normalizeStringArray(body.tags),
+          profile,
           provider: normalizeMissionProvider(body.provider ?? defaultProviderForRole(role), role),
           capabilities: {
             shell: this.readBoolean(body.capabilities, "shell", false),
             fs: this.readBoolean(body.capabilities, "fs", true),
             network: this.readBoolean(body.capabilities, "network", true)
           },
-          status: { state: "idle", lastHeartbeatAt: now },
+          status: { state: "idle", currentTaskIds: [], lastHeartbeatAt: now },
           createdAt: now,
           updatedAt: now
         };
@@ -236,6 +251,11 @@ export class AgentPlatform {
         if (typeof body.name === "string") agent.name = body.name;
         if (typeof body.role === "string") agent.role = body.role;
         if (Array.isArray(body.tags)) agent.tags = this.normalizeStringArray(body.tags);
+        if (body.profile && typeof body.profile === "object") {
+          agent.profile = this.normalizeAgentProfile(body.profile, agent.role);
+        } else if (!agent.profile) {
+          agent.profile = this.normalizeAgentProfile(null, agent.role);
+        }
         if (body.provider && typeof body.provider === "object") {
           agent.provider = normalizeMissionProvider(body.provider, agent.role);
         }
@@ -350,8 +370,10 @@ export class AgentPlatform {
 
     const taskRoutes = ["/tasks", "/api/tasks"] as const;
     for (const route of taskRoutes) {
-      app.get(route, async (_req, res) => {
-        const items = this.tasks.slice().sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+      app.get(route, async (req, res) => {
+        const workspaceId = typeof req.query.workspace === "string" ? req.query.workspace : undefined;
+        const workItemId = typeof req.query.workItem === "string" ? req.query.workItem : undefined;
+        const items = this.listTasks({ workspaceId, workItemId });
         res.json({ tasks: items });
       });
       app.post(route, async (req, res) => {
@@ -360,32 +382,26 @@ export class AgentPlatform {
         if (!assignedToAgentId) return res.status(400).json({ error: "assignedToAgentId is required" });
         const agent = this.agents.find((item) => item.id === assignedToAgentId);
         if (!agent) return res.status(404).json({ error: "Assigned agent not found" });
-        const taskId = crypto.randomUUID();
-        const taskDir = path.join(this.tasksDir, taskId);
-        await fs.mkdir(taskDir, { recursive: true });
-        const logsPath = path.join(taskDir, "logs.ndjson");
-        const artifactsPath = path.join(taskDir, "artifacts");
-        await fs.mkdir(artifactsPath, { recursive: true });
-        const now = new Date().toISOString();
-        const task: TaskRecord = {
-          id: taskId,
+        const taskType = this.readTaskType(body.type);
+        if (!taskType) return res.status(400).json({ error: "Unsupported task type" });
+        const task = await this.createQueuedTask({
+          workspaceId: typeof body.workspaceId === "string" ? body.workspaceId : agent.workspaceId,
           title: String(body.title ?? "Untitled Task"),
           description: String(body.description ?? ""),
-          type: this.normalizeTaskType(body.type),
+          type: taskType,
           payload: body.payload && typeof body.payload === "object" ? (body.payload as Record<string, unknown>) : {},
           assignedToAgentId,
-          status: "queued",
-          createdAt: now,
-          attempts: 0,
-          maxAttempts: typeof body.maxAttempts === "number" && body.maxAttempts > 0 ? Math.floor(body.maxAttempts) : 2,
-          artifactsPath,
-          logsPath
-        };
-        this.tasks.push(task);
+          dependsOnTaskIds: this.normalizeStringArray(body.dependsOnTaskIds),
+          linkedWorkItemId: typeof body.linkedWorkItemId === "string" ? body.linkedWorkItemId : undefined,
+          linkedWorkItemTitle: typeof body.linkedWorkItemTitle === "string" ? body.linkedWorkItemTitle : undefined,
+          plannerTaskId: typeof body.plannerTaskId === "string" ? body.plannerTaskId : undefined,
+          laneId: typeof body.laneId === "string" ? body.laneId : undefined,
+          laneLabel: typeof body.laneLabel === "string" ? body.laneLabel : undefined,
+          maxAttempts: typeof body.maxAttempts === "number" && body.maxAttempts > 0 ? Math.floor(body.maxAttempts) : 2
+        });
         await this.persistTasks();
         await this.appendLog(task, `Task queued for ${agent.name}`);
-        await this.emit({ t: "task.created", ts: Date.now(), task });
-        await this.emit({ t: "task.queued", ts: Date.now(), task });
+        await this.emitTaskQueued(task);
         res.status(201).json({ task });
       });
     }
@@ -413,9 +429,12 @@ export class AgentPlatform {
         task.status = "cancelled";
         task.finishedAt = new Date().toISOString();
         task.verdict = "failed";
+        task.waitingOnTaskIds = [];
+        task.blockedByTaskIds = [];
         await this.persistTasks();
         await this.appendLog(task, "Task cancelled by user");
         await this.emit({ t: "task.cancelled", ts: Date.now(), taskId: task.id });
+        await this.reconcileDependencyStates();
         res.json({ task });
       });
     }
@@ -435,10 +454,13 @@ export class AgentPlatform {
         task.verdict = null;
         task.linkedRunId = undefined;
         task.linkedTemplateId = undefined;
+        task.waitingOnTaskIds = [];
+        task.blockedByTaskIds = [];
         task.resultSummary = undefined;
         await this.persistTasks();
         await this.appendLog(task, "Task moved back to queue");
         await this.emit({ t: "task.queued", ts: Date.now(), task });
+        await this.reconcileDependencyStates();
         res.json({ task });
       });
     }
@@ -461,8 +483,11 @@ export class AgentPlatform {
         const toAgentId = String(body.toAgentId ?? "");
         const topic = String(body.topic ?? "general");
         if (!fromAgentId || !toAgentId) return res.status(400).json({ error: "fromAgentId and toAgentId are required" });
+        const fromAgent = this.agents.find((agent) => agent.id === fromAgentId);
+        const toAgent = this.agents.find((agent) => agent.id === toAgentId);
         const record: MessageRecord = {
           id: crypto.randomUUID(),
+          workspaceId: fromAgent?.workspaceId ?? toAgent?.workspaceId,
           fromAgentId,
           toAgentId,
           topic,
@@ -477,27 +502,6 @@ export class AgentPlatform {
       });
     }
 
-    const streamRoutes = ["/stream", "/api/stream"] as const;
-    for (const route of streamRoutes) {
-      app.get(route, async (_req, res) => {
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.flushHeaders();
-        const snapshot = this.buildSnapshot();
-        res.write(`data: ${JSON.stringify({ t: "snapshot", ts: Date.now(), ...snapshot })}\n\n`);
-        this.streamClients.add(res);
-        const pulse = setInterval(() => {
-          if (!res.writableEnded) {
-            res.write(`data: ${JSON.stringify({ t: "heartbeat", ts: Date.now() })}\n\n`);
-          }
-        }, 3000);
-        res.on("close", () => {
-          clearInterval(pulse);
-          this.streamClients.delete(res);
-        });
-      });
-    }
   }
 
   async startMission(options: {
@@ -636,6 +640,164 @@ export class AgentPlatform {
     return loadMissionRun(runDir);
   }
 
+  listTasks(options?: { workspaceId?: string; workItemId?: string }): TaskRecord[] {
+    const workspaceId = options?.workspaceId?.trim();
+    const workItemId = options?.workItemId?.trim();
+    return this.tasks
+      .filter((task) => {
+        if (workspaceId && task.workspaceId !== workspaceId) return false;
+        if (workItemId && task.linkedWorkItemId !== workItemId) return false;
+        return true;
+      })
+      .slice()
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  async queueWorkItemExecution(options: {
+    workspaceId: string;
+    workItem: WorkItemRecord;
+    detail: WorkItemPlanningDetail;
+  }): Promise<{ taskIds: string[] }> {
+    const nextCycleSequence = Math.max(1, (options.workItem.cycles?.length ?? 0) + 1);
+    const workspaceAgents = await this.loadAgentsForWorkspaceId(options.workspaceId);
+    if (workspaceAgents.length === 0) {
+      throw new Error(`No agents configured for workspace ${options.workspaceId}.`);
+    }
+
+    const assignmentByLane = new Map(options.detail.teamAssignments.map((assignment) => [assignment.laneId, assignment]));
+    const laneErrors = new Set<string>();
+    const taskIdByPlannerId = new Map<string, string>();
+    for (const plannedTask of options.detail.tasks) {
+      taskIdByPlannerId.set(plannedTask.id, crypto.randomUUID());
+      const assignment = assignmentByLane.get(plannedTask.laneId);
+      if (!assignment?.matches?.[0]) {
+        laneErrors.add(plannedTask.laneLabel || plannedTask.laneId);
+      }
+    }
+    if (laneErrors.size > 0) {
+      throw new Error(`No agent coverage for planned lanes: ${Array.from(laneErrors).join(", ")}`);
+    }
+
+    const createdTasks: TaskRecord[] = [];
+    const batchAssignedCount = new Map<string, number>();
+    for (const plannedTask of options.detail.tasks) {
+      const assignment = assignmentByLane.get(plannedTask.laneId)!;
+      const selectedMatch = this.selectLaneAgentMatch({
+        matches: assignment.matches,
+        workspaceAgents,
+        batchAssignedCount
+      });
+      if (!selectedMatch) {
+        throw new Error(`Assigned lane ${plannedTask.laneLabel} no longer has an available specialist.`);
+      }
+      const assignedAgent = workspaceAgents.find((agent) => agent.id === selectedMatch.id);
+      if (!assignedAgent) {
+        throw new Error(`Assigned agent ${selectedMatch.name} is no longer available for lane ${plannedTask.laneLabel}.`);
+      }
+      batchAssignedCount.set(assignedAgent.id, (batchAssignedCount.get(assignedAgent.id) ?? 0) + 1);
+      const task = await this.createQueuedTask({
+        id: taskIdByPlannerId.get(plannedTask.id),
+        workspaceId: options.workspaceId,
+        title: plannedTask.title,
+        description: [
+          plannedTask.description ?? "",
+          options.workItem.reviewStatus === "changes_requested" && options.workItem.reviewNote
+            ? `Remediation context: ${options.workItem.reviewNote}`
+            : ""
+        ].filter(Boolean).join("\n\n"),
+        type: this.taskTypeForPlannedTask(plannedTask),
+        payload: {
+          workItemId: options.workItem.id,
+          workItemTitle: options.workItem.brief.title,
+          sourceType: options.workItem.brief.sourceType,
+          request: options.workItem.brief.request,
+          sourceRef: options.workItem.brief.sourceRef ?? null,
+          planningSummary: options.detail.summary,
+          acceptanceCriteria: options.detail.acceptanceCriteria,
+          constraints: options.detail.constraints,
+          plannerTaskId: plannedTask.id,
+          plannerTaskKind: plannedTask.kind,
+          laneId: plannedTask.laneId,
+          laneLabel: plannedTask.laneLabel,
+          roleHint: plannedTask.roleHint ?? null,
+          cycleSequence: nextCycleSequence,
+          cycleKind: options.workItem.reviewStatus === "changes_requested" ? "remediation" : "initial",
+          reviewStatus: options.workItem.reviewStatus ?? null,
+          reviewNote: options.workItem.reviewNote ?? null,
+          reviewedAt: options.workItem.reviewedAt ?? null
+        },
+        assignedToAgentId: assignedAgent.id,
+        dependsOnTaskIds: plannedTask.dependsOn
+          .map((dependency) => taskIdByPlannerId.get(dependency))
+          .filter((dependency): dependency is string => Boolean(dependency)),
+        linkedWorkItemId: options.workItem.id,
+        linkedWorkItemTitle: options.workItem.brief.title,
+        plannerTaskId: plannedTask.id,
+        laneId: plannedTask.laneId,
+        laneLabel: plannedTask.laneLabel,
+        maxAttempts: plannedTask.kind === "qa" ? 1 : 2
+      });
+      createdTasks.push(task);
+    }
+
+      await this.persistTasks();
+      for (const task of createdTasks) {
+        const agent = workspaceAgents.find((item) => item.id === task.assignedToAgentId);
+        await this.appendLog(task, `Task queued for ${agent?.name ?? task.assignedToAgentId}`);
+        if (task.dependsOnTaskIds.length > 0) {
+          await this.appendLog(task, `Waiting on dependencies: ${task.dependsOnTaskIds.join(", ")}`);
+        }
+        await this.emitTaskQueued(task);
+      }
+      await this.reconcileDependencyStates();
+
+    return {
+      taskIds: createdTasks.map((task) => task.id)
+    };
+  }
+
+  private selectLaneAgentMatch(options: {
+    matches: Array<{
+      id: string;
+      name: string;
+      score: number;
+      maxParallelWork: number;
+      state: string;
+    }>;
+    workspaceAgents: AgentRecord[];
+    batchAssignedCount: Map<string, number>;
+  }) {
+    type RankedMatch = {
+      match: {
+        id: string;
+        name: string;
+        score: number;
+        maxParallelWork: number;
+        state: string;
+      };
+      score: number;
+    };
+    return options.matches
+      .map((match) => {
+        const agent = options.workspaceAgents.find((candidate) => candidate.id === match.id);
+        if (!agent) return null;
+        const activeLoad = this.agentActiveLoad(agent);
+        const batchLoad = options.batchAssignedCount.get(agent.id) ?? 0;
+        const remainingCapacity = Math.max(0, match.maxParallelWork - activeLoad - batchLoad);
+        const stateBonus = match.state === "idle" ? 4 : match.state === "active" ? 0 : -6;
+        const score = match.score * 10 + remainingCapacity * 12 - (activeLoad + batchLoad) * 9 + stateBonus;
+        return {
+          match,
+          score
+        };
+      })
+      .filter((entry): entry is RankedMatch => entry !== null)
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        return left.match.name.localeCompare(right.match.name);
+      })[0]?.match ?? null;
+  }
+
   private startRuntime() {
     if (!this.schedulerTimer) {
       this.schedulerTimer = setInterval(() => {
@@ -650,28 +812,47 @@ export class AgentPlatform {
   }
 
   private async schedulerTick() {
+    await this.reconcileDependencyStates();
     const queued = this.tasks.filter((task) => task.status === "queued");
     for (const task of queued) {
       if (this.runningTaskIds.has(task.id)) continue;
+      const dependencyState = this.evaluateTaskDependencies(task);
+      if (dependencyState.state !== "ready") continue;
       const agent = this.agents.find((item) => item.id === task.assignedToAgentId);
       if (!agent) {
         task.status = "failed";
         task.finishedAt = new Date().toISOString();
         task.resultSummary = "Assigned agent does not exist";
+        task.waitingOnTaskIds = [];
+        task.blockedByTaskIds = [];
         await this.persistTasks();
         await this.emit({ t: "task.failed", ts: Date.now(), taskId: task.id, reason: "agent_missing" });
+        await this.reconcileDependencyStates();
         continue;
       }
-      if (agent.status.state === "active") continue;
+      const maxParallelWork = Math.max(1, Math.floor(agent.profile.maxParallelWork || 1));
+      if (this.agentActiveLoad(agent) >= maxParallelWork) continue;
       this.runningTaskIds.add(task.id);
       agent.status.state = "active";
-      agent.status.currentTaskId = task.id;
+      agent.status.currentTaskIds = Array.from(new Set([...(agent.status.currentTaskIds ?? []), task.id]));
+      agent.status.currentTaskId = agent.status.currentTaskIds[0];
       agent.status.lastHeartbeatAt = new Date().toISOString();
       task.status = "running";
       task.startedAt = new Date().toISOString();
       task.attempts += 1;
+      task.waitingOnTaskIds = [];
+      task.blockedByTaskIds = [];
+      task.resultSummary = undefined;
       await Promise.all([this.persistAgents(), this.persistTasks()]);
-      await this.emit({ t: "agent.status", ts: Date.now(), agentId: agent.id, state: agent.status.state, currentTaskId: task.id });
+      await this.emit({
+        t: "agent.status",
+        ts: Date.now(),
+        agentId: agent.id,
+        state: agent.status.state,
+        currentTaskId: agent.status.currentTaskId,
+        currentTaskIds: agent.status.currentTaskIds,
+        activeLoad: this.agentActiveLoad(agent)
+      });
       await this.emit({ t: "task.started", ts: Date.now(), taskId: task.id, agentId: agent.id });
       void this.executeTask(task, agent)
         .catch(async (err: unknown) => {
@@ -679,18 +860,30 @@ export class AgentPlatform {
           task.status = "failed";
           task.finishedAt = new Date().toISOString();
           task.verdict = "failed";
+          task.waitingOnTaskIds = [];
+          task.blockedByTaskIds = [];
           task.resultSummary = message;
           await this.appendLog(task, `Task failed: ${message}`);
           await this.persistTasks();
           await this.emitTaskStateEvent(task);
+          await this.reconcileDependencyStates();
         })
         .finally(async () => {
-          agent.status.state = "idle";
-          agent.status.currentTaskId = undefined;
+          agent.status.currentTaskIds = (agent.status.currentTaskIds ?? []).filter((activeTaskId) => activeTaskId !== task.id);
+          agent.status.currentTaskId = agent.status.currentTaskIds[0];
+          agent.status.state = this.agentActiveLoad(agent) > 0 ? "active" : "idle";
           agent.status.lastHeartbeatAt = new Date().toISOString();
           this.runningTaskIds.delete(task.id);
           await Promise.all([this.persistAgents(), this.persistTasks()]);
-          await this.emit({ t: "agent.status", ts: Date.now(), agentId: agent.id, state: agent.status.state });
+          await this.emit({
+            t: "agent.status",
+            ts: Date.now(),
+            agentId: agent.id,
+            state: agent.status.state,
+            currentTaskId: agent.status.currentTaskId,
+            currentTaskIds: agent.status.currentTaskIds,
+            activeLoad: this.agentActiveLoad(agent)
+          });
         });
     }
   }
@@ -700,10 +893,20 @@ export class AgentPlatform {
     const nowMs = Date.now();
     let changed = false;
     for (const agent of this.agents) {
-      if (agent.status.state === "active") {
+      if (this.agentActiveLoad(agent) > 0 || agent.status.state === "active") {
+        agent.status.state = "active";
         agent.status.lastHeartbeatAt = now;
         changed = true;
-        await this.emit({ t: "agent.status", ts: Date.now(), agentId: agent.id, state: agent.status.state, currentTaskId: agent.status.currentTaskId, lastHeartbeatAt: now });
+        await this.emit({
+          t: "agent.status",
+          ts: Date.now(),
+          agentId: agent.id,
+          state: agent.status.state,
+          currentTaskId: agent.status.currentTaskId,
+          currentTaskIds: agent.status.currentTaskIds,
+          activeLoad: this.agentActiveLoad(agent),
+          lastHeartbeatAt: now
+        });
         continue;
       }
 
@@ -724,16 +927,16 @@ export class AgentPlatform {
 
   private async executeTask(task: TaskRecord, agent: AgentRecord) {
     await this.appendLog(task, `Executing ${task.type} task with ${this.describeProvider(agent.provider)}`);
-    if (task.type === "generic") {
-      await this.executeManualTask(task, agent);
+    if (task.type === "qa") {
+      await this.executeBrowserQaTask(task, agent);
       return;
     }
     await this.executeMissionBackedTask(task, agent);
   }
 
   private async executeMissionBackedTask(task: TaskRecord, agent: AgentRecord) {
-    if (task.type === "generic") {
-      throw new Error("Generic tasks cannot use mission-backed execution.");
+    if (task.type === "qa") {
+      throw new Error(`${task.type} tasks cannot use mission-backed execution.`);
     }
     const templateId = TASK_MISSION_TEMPLATES[task.type];
     const workspaceId = agent.workspaceId;
@@ -750,6 +953,8 @@ export class AgentPlatform {
     task.linkedRunId = runId;
     task.linkedTemplateId = templateId;
     task.resultSummary = `Mission ${templateId} launched.`;
+    task.waitingOnTaskIds = [];
+    task.blockedByTaskIds = [];
     await this.persistTasks();
     await this.writeTaskArtifact(task, "linked-run.json", {
       taskId: task.id,
@@ -785,28 +990,62 @@ export class AgentPlatform {
     await this.emitTaskStateEvent(task);
   }
 
-  private async executeManualTask(task: TaskRecord, agent: AgentRecord) {
-    const payloadText = JSON.stringify(task.payload ?? {}, null, 2);
-    const note = [
-      "# Manual coordination task",
-      "",
-      `Task: ${task.title}`,
-      `Assigned agent: ${agent.name} (${agent.role})`,
-      "",
-      "Description:",
-      task.description || "(none)",
-      "",
-      "Payload:",
-      payloadText
-    ].join("\n");
-    await this.writeTaskArtifact(task, "manual-task.md", note);
-    task.status = "succeeded";
-    task.finishedAt = new Date().toISOString();
-    task.verdict = "needs_human_review";
-    task.resultSummary = "Manual coordination recorded. No repo execution was performed.";
+  private async executeBrowserQaTask(task: TaskRecord, agent: AgentRecord) {
+    const workspaceId = agent.workspaceId;
+    if (!workspaceId) {
+      throw new Error("Assigned QA agent must belong to a workspace.");
+    }
+    const workspacePath = await this.resolveWorkspacePath(workspaceId);
+    if (!workspacePath || !fsSync.existsSync(workspacePath)) {
+      throw new Error(`Workspace ${workspaceId} is missing or unreadable.`);
+    }
+
+    const runId = `task-${task.id.slice(0, 8)}-${Date.now()}`;
+    task.linkedRunId = runId;
+    task.linkedTemplateId = "browser:qa";
+    task.resultSummary = "Browser smoke run launched.";
+    task.waitingOnTaskIds = [];
+    task.blockedByTaskIds = [];
     await this.persistTasks();
-    await this.appendLog(task, task.resultSummary);
+    await this.appendLog(task, `Launching browser smoke in ${workspacePath}`);
+
+    const targetPath =
+      typeof task.payload.targetPath === "string" && task.payload.targetPath.trim()
+        ? task.payload.targetPath.trim()
+        : undefined;
+    const baseUrl =
+      typeof task.payload.baseUrl === "string" && task.payload.baseUrl.trim()
+        ? task.payload.baseUrl.trim()
+        : undefined;
+
+    const result = await runBrowserRunDetailed({
+      kind: "qa",
+      repoPath: workspacePath,
+      runsDir: path.join(this.options.rootDir, "runs"),
+      workspaceId,
+      runId,
+      baseUrl,
+      targetPath
+    });
+
+    task.finishedAt = new Date().toISOString();
+    task.status = result.ok ? "succeeded" : "failed";
+    task.verdict = result.ok ? "ready_for_review" : "failed";
+    task.waitingOnTaskIds = [];
+    task.blockedByTaskIds = [];
+    task.resultSummary = result.ok
+      ? "Browser smoke run completed successfully."
+      : "Browser smoke run failed. Inspect browser run artifacts for details.";
+    await this.persistTasks();
+    await this.writeTaskArtifact(task, "browser-run.json", {
+      runId: result.runId,
+      runDir: result.runDir,
+      ok: result.ok,
+      targetPath: targetPath ?? null,
+      baseUrl: baseUrl ?? null
+    });
     await this.emitTaskStateEvent(task);
+    await this.reconcileDependencyStates();
   }
 
   private async buildTaskMissionAgents(templateId: string, assignedAgent: AgentRecord, workspacePath: string): Promise<MissionAgent[]> {
@@ -834,9 +1073,12 @@ export class AgentPlatform {
     task.verdict = run.verdict ?? null;
     task.finishedAt = run.end ?? new Date().toISOString();
     task.status = this.mapRunStatusToTaskStatus(run.status);
+    task.waitingOnTaskIds = [];
+    task.blockedByTaskIds = [];
     task.resultSummary = this.summarizeMissionOutcome(run);
     await this.persistTasks();
     await this.appendLog(task, `Mission ${run.runId} ${run.status}: ${task.resultSummary}`);
+    await this.reconcileDependencyStates();
   }
 
   private mapRunStatusToTaskStatus(status: MissionRun["status"]): TaskStatus {
@@ -883,6 +1125,74 @@ export class AgentPlatform {
     ].join("\n").trim();
   }
 
+  private taskTypeForPlannedTask(task: WorkPlanTask): TaskType {
+    if (task.kind === "planning" || task.laneId === "pm") return "spec";
+    if (task.kind === "validation" || task.laneId === "tester") return "validate";
+    if (task.kind === "qa" || task.laneId === "qa") return "qa";
+    if (task.kind === "review" || task.laneId === "audit") return "audit";
+    if (task.kind === "implementation") return "implement";
+    throw new Error(`Unsupported planned task kind: ${task.kind}`);
+  }
+
+  private async createQueuedTask(input: {
+    id?: string;
+    workspaceId?: string;
+    title: string;
+    description: string;
+    type: TaskType;
+    payload: Record<string, unknown>;
+    assignedToAgentId: string;
+    dependsOnTaskIds?: string[];
+    linkedWorkItemId?: string;
+    linkedWorkItemTitle?: string;
+    plannerTaskId?: string;
+    laneId?: string;
+    laneLabel?: string;
+    maxAttempts?: number;
+  }): Promise<TaskRecord> {
+    const taskId = input.id ?? crypto.randomUUID();
+    const workspacePath = input.workspaceId
+      ? await this.resolveWorkspacePath(input.workspaceId)
+      : path.resolve(this.options.rootDir);
+    const taskRoot = getWorkspaceTaskArtifactsRoot(workspacePath ?? this.options.rootDir);
+    const taskDir = path.join(taskRoot, taskId);
+    await fs.mkdir(taskDir, { recursive: true });
+    const logsPath = path.join(taskDir, "logs.ndjson");
+    const artifactsPath = path.join(taskDir, "artifacts");
+    await fs.mkdir(artifactsPath, { recursive: true });
+    const now = new Date().toISOString();
+    const task: TaskRecord = {
+      id: taskId,
+      workspaceId: input.workspaceId,
+      title: input.title,
+      description: input.description,
+      type: input.type,
+      payload: input.payload,
+      assignedToAgentId: input.assignedToAgentId,
+      dependsOnTaskIds: Array.from(new Set(input.dependsOnTaskIds ?? [])),
+      linkedWorkItemId: input.linkedWorkItemId,
+      linkedWorkItemTitle: input.linkedWorkItemTitle,
+      plannerTaskId: input.plannerTaskId,
+      laneId: input.laneId,
+      laneLabel: input.laneLabel,
+      waitingOnTaskIds: [],
+      blockedByTaskIds: [],
+      status: "queued",
+      createdAt: now,
+      attempts: 0,
+      maxAttempts: typeof input.maxAttempts === "number" && input.maxAttempts > 0 ? Math.floor(input.maxAttempts) : 2,
+      artifactsPath,
+      logsPath
+    };
+    this.tasks.push(task);
+    return task;
+  }
+
+  private async emitTaskQueued(task: TaskRecord) {
+    await this.emit({ t: "task.created", ts: Date.now(), task });
+    await this.emit({ t: "task.queued", ts: Date.now(), task });
+  }
+
   private async writeTaskArtifact(task: TaskRecord, fileName: string, payload: unknown) {
     const artifactPath = path.join(task.artifactsPath, fileName);
     const content = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
@@ -913,30 +1223,161 @@ export class AgentPlatform {
     });
   }
 
+  private evaluateTaskDependencies(task: TaskRecord): {
+    state: "ready" | "waiting" | "blocked";
+    waitingOnTaskIds: string[];
+    blockedByTaskIds: string[];
+    reason?: string;
+  } {
+    if (task.dependsOnTaskIds.length === 0) {
+      return {
+        state: "ready",
+        waitingOnTaskIds: [],
+        blockedByTaskIds: []
+      };
+    }
+
+    const waitingOnTaskIds: string[] = [];
+    const blockedByTaskIds: string[] = [];
+    const missingDependencyIds: string[] = [];
+
+    for (const dependencyId of task.dependsOnTaskIds) {
+      const dependency = this.tasks.find((candidate) => candidate.id === dependencyId);
+      if (!dependency) {
+        missingDependencyIds.push(dependencyId);
+        continue;
+      }
+      if (dependency.status === "succeeded") continue;
+      if (dependency.status === "failed" || dependency.status === "cancelled" || dependency.status === "blocked" || dependency.status === "paused") {
+        blockedByTaskIds.push(dependencyId);
+        continue;
+      }
+      waitingOnTaskIds.push(dependencyId);
+    }
+
+    if (missingDependencyIds.length > 0) {
+      return {
+        state: "blocked",
+        waitingOnTaskIds: [],
+        blockedByTaskIds: Array.from(new Set([...blockedByTaskIds, ...missingDependencyIds])),
+        reason: `Blocked because dependency records are missing: ${missingDependencyIds.join(", ")}`
+      };
+    }
+
+    if (blockedByTaskIds.length > 0) {
+      return {
+        state: "blocked",
+        waitingOnTaskIds: [],
+        blockedByTaskIds: Array.from(new Set(blockedByTaskIds)),
+        reason: `Blocked by upstream tasks: ${Array.from(new Set(blockedByTaskIds)).join(", ")}`
+      };
+    }
+
+    if (waitingOnTaskIds.length > 0) {
+      return {
+        state: "waiting",
+        waitingOnTaskIds: Array.from(new Set(waitingOnTaskIds)),
+        blockedByTaskIds: [],
+        reason: `Waiting on dependencies: ${Array.from(new Set(waitingOnTaskIds)).join(", ")}`
+      };
+    }
+
+    return {
+      state: "ready",
+      waitingOnTaskIds: [],
+      blockedByTaskIds: []
+    };
+  }
+
+  private async reconcileDependencyStates() {
+    const changedTasks: TaskRecord[] = [];
+
+    for (const task of this.tasks) {
+      if (task.dependsOnTaskIds.length === 0) continue;
+      if (task.status === "running" || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled" || task.status === "paused") {
+        continue;
+      }
+
+      const evaluation = this.evaluateTaskDependencies(task);
+      const dependencyManaged = task.blockedByTaskIds.length > 0 || task.waitingOnTaskIds.length > 0;
+      let nextStatus = task.status;
+      let nextSummary = task.resultSummary;
+      let nextWaiting = task.waitingOnTaskIds;
+      let nextBlocked = task.blockedByTaskIds;
+
+      if (evaluation.state === "blocked") {
+        nextStatus = "blocked";
+        nextSummary = evaluation.reason;
+        nextWaiting = [];
+        nextBlocked = evaluation.blockedByTaskIds;
+      } else if (evaluation.state === "waiting") {
+        nextStatus = "queued";
+        nextSummary = evaluation.reason;
+        nextWaiting = evaluation.waitingOnTaskIds;
+        nextBlocked = [];
+      } else if (dependencyManaged) {
+        nextStatus = "queued";
+        nextSummary = undefined;
+        nextWaiting = [];
+        nextBlocked = [];
+      }
+
+      const changed =
+        nextStatus !== task.status ||
+        nextSummary !== task.resultSummary ||
+        !this.sameStringArray(nextWaiting, task.waitingOnTaskIds) ||
+        !this.sameStringArray(nextBlocked, task.blockedByTaskIds);
+      if (!changed) continue;
+
+      const previousStatus = task.status;
+      task.status = nextStatus;
+      task.resultSummary = nextSummary;
+      task.waitingOnTaskIds = nextWaiting;
+      task.blockedByTaskIds = nextBlocked;
+      changedTasks.push(task);
+
+      if (nextStatus === "blocked" && previousStatus !== "blocked") {
+        await this.appendLog(task, nextSummary ?? "Task blocked by dependency state.");
+      } else if (nextStatus === "queued" && previousStatus === "blocked") {
+        await this.appendLog(task, "Dependencies changed; task returned to queue.");
+      }
+    }
+
+    if (changedTasks.length === 0) return;
+    await this.persistTasks();
+    for (const task of changedTasks) {
+      await this.emitTaskStateEvent(task);
+    }
+  }
+
+  private sameStringArray(left: string[], right: string[]): boolean {
+    if (left.length !== right.length) return false;
+    return left.every((item, index) => item === right[index]);
+  }
+
+  private agentActiveLoad(agent: AgentRecord): number {
+    return Array.isArray(agent.status.currentTaskIds) && agent.status.currentTaskIds.length > 0
+      ? agent.status.currentTaskIds.length
+      : agent.status.currentTaskId
+        ? 1
+        : 0;
+  }
+
   private roleMatches(role: string, requiredRole: string): boolean {
     const normalizedRole = role.trim().toLowerCase();
     const normalizedRequired = requiredRole.trim().toLowerCase();
     return normalizedRole === normalizedRequired || normalizedRole.includes(normalizedRequired) || normalizedRequired.includes(normalizedRole);
   }
 
-  private buildSnapshot() {
-    const queue = this.tasks.filter((task) => task.status === "queued").length;
-    const running = this.tasks.filter((task) => task.status === "running").length;
-    return {
-      agents: this.agents,
-      org: this.orgNodes,
-      missions: this.missions.slice(-40),
-      tasks: this.tasks.slice(-100),
-      messages: this.messages.slice(-100),
-      queue: { queued: queue, running }
-    };
+  private readTaskType(input: unknown): TaskType | null {
+    if (input === "spec" || input === "implement" || input === "validate" || input === "qa" || input === "audit") {
+      return input;
+    }
+    return null;
   }
 
   private normalizeTaskType(input: unknown): TaskType {
-    if (input === "spec" || input === "implement" || input === "audit" || input === "generic") {
-      return input;
-    }
-    return "generic";
+    return this.readTaskType(input) ?? "spec";
   }
 
   private normalizeOrgNode(input: Record<string, unknown> | null, workspaceId?: string): OrgNode | null {
@@ -977,14 +1418,43 @@ export class AgentPlatform {
   private async emit(event: RuntimeEvent) {
     const line = `${JSON.stringify(event)}\n`;
     await fs.writeFile(this.eventsPath, line, { encoding: "utf8", flag: "a" }).catch(() => undefined);
-    for (const client of this.streamClients) {
-      if (!client.writableEnded) {
-        client.write(`data: ${JSON.stringify(event)}\n\n`);
+    const workspaceId = this.extractWorkspaceIdFromEvent(event);
+    if (workspaceId) {
+      const workspacePath = await this.resolveWorkspacePath(workspaceId).catch(() => null);
+      if (workspacePath) {
+        await appendWorkspaceSignal(workspacePath, {
+          workspaceId,
+          source: "execution",
+          type: String(event.t ?? "execution.event"),
+          entityId:
+            typeof event.taskId === "string"
+              ? event.taskId
+              : typeof event.linkedRunId === "string"
+                ? event.linkedRunId
+                : undefined,
+          status: typeof event.status === "string" ? event.status : undefined,
+          summary: String(event.t ?? "execution.event"),
+          payload: event as Record<string, unknown>
+        }).catch(() => undefined);
       }
     }
     if (this.logger) {
       await this.logger.info("agent.event", event as Record<string, unknown>);
     }
+  }
+
+  private extractWorkspaceIdFromEvent(event: RuntimeEvent): string | null {
+    if (typeof event.workspaceId === "string" && event.workspaceId.trim()) return event.workspaceId;
+    const taskId = typeof event.taskId === "string" ? event.taskId : null;
+    if (taskId) {
+      const task = this.tasks.find((entry) => entry.id === taskId);
+      if (task?.workspaceId) return task.workspaceId;
+    }
+    const agent = event.agent && typeof event.agent === "object" ? event.agent as { workspaceId?: unknown } : null;
+    if (typeof agent?.workspaceId === "string" && agent.workspaceId.trim()) return agent.workspaceId;
+    const message = event.message && typeof event.message === "object" ? event.message as { workspaceId?: unknown } : null;
+    if (typeof message?.workspaceId === "string" && message.workspaceId.trim()) return message.workspaceId;
+    return null;
   }
 
   private async readJson<T>(filePath: string, fallback: T): Promise<T> {
@@ -1001,48 +1471,85 @@ export class AgentPlatform {
   }
 
   private async persistAgents() {
-    await fs.writeFile(this.agentsPath, JSON.stringify(this.agents, null, 2), "utf8");
+    return;
   }
 
   private async persistOrg() {
-    await fs.writeFile(this.orgPath, JSON.stringify(this.orgNodes, null, 2), "utf8");
+    return;
   }
 
   private async persistTasks() {
-    await fs.writeFile(this.tasksPath, JSON.stringify(this.tasks, null, 2), "utf8");
+    const workspaces = await this.listKnownWorkspaces();
+    const fallbackRoot = path.resolve(this.options.rootDir);
+    const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace.path]));
+    const grouped = new Map<string, TaskRecord[]>();
+    for (const task of this.tasks) {
+      const workspacePath = task.workspaceId ? workspaceById.get(task.workspaceId) ?? fallbackRoot : fallbackRoot;
+      const bucket = grouped.get(workspacePath) ?? [];
+      bucket.push(task);
+      grouped.set(workspacePath, bucket);
+    }
+    for (const [workspacePath, tasks] of grouped.entries()) {
+      await fs.mkdir(path.dirname(getWorkspaceTasksFilePath(workspacePath)), { recursive: true });
+      await fs.writeFile(getWorkspaceTasksFilePath(workspacePath), JSON.stringify(tasks, null, 2), "utf8");
+    }
   }
 
   private async persistMessages() {
-    await fs.writeFile(this.messagesPath, JSON.stringify(this.messages, null, 2), "utf8");
+    const workspaces = await this.listKnownWorkspaces();
+    const fallbackRoot = path.resolve(this.options.rootDir);
+    const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace.path]));
+    const grouped = new Map<string, MessageRecord[]>();
+    for (const message of this.messages) {
+      const workspacePath = message.workspaceId ? workspaceById.get(message.workspaceId) ?? fallbackRoot : fallbackRoot;
+      const bucket = grouped.get(workspacePath) ?? [];
+      bucket.push(message);
+      grouped.set(workspacePath, bucket);
+    }
+    for (const [workspacePath, messages] of grouped.entries()) {
+      await fs.mkdir(path.dirname(getWorkspaceMessagesFilePath(workspacePath)), { recursive: true });
+      await fs.writeFile(getWorkspaceMessagesFilePath(workspacePath), JSON.stringify(messages, null, 2), "utf8");
+    }
   }
 
   private async refreshWorkspaceState() {
-    const workspaces = await loadWorkspaces(this.options.rootDir).catch(() => []);
+    const workspaces = await this.listKnownWorkspaces();
     const agents: AgentRecord[] = [];
     const orgNodes: OrgNode[] = [];
+    const tasks: TaskRecord[] = [];
+    const messages: MessageRecord[] = [];
     for (const workspace of workspaces) {
       const workspaceAgents = await this.loadAgentsForWorkspacePath(workspace.path);
       const workspaceOrg = await this.loadOrgForWorkspacePath(workspace.path);
+      const workspaceTasks = await this.loadTasksForWorkspacePath(workspace.path);
+      const workspaceMessages = await this.loadMessagesForWorkspacePath(workspace.path);
       agents.push(...workspaceAgents);
       orgNodes.push(...workspaceOrg);
+      tasks.push(...workspaceTasks);
+      messages.push(...workspaceMessages);
     }
     this.agents = agents;
     this.orgNodes = orgNodes;
-    await this.persistAgents();
-    await this.persistOrg();
+    this.tasks = tasks.map((task) => this.normalizeTaskRecord(task));
+    this.messages = messages;
   }
 
   private async resolveWorkspacePath(workspaceId: string): Promise<string | null> {
-    const workspaces = await loadWorkspaces(this.options.rootDir).catch(() => []);
+    const workspaces = await this.listKnownWorkspaces();
     return findWorkspaceById(workspaces, workspaceId)?.path ?? null;
   }
 
+  private async listKnownWorkspaces() {
+    const repoPaths = this.options.listWorkspacePaths ? await this.options.listWorkspacePaths().catch(() => []) : [];
+    return loadWorkspaces(this.options.rootDir, { repoPaths }).catch(() => []);
+  }
+
   private getWorkspaceAgentsPath(workspacePath: string): string {
-    return path.join(workspacePath, ".orchestrum", "agents.json");
+    return getWorkspaceAgentsFilePath(workspacePath);
   }
 
   private getWorkspaceOrgPath(workspacePath: string): string {
-    return path.join(workspacePath, ".orchestrum", "org.json");
+    return getWorkspaceOrgFilePath(workspacePath);
   }
 
   private async loadAgentsForWorkspaceId(workspaceId: string): Promise<AgentRecord[]> {
@@ -1082,13 +1589,39 @@ export class AgentPlatform {
     await fs.writeFile(this.getWorkspaceOrgPath(workspacePath), JSON.stringify(nodes, null, 2), "utf8");
   }
 
+  private async loadTasksForWorkspacePath(workspacePath: string): Promise<TaskRecord[]> {
+    const raw = await this.readJson<unknown[]>(getWorkspaceTasksFilePath(workspacePath), []);
+    if (!Array.isArray(raw)) return [];
+    return raw.map((task) => this.normalizeTaskRecord(task));
+  }
+
+  private async loadMessagesForWorkspacePath(workspacePath: string): Promise<MessageRecord[]> {
+    const raw = await this.readJson<MessageRecord[]>(getWorkspaceMessagesFilePath(workspacePath), []);
+    return Array.isArray(raw) ? raw : [];
+  }
+
   private toMissionAgent(agent: AgentRecord): MissionAgent {
     return {
       id: agent.id,
       workspaceId: agent.workspaceId,
       name: agent.name,
       role: agent.role,
-      tags: agent.tags,
+      tags: Array.from(new Set([
+        ...agent.tags,
+        agent.profile.specialization,
+        agent.profile.seniority
+      ].filter(Boolean))),
+      specialization: agent.profile.specialization,
+      seniority: agent.profile.seniority,
+      capacity: {
+        maxParallelWork: agent.profile.maxParallelWork
+      },
+      runtime: {
+        state: agent.status.state,
+        currentTaskId: agent.status.currentTaskId,
+        currentTaskIds: agent.status.currentTaskIds,
+        activeLoad: this.agentActiveLoad(agent)
+      },
       provider: normalizeMissionProvider(agent.provider, agent.role),
       capabilities: agent.capabilities
     };
@@ -1098,12 +1631,19 @@ export class AgentPlatform {
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const now = new Date().toISOString();
     const role = typeof record.role === "string" ? record.role : "general";
+    const currentTaskIds =
+      record.status && typeof record.status === "object" && Array.isArray((record.status as Record<string, unknown>).currentTaskIds)
+        ? ((record.status as Record<string, unknown>).currentTaskIds as unknown[]).map((taskId) => String(taskId)).filter(Boolean)
+        : record.status && typeof record.status === "object" && typeof (record.status as Record<string, unknown>).currentTaskId === "string"
+          ? [String((record.status as Record<string, unknown>).currentTaskId)]
+          : [];
     return {
       id: typeof record.id === "string" && record.id.trim() ? record.id : crypto.randomUUID(),
       workspaceId: typeof record.workspaceId === "string" ? record.workspaceId : undefined,
       name: typeof record.name === "string" && record.name.trim() ? record.name : "Agent",
       role,
       tags: this.normalizeStringArray(record.tags),
+      profile: this.normalizeAgentProfile(record.profile, role),
       provider: normalizeMissionProvider(record.provider ?? defaultProviderForRole(role), role),
       capabilities: {
         shell: this.readBoolean(record.capabilities, "shell", false),
@@ -1112,10 +1652,11 @@ export class AgentPlatform {
       },
       status: {
         state: this.normalizeAgentState(record.status),
+        currentTaskIds,
         currentTaskId:
           record.status && typeof record.status === "object" && typeof (record.status as Record<string, unknown>).currentTaskId === "string"
             ? String((record.status as Record<string, unknown>).currentTaskId)
-            : undefined,
+            : currentTaskIds[0],
         lastHeartbeatAt:
           record.status && typeof record.status === "object" && typeof (record.status as Record<string, unknown>).lastHeartbeatAt === "string"
             ? String((record.status as Record<string, unknown>).lastHeartbeatAt)
@@ -1123,6 +1664,57 @@ export class AgentPlatform {
       },
       createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
       updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : now
+    };
+  }
+
+  private normalizeAgentProfile(input: unknown, role: string): AgentRecord["profile"] {
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const defaults = this.defaultAgentProfile(role);
+    const specialization =
+      typeof record.specialization === "string" && record.specialization.trim()
+        ? record.specialization.trim()
+        : defaults.specialization;
+    const seniorityRaw =
+      typeof record.seniority === "string" && record.seniority.trim()
+        ? record.seniority.trim().toLowerCase()
+        : defaults.seniority;
+    const seniority = ["junior", "mid", "senior", "lead"].includes(seniorityRaw)
+      ? seniorityRaw
+      : defaults.seniority;
+    const maxParallelRaw =
+      typeof record.maxParallelWork === "number"
+        ? record.maxParallelWork
+        : Number(record.maxParallelWork ?? NaN);
+    const maxParallelWork = Number.isFinite(maxParallelRaw) && maxParallelRaw > 0
+      ? Math.max(1, Math.floor(maxParallelRaw))
+      : defaults.maxParallelWork;
+    return {
+      specialization,
+      seniority,
+      maxParallelWork
+    };
+  }
+
+  private defaultAgentProfile(role: string): AgentRecord["profile"] {
+    const normalized = role.trim().toLowerCase();
+    if (normalized === "pm") {
+      return {
+        specialization: "pm",
+        seniority: "lead",
+        maxParallelWork: 1
+      };
+    }
+    if (normalized === "audit") {
+      return {
+        specialization: "audit",
+        seniority: "senior",
+        maxParallelWork: 1
+      };
+    }
+    return {
+      specialization: "fullstack",
+      seniority: "senior",
+      maxParallelWork: 2
     };
   }
 
@@ -1181,19 +1773,28 @@ export class AgentPlatform {
       : "queued";
     return {
       id: typeof record.id === "string" && record.id.trim() ? record.id : crypto.randomUUID(),
+      workspaceId: typeof record.workspaceId === "string" && record.workspaceId.trim() ? record.workspaceId : undefined,
       title: typeof record.title === "string" ? record.title : "Untitled Task",
       description: typeof record.description === "string" ? record.description : "",
       type: this.normalizeTaskType(record.type),
       payload: record.payload && typeof record.payload === "object" ? record.payload as Record<string, unknown> : {},
       assignedToAgentId: typeof record.assignedToAgentId === "string" ? record.assignedToAgentId : "",
+      dependsOnTaskIds: this.normalizeStringArray(record.dependsOnTaskIds),
+      linkedWorkItemId: typeof record.linkedWorkItemId === "string" && record.linkedWorkItemId.trim() ? record.linkedWorkItemId : undefined,
+      linkedWorkItemTitle: typeof record.linkedWorkItemTitle === "string" && record.linkedWorkItemTitle.trim() ? record.linkedWorkItemTitle : undefined,
+      plannerTaskId: typeof record.plannerTaskId === "string" && record.plannerTaskId.trim() ? record.plannerTaskId : undefined,
+      laneId: typeof record.laneId === "string" && record.laneId.trim() ? record.laneId : undefined,
+      laneLabel: typeof record.laneLabel === "string" && record.laneLabel.trim() ? record.laneLabel : undefined,
+      waitingOnTaskIds: this.normalizeStringArray(record.waitingOnTaskIds),
+      blockedByTaskIds: this.normalizeStringArray(record.blockedByTaskIds),
       status,
       createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
       startedAt: typeof record.startedAt === "string" ? record.startedAt : undefined,
       finishedAt: typeof record.finishedAt === "string" ? record.finishedAt : undefined,
       attempts: typeof record.attempts === "number" && record.attempts >= 0 ? Math.floor(record.attempts) : 0,
       maxAttempts: typeof record.maxAttempts === "number" && record.maxAttempts > 0 ? Math.floor(record.maxAttempts) : 2,
-      artifactsPath: typeof record.artifactsPath === "string" ? record.artifactsPath : path.join(this.tasksDir, crypto.randomUUID(), "artifacts"),
-      logsPath: typeof record.logsPath === "string" ? record.logsPath : path.join(this.tasksDir, crypto.randomUUID(), "logs.ndjson"),
+      artifactsPath: typeof record.artifactsPath === "string" ? record.artifactsPath : path.join(this.dataDir, "tasks", crypto.randomUUID(), "artifacts"),
+      logsPath: typeof record.logsPath === "string" ? record.logsPath : path.join(this.dataDir, "tasks", crypto.randomUUID(), "logs.ndjson"),
       linkedRunId: typeof record.linkedRunId === "string" ? record.linkedRunId : undefined,
       linkedTemplateId: typeof record.linkedTemplateId === "string" ? record.linkedTemplateId : undefined,
       pauseReason: record.pauseReason === "awaiting_input" || record.pauseReason === "awaiting_approval" ? record.pauseReason : null,

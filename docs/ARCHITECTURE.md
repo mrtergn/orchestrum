@@ -2,16 +2,16 @@
 
 ## Overview
 
-Orchestrum is a local-first AI engineering platform with four main layers:
+Orchestrum is a local-first AI engineering control plane with four main layers:
 
-1. CLI commands for mission, delivery, browser QA, and operations
+1. CLI commands for mission, delivery, browser smoke, and operations
 2. A local service that exposes HTTP and SSE
 3. A Next.js UI and Electron desktop wrapper
-4. Filesystem-backed persistence under `runs/` and workspace metadata under `.orchestrum/` and `.memory/`
+4. Filesystem-backed persistence under `runs/` and repo-local control state under `.orchestrum/control/`
 
 ## Data Flow
 
-1. The CLI or service starts a mission, delivery session, or browser run.
+1. The CLI or service starts a mission, delivery handoff, work item, or browser smoke run.
 2. `packages/core` creates a run directory and writes `run.json` plus `events.ndjson`.
 3. Step, node, packet, finding, and remediation artifacts are written under the run directory.
 4. `packages/service` indexes runs and streams events over SSE.
@@ -19,7 +19,7 @@ Orchestrum is a local-first AI engineering platform with four main layers:
 
 ## Packages
 
-- `packages/core`: mission runtime, delivery lifecycle, browser QA runtime, learnings, security, plugins, state index
+- `packages/core`: mission runtime, delivery lifecycle, browser smoke runtime, learnings, telemetry, security, plugins, state index
 - `packages/service`: Express API, SSE, run indexing, recovery, provider checks
 - `apps/ui`: Next.js UI for workspaces, runs, metrics, delivery, and settings
 - `apps/desktop`: Electron shell around the UI and service
@@ -38,12 +38,31 @@ runs/<workspaceId>/<runId>/
   delivery/
 ```
 
-Workspace-scoped metadata typically lives in:
+Workspace-scoped operational truth lives in:
 
 ```text
-.orchestrum/
-.memory/
+.orchestrum/control/
+  workspace.json
+  config.json
+  policies.json
+  signals.ndjson
+  learnings.ndjson
+  state-index.sqlite
+  plugins/
+  work-items/
+  worktrees/
 ```
+
+Operator-global state is intentionally narrow:
+
+```text
+~/.orchestrum/
+  license.json
+  updates/
+  .secrets.enc
+```
+
+Everything else that drives missions, work items, plugins, learnings, and signals is repo-local under `.orchestrum/control/`.
 
 ## Mission Runtime
 
@@ -53,14 +72,14 @@ Mission templates are built in. A mission expands into a graph of nodes, assigns
 
 Delivery sessions generate work packets from repo context and team preset data. Exports and imports are tracked as evidence. Imported responses become findings, remediations, packet status updates, and summary metrics.
 
-## Browser QA Runtime
+## Browser Smoke Runtime
 
-`qa`, `benchmark`, and `canary` runs capture browser state and artifacts locally. These runs share the same run index, logs, and diagnostics surfaces.
+`qa`, `benchmark`, and `canary` runs capture browser state and artifacts locally. `qa` can also execute scripted browser scenarios with step-level artifacts. These runs share the same run index, logs, and diagnostics surfaces.
 
 ## Event Streaming
 
-The service tails `events.ndjson` and exposes SSE endpoints for run detail pages and system-wide activity streams.
+Mission, browser, work-item, review, and supervisor signals are mirrored into workspace-local signal envelopes. The service exposes SSE endpoints for run detail pages and aggregate activity streams derived from those local signals plus run events.
 
 ## Recovery and Indexing
 
-The service rebuilds a SQLite-backed state index from filesystem artifacts. Interrupted runs are marked during startup so the UI can surface them for review.
+The service rebuilds a persisted `sql.js` state index from filesystem artifacts. Interrupted runs are marked during startup so the UI can surface them for review.

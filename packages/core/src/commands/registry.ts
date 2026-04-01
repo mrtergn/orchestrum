@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import path from "path";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import net from "node:net";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import fsSync from "node:fs";
@@ -47,8 +48,8 @@ import {
   isFeatureAllowed,
   enforceFeature
 } from "../index.js";
-import { addWorkspace, loadWorkspaces, findWorkspaceById, findWorkspaceByPath } from "../runner/workspaces.js";
-import { startCluster } from "../cluster/manager.js";
+import { addWorkspace, loadWorkspaces } from "../runner/workspaces.js";
+import { ensureWorkspaceManifest, getWorkspaceAgentsPath } from "../runner/control.js";
 import { OrchestrumError } from "../errors.js";
 import { DEFAULT_SERVICE_PORT, DEFAULT_UI_PORT } from "../constants.js";
 
@@ -68,18 +69,19 @@ missionCmd
   .requiredOption("--template <id>", "Mission template id")
   .requiredOption("--workspace <id>", "Workspace ID")
   .requiredOption("--goal <text>", "Mission goal")
+  .option("--repo <path>", "Workspace repo path (default: cwd)")
   .option("--runs-dir <path>", "Runs directory (default: ./runs)")
   .option("--run-id <id>", "Mission run id")
   .action(async (options) => {
     try {
       const rootDir = process.cwd();
+      const repoPath = options.repo ? path.resolve(String(options.repo)) : rootDir;
       const runsDir = options.runsDir
         ? path.resolve(options.runsDir)
         : path.resolve(rootDir, "runs");
-      const workspaces = await loadWorkspaces(rootDir);
-      const workspace = findWorkspaceById(workspaces, options.workspace);
-      if (!workspace) {
-        throw new Error(`Workspace ${options.workspace} not found. Use orchestrum workspace add.`);
+      const workspace = await ensureWorkspaceManifest(repoPath);
+      if (workspace.id !== String(options.workspace)) {
+        throw new Error(`Workspace ${options.workspace} does not match repo manifest ${workspace.id} for ${repoPath}.`);
       }
       const agents = await loadWorkspaceMissionAgents(workspace.path);
       await applySecretsToEnv({
@@ -116,6 +118,7 @@ missionCmd
   .requiredOption("--run <id>", "Mission run id")
   .requiredOption("--node <id>", "Mission node id")
   .requiredOption("--workspace <id>", "Workspace ID")
+  .option("--repo <path>", "Workspace repo path (default: cwd)")
   .option("--runs-dir <path>", "Runs directory (default: ./runs)")
   .option("--file <path>", "Response file path")
   .option("--stdin", "Read response from stdin")
@@ -123,13 +126,13 @@ missionCmd
   .action(async (options) => {
     try {
       const rootDir = process.cwd();
+      const repoPath = options.repo ? path.resolve(String(options.repo)) : rootDir;
       const runsDir = options.runsDir
         ? path.resolve(options.runsDir)
         : path.resolve(rootDir, "runs");
-      const workspaces = await loadWorkspaces(rootDir);
-      const workspace = findWorkspaceById(workspaces, options.workspace);
-      if (!workspace) {
-        throw new Error(`Workspace ${options.workspace} not found. Use orchestrum workspace add.`);
+      const workspace = await ensureWorkspaceManifest(repoPath);
+      if (workspace.id !== String(options.workspace)) {
+        throw new Error(`Workspace ${options.workspace} does not match repo manifest ${workspace.id} for ${repoPath}.`);
       }
       const text = options.file
         ? fsSync.readFileSync(path.resolve(String(options.file)), "utf8")
@@ -284,7 +287,7 @@ function registerBrowserCommand(name: "qa" | "benchmark" | "canary", description
     });
 }
 
-registerBrowserCommand("qa", "Run headless browser QA with artifacts");
+registerBrowserCommand("qa", "Run headless browser smoke with artifacts");
 registerBrowserCommand("benchmark", "Run browser benchmark capture");
 registerBrowserCommand("canary", "Run repeated browser canary checks");
 
@@ -342,11 +345,7 @@ deliveryCmd
       const repoPath = path.resolve(options.repo);
       const workspaceId = await resolveWorkspaceId(repoPath, options.workspace);
       const runsDir = options.runsDir ? path.resolve(options.runsDir) : path.resolve(process.cwd(), "runs");
-      const workspaces = await loadWorkspaces(process.cwd());
-      const workspace = findWorkspaceById(workspaces, workspaceId);
-      if (!workspace) {
-        throw new Error(`Workspace ${workspaceId} not found. Use orchestrum workspace add.`);
-      }
+      const workspace = await ensureWorkspaceManifest(repoPath, { id: workspaceId });
       const agents = await loadWorkspaceMissionAgents(workspace.path);
       const goal = [
         String(options.goal),
@@ -733,7 +732,9 @@ pluginCmd
   .action(async (pluginPath) => {
     try {
       await requireFeature("plugins");
-      const plugin = await installPlugin(pluginPath);
+      const workspacePath = process.cwd();
+      await ensureWorkspaceManifest(workspacePath);
+      const plugin = await installPlugin(workspacePath, pluginPath);
       console.log(`Installed plugin ${plugin.name} (${plugin.version}). Disabled by default.`);
     } catch (err) {
       await handleFatal(err);
@@ -744,7 +745,9 @@ pluginCmd
   .command("list")
   .action(async () => {
     try {
-      const plugins = await listInstalledPlugins();
+      const workspacePath = process.cwd();
+      await ensureWorkspaceManifest(workspacePath);
+      const plugins = await listInstalledPlugins(workspacePath);
       if (plugins.length === 0) {
         console.log("No plugins installed.");
         return;
@@ -763,7 +766,9 @@ pluginCmd
   .action(async (name) => {
     try {
       await requireFeature("plugins");
-      await setPluginEnabled(name, true);
+      const workspacePath = process.cwd();
+      await ensureWorkspaceManifest(workspacePath);
+      await setPluginEnabled(workspacePath, name, true);
       console.log(`Enabled plugin ${name}`);
     } catch (err) {
       await handleFatal(err);
@@ -775,7 +780,9 @@ pluginCmd
   .argument("<name>", "Plugin name")
   .action(async (name) => {
     try {
-      await setPluginEnabled(name, false);
+      const workspacePath = process.cwd();
+      await ensureWorkspaceManifest(workspacePath);
+      await setPluginEnabled(workspacePath, name, false);
       console.log(`Disabled plugin ${name}`);
     } catch (err) {
       await handleFatal(err);
@@ -788,7 +795,9 @@ pluginCmd
   .action(async (name) => {
     try {
       await requireFeature("plugins");
-      await removePlugin(name);
+      const workspacePath = process.cwd();
+      await ensureWorkspaceManifest(workspacePath);
+      await removePlugin(workspacePath, name);
       console.log(`Removed plugin ${name}`);
     } catch (err) {
       await handleFatal(err);
@@ -867,29 +876,6 @@ program
     }
   });
 
-const clusterCmd = program.command("cluster").description("Local worker cluster");
-
-clusterCmd
-  .command("start")
-  .option("--workers <n>", "Number of workers", (value) => Number(value), 2)
-  .option("--queue-dir <path>", "Queue directory (default: ./runs/.cluster)")
-  .option("--workspace <id>", "Workspace ID (default: default)")
-  .action(async (options) => {
-    try {
-      const workspaceId = options.workspace ?? "default";
-      const queueDir = options.queueDir
-        ? path.resolve(options.queueDir)
-        : path.resolve(process.cwd(), "runs", workspaceId, ".cluster");
-      await requireFeature("cluster");
-      await startCluster({
-        workers: options.workers,
-        queueRoot: queueDir
-      });
-    } catch (err) {
-      await handleFatal(err);
-    }
-  });
-
 const workspaceCmd = program.command("workspace").description("Manage workspaces");
 
 workspaceCmd
@@ -946,22 +932,15 @@ program
 }
 
 async function resolveWorkspaceId(repoPath: string, workspaceId?: string): Promise<string> {
-  const rootDir = process.cwd();
-  const workspaces = await loadWorkspaces(rootDir);
-  if (workspaceId) {
-    const match = findWorkspaceById(workspaces, workspaceId);
-    if (!match) {
-      throw new Error(`Workspace ${workspaceId} not found. Use orchestrum workspace add.`);
-    }
-    return match.id;
+  const manifest = await ensureWorkspaceManifest(repoPath);
+  if (workspaceId && manifest.id !== workspaceId) {
+    throw new Error(`Workspace ${workspaceId} does not match repo manifest ${manifest.id} for ${repoPath}.`);
   }
-  const match = findWorkspaceByPath(workspaces, repoPath);
-  if (match) return match.id;
-  return "default";
+  return manifest.id;
 }
 
 async function loadWorkspaceMissionAgents(workspacePath: string): Promise<MissionAgent[]> {
-  const agentsPath = path.join(workspacePath, ".orchestrum", "agents.json");
+  const agentsPath = getWorkspaceAgentsPath(workspacePath);
   const raw = await fsSync.promises.readFile(agentsPath, "utf8").catch(() => "[]");
   const parsed = JSON.parse(raw) as Array<{
     id?: string;
@@ -969,8 +948,18 @@ async function loadWorkspaceMissionAgents(workspacePath: string): Promise<Missio
     name?: string;
     role?: string;
     tags?: string[];
+    profile?: {
+      specialization?: string;
+      seniority?: string;
+      maxParallelWork?: number;
+    };
     provider?: { type?: string; model?: string; apiKeyRef?: string };
     capabilities?: { shell?: boolean; fs?: boolean; network?: boolean };
+    status?: {
+      state?: string;
+      currentTaskId?: string;
+      currentTaskIds?: string[];
+    };
   }>;
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error(`No workspace agents configured in ${agentsPath}.`);
@@ -981,6 +970,28 @@ async function loadWorkspaceMissionAgents(workspacePath: string): Promise<Missio
     name: String(agent.name ?? "Agent"),
     role: String(agent.role ?? "general"),
     tags: Array.isArray(agent.tags) ? agent.tags.map((tag) => String(tag)) : [],
+    specialization: typeof agent.profile?.specialization === "string" ? agent.profile.specialization : undefined,
+    seniority: typeof agent.profile?.seniority === "string" ? agent.profile.seniority : undefined,
+    capacity: {
+      maxParallelWork:
+        typeof agent.profile?.maxParallelWork === "number" && agent.profile.maxParallelWork > 0
+          ? Math.floor(agent.profile.maxParallelWork)
+          : undefined
+    },
+    runtime: {
+      state: typeof agent.status?.state === "string" ? agent.status.state : undefined,
+      currentTaskId: typeof agent.status?.currentTaskId === "string" ? agent.status.currentTaskId : undefined,
+      currentTaskIds: Array.isArray(agent.status?.currentTaskIds)
+        ? agent.status.currentTaskIds.map((taskId) => String(taskId)).filter(Boolean)
+        : typeof agent.status?.currentTaskId === "string" && agent.status.currentTaskId
+          ? [agent.status.currentTaskId]
+          : [],
+      activeLoad: Array.isArray(agent.status?.currentTaskIds)
+        ? agent.status.currentTaskIds.filter(Boolean).length
+        : typeof agent.status?.currentTaskId === "string" && agent.status.currentTaskId
+          ? 1
+          : 0
+    },
     provider: normalizeMissionProvider(agent.provider ?? {}, String(agent.role ?? "general")),
     capabilities: {
       shell: Boolean(agent.capabilities?.shell),
@@ -1009,46 +1020,21 @@ async function readStdinIfAny(): Promise<string> {
   });
 }
 
-function killProcessOnPort(port: number): void {
-  try {
-    if (process.platform === "win32") {
-      // On Windows, use netstat + taskkill
-      const cmd = `netstat -ano | findstr :${port}`;
-      const result = execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
-      const lines = result.split("\n").filter((line) => line.trim());
-      const pids = new Set<number>();
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        const token = parts[parts.length - 1];
-        if (!token) continue;
-        const pid = parseInt(token, 10);
-        if (!isNaN(pid) && pid > 0) {
-          pids.add(pid);
-        }
-      }
-      for (const pid of pids) {
-        try {
-          execSync(`taskkill /PID ${pid} /F`, { stdio: "ignore" });
-        } catch {
-          // Process may have already exited
-        }
-      }
-    } else {
-      // On Unix-like systems, use lsof + kill
-      const cmd = `lsof -i :${port} -t`;
-      const result = execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "ignore"] });
-      const pids = result.trim().split("\n").filter((pid) => pid.trim());
-      for (const pid of pids) {
-        try {
-          execSync(`kill -9 ${pid}`, { stdio: "ignore" });
-        } catch {
-          // Process may have already exited
-        }
-      }
-    }
-  } catch {
-    // Port may not be in use or command failed
+async function findAvailablePort(startPort: number): Promise<number> {
+  let candidate = Math.max(1, Math.floor(startPort));
+  while (candidate < startPort + 50) {
+    const free = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => resolve(false));
+      server.once("listening", () => {
+        server.close(() => resolve(true));
+      });
+      server.listen(candidate, "127.0.0.1");
+    });
+    if (free) return candidate;
+    candidate += 1;
   }
+  throw new Error(`No available port found near ${startPort}.`);
 }
 
 async function startUiWithService(options: { port: number; servicePort: number; prod?: boolean }) {
@@ -1078,9 +1064,8 @@ async function startUiWithService(options: { port: number; servicePort: number; 
     }
   }
 
-  // Kill any existing processes on the ports
-  killProcessOnPort(options.port);
-  killProcessOnPort(options.servicePort);
+  const servicePort = await findAvailablePort(options.servicePort);
+  const uiPort = await findAvailablePort(options.port === servicePort ? servicePort + 1 : options.port);
 
   const serviceArgs = [resolveTsxBin(serviceRoot ?? path.dirname(serviceEntry)), serviceEntry];
   const service = spawn(process.execPath, serviceArgs, {
@@ -1088,23 +1073,25 @@ async function startUiWithService(options: { port: number; servicePort: number; 
     cwd: invocationRoot,
     env: {
       ...process.env,
-      ORCHESTRUM_SERVICE_PORT: String(options.servicePort)
+      ORCHESTRUM_SERVICE_PORT: String(servicePort)
     }
   });
 
   const uiRoot = resolveUiRoot();
   const uiArgs = options.prod
-    ? [resolveNextBin(uiRoot), "start", "-p", String(options.port)]
-    : [resolveNextBin(uiRoot), "dev", "-p", String(options.port)];
+    ? [resolveNextBin(uiRoot), "start", "-p", String(uiPort)]
+    : [resolveNextBin(uiRoot), "dev", "-p", String(uiPort)];
   const ui = spawn(process.execPath, uiArgs, {
     stdio: "inherit",
     cwd: uiRoot,
     env: {
       ...process.env,
-      PORT: String(options.port),
-      NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL: `http://localhost:${options.servicePort}`
+      PORT: String(uiPort),
+      NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL: `http://localhost:${servicePort}`
     }
   });
+
+  console.log(`[orchestrum] UI http://localhost:${uiPort} · service http://localhost:${servicePort}`);
 
   service.on("error", (err) => {
     console.error(`Service failed to start: ${(err as Error).message}`);

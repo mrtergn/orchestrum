@@ -73,6 +73,17 @@ export type MissionAgent = {
   name: string;
   role: string;
   tags?: string[];
+  specialization?: string;
+  seniority?: string;
+  capacity?: {
+    maxParallelWork?: number;
+  };
+  runtime?: {
+    state?: string;
+    currentTaskId?: string;
+    currentTaskIds?: string[];
+    activeLoad?: number;
+  };
   provider: ProviderSpec;
   capabilities?: {
     shell?: boolean;

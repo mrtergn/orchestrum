@@ -3,6 +3,7 @@ import path from "node:path";
 import type { RunState } from "../runner/types.js";
 import type { RunAnalysis } from "./runAnalysis.js";
 import { writeJson } from "../runner/fs.js";
+import { getWorkspaceControlDir } from "../runner/control.js";
 
 export type KnowledgeNode = {
   id: string;
@@ -25,7 +26,7 @@ export type KnowledgeGraph = {
 const DEFAULT_GRAPH: KnowledgeGraph = { nodes: [], edges: [] };
 
 export async function loadKnowledgeGraph(workspacePath: string): Promise<KnowledgeGraph> {
-  const filePath = path.join(workspacePath, ".memory", "knowledge.json");
+  const filePath = path.join(getWorkspaceControlDir(workspacePath), "knowledge.json");
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw) as KnowledgeGraph;
@@ -122,7 +123,7 @@ export async function updateKnowledgeGraph(options: {
 }
 
 async function saveGraph(workspacePath: string, graph: KnowledgeGraph): Promise<void> {
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await writeJson(path.join(memoryDir, "knowledge.json"), graph);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await writeJson(path.join(controlDir, "knowledge.json"), graph);
 }

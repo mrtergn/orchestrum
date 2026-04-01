@@ -4,6 +4,7 @@ import type { RunAnalysis } from "../analytics/runAnalysis.js";
 import type { RunState } from "../runner/types.js";
 import type { OrchestrumConfig } from "../runner/config.js";
 import { writeJson } from "../runner/fs.js";
+import { getWorkspaceControlDir } from "../runner/control.js";
 
 export type RewardConfig = {
   success_weight: number;
@@ -33,7 +34,7 @@ const DEFAULT_STATE: AdaptationState = {
 };
 
 export async function loadAdaptationState(workspacePath: string): Promise<AdaptationState> {
-  const filePath = path.join(workspacePath, ".memory", "adaptation.json");
+  const filePath = path.join(getWorkspaceControlDir(workspacePath), "adaptation.json");
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw) as AdaptationState;
@@ -53,9 +54,9 @@ export async function loadAdaptationState(workspacePath: string): Promise<Adapta
 }
 
 export async function saveAdaptationState(workspacePath: string, state: AdaptationState): Promise<void> {
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await writeJson(path.join(memoryDir, "adaptation.json"), state);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await writeJson(path.join(controlDir, "adaptation.json"), state);
 }
 
 export function computeReward(

@@ -43,6 +43,41 @@ const BUILTIN_TEMPLATES: MissionTemplate[] = [
     ]
   }),
   createTemplate({
+    id: "implement-only",
+    name: "Implement Only",
+    description: "Apply a focused code change without adding extra planning or audit stages.",
+    category: "implementation",
+    defaultGoalHint: "Describe the specific implementation scope, constraints, and files or surfaces involved.",
+    recommendedRoles: ["dev"],
+    outcomes: ["Scoped patch artifact"],
+    nodes: [
+      patchNode({
+        id: "implement",
+        title: "Implement assigned scope",
+        role: "dev",
+        promptPath: promptPaths.implement,
+        inputs: ["goal", "repo_context"]
+      })
+    ]
+  }),
+  createTemplate({
+    id: "validation-only",
+    name: "Validation Only",
+    description: "Run workspace validation for an already-scoped change and capture the actual result.",
+    category: "hardening",
+    defaultGoalHint: "Describe what changed and what needs to be verified before review.",
+    recommendedRoles: ["dev"],
+    outcomes: ["Validation summary artifact"],
+    nodes: [
+      validationNode({
+        id: "validate",
+        title: "Run validation",
+        role: "dev",
+        inputs: ["goal", "git_diff"]
+      })
+    ]
+  }),
+  createTemplate({
     id: "audit-only",
     name: "Audit Only",
     description: "Audit the current repo state or diff without producing code changes.",

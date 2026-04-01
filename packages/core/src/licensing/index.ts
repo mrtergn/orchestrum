@@ -6,7 +6,6 @@ export type LicenseFeature =
   | "multi_workspace"
   | "arbitration"
   | "analytics"
-  | "cluster"
   | "plugins"
   | "strategy_evolution"
   | "advanced_sandbox";

@@ -4,6 +4,7 @@ import type { RunState } from "../runner/types.js";
 import type { RunAnalysis } from "./runAnalysis.js";
 import { writeJson } from "../runner/fs.js";
 import { MAX_TREND_DAYS } from "../constants.js";
+import { getWorkspaceControlDir } from "../runner/control.js";
 
 export type AnalyticsData = {
   runs: number;
@@ -49,7 +50,7 @@ const DEFAULT_ANALYTICS: AnalyticsData = {
 };
 
 export async function loadAnalytics(workspacePath: string): Promise<AnalyticsData> {
-  const filePath = path.join(workspacePath, ".memory", "analytics.json");
+  const filePath = path.join(getWorkspaceControlDir(workspacePath), "analytics.json");
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw) as AnalyticsData;
@@ -136,9 +137,9 @@ export async function updateAnalytics(
 }
 
 async function writeAnalytics(workspacePath: string, analytics: AnalyticsData): Promise<void> {
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await writeJson(path.join(memoryDir, "analytics.json"), analytics);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await writeJson(path.join(controlDir, "analytics.json"), analytics);
 }
 
 function clamp(value: number, min: number, max: number) {

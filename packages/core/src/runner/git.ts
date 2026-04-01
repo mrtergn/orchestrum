@@ -3,6 +3,36 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { writeText } from "./fs.js";
 
+export type PatchConflictArtifactBundle = {
+  patchPath: string;
+  gitStatusPath: string;
+  conflictsPath: string;
+  summaryPath: string;
+};
+
+export class PatchApplyError extends Error {
+  constructor(
+    message: string,
+    readonly code: "dirty_tree" | "apply_failed",
+    readonly artifacts?: PatchConflictArtifactBundle
+  ) {
+    super(message);
+    this.name = "PatchApplyError";
+  }
+}
+
+type DirtyEntry = {
+  code: string;
+  path: string;
+  originalPath?: string;
+};
+
+const MERGE_CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+const INTERNAL_DIR_PREFIXES = [
+  ".orchestrum/control/",
+  ".orchestrum/patch-conflicts/"
+];
+
 async function run(cmd: string, args: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd });
@@ -39,22 +69,65 @@ export async function getHeadSha(repoPath: string): Promise<string> {
 }
 
 export async function applyPatch(repoPath: string, diffText: string): Promise<void> {
-  const patchPath = path.join(repoPath, ".orchestrum_patch.diff");
-  await writeText(patchPath, diffText);
+  const dirty = await run("git", ["status", "--porcelain"], repoPath);
+  if (dirty.code !== 0) {
+    throw new PatchApplyError(`git status failed: ${dirty.stderr.trim()}`, "apply_failed");
+  }
+  const dirtyEntries = parseDirtyEntries(dirty.stdout).filter((entry) => !isInternalDirtyPath(entry.path));
+  const patchedPaths = extractPatchedPaths(diffText);
+  const hasConflict = dirtyEntries.some((entry) => MERGE_CONFLICT_CODES.has(entry.code));
+  const overlapsPatchedPath = dirtyEntries.some((entry) => {
+    if (patchedPaths.size === 0) return true;
+    if (patchedPaths.has(entry.path)) return true;
+    return entry.originalPath ? patchedPaths.has(entry.originalPath) : false;
+  });
+  if (hasConflict || overlapsPatchedPath) {
+    throw new PatchApplyError(
+      "Patch apply blocked because the repository has overlapping uncommitted changes or merge conflicts. Commit, stash, or clean the affected files first.",
+      "dirty_tree"
+    );
+  }
 
-  const gitApply = await run("git", ["apply", "--whitespace=fix", patchPath], repoPath);
+  const artifactsDir = path.join(repoPath, ".orchestrum", "patch-conflicts");
+  await fs.mkdir(artifactsDir, { recursive: true });
+  const patchPath = path.join(artifactsDir, "apply.patch");
+  const normalizedDiffText = normalizeDiffForGitApply(diffText);
+  await writeText(patchPath, normalizedDiffText);
+
+  const gitApply = await run("git", ["apply", "--3way", "--whitespace=fix", patchPath], repoPath);
   if (gitApply.code === 0) {
-    await fs.unlink(patchPath);
     return;
   }
 
-  const patchApply = await run("patch", ["-p0", "-i", patchPath], repoPath);
-  await fs.unlink(patchPath);
-
-  if (patchApply.code !== 0) {
-    const message = `Patch apply failed. git: ${gitApply.stderr.trim()} patch: ${patchApply.stderr.trim()}`;
-    throw new Error(message);
-  }
+  const status = await run("git", ["status", "--short"], repoPath);
+  const conflicts = await run("git", ["diff", "--name-only", "--diff-filter=U"], repoPath);
+  const gitStatusPath = path.join(artifactsDir, "git-status.txt");
+  const conflictsPath = path.join(artifactsDir, "conflicts.json");
+  const summaryPath = path.join(artifactsDir, "conflict-summary.md");
+  await writeText(gitStatusPath, `${status.stdout}${status.stderr}`.trim());
+  await writeText(conflictsPath, JSON.stringify({
+    conflictedFiles: conflicts.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+    gitApplyStdout: gitApply.stdout.trim(),
+    gitApplyStderr: gitApply.stderr.trim()
+  }, null, 2));
+  await writeText(summaryPath, [
+    "# Patch Apply Conflict",
+    "",
+    "Patch apply failed during `git apply --3way`.",
+    "",
+    `- stderr: ${gitApply.stderr.trim() || "n/a"}`,
+    `- conflicted files: ${conflicts.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(", ") || "none detected"}`
+  ].join("\n"));
+  throw new PatchApplyError(
+    `Patch apply failed after 3-way merge attempt: ${gitApply.stderr.trim() || gitApply.stdout.trim() || "unknown error"}`,
+    "apply_failed",
+    {
+      patchPath,
+      gitStatusPath,
+      conflictsPath,
+      summaryPath
+    }
+  );
 }
 
 export async function checkPatchApplies(repoPath: string, diffText: string): Promise<boolean> {
@@ -65,6 +138,85 @@ export async function checkPatchApplies(repoPath: string, diffText: string): Pro
     child.on("close", (code) => resolve(code === 0));
     child.on("error", () => resolve(false));
   });
+}
+
+function parseDirtyEntries(output: string): DirtyEntry[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const code = line.slice(0, 2);
+      const rawPath = line.slice(3).trim();
+      const [originalPath, nextPath] = rawPath.includes(" -> ")
+        ? rawPath.split(" -> ").map((entry) => entry.trim())
+        : [undefined, rawPath];
+      return {
+        code,
+        path: nextPath,
+        originalPath
+      };
+    });
+}
+
+function extractPatchedPaths(diffText: string): Set<string> {
+  const paths = new Set<string>();
+  let pendingOldPath: string | null = null;
+  for (const line of diffText.split(/\r?\n/)) {
+    if (line.startsWith("--- ")) {
+      const candidate = normalizePatchPath(line.slice(4).trim());
+      pendingOldPath = candidate;
+      if (candidate) paths.add(candidate);
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const candidate = normalizePatchPath(line.slice(4).trim()) ?? pendingOldPath;
+      if (candidate) paths.add(candidate);
+      pendingOldPath = null;
+    }
+  }
+  return paths;
+}
+
+function normalizePatchPath(rawPath: string): string | null {
+  if (!rawPath || rawPath === "/dev/null") return null;
+  const normalized = rawPath.replace(/^([ab])\//, "").trim();
+  return normalized || null;
+}
+
+function isInternalDirtyPath(filePath: string): boolean {
+  return INTERNAL_DIR_PREFIXES.some((prefix) => filePath === prefix.slice(0, -1) || filePath.startsWith(prefix));
+}
+
+function normalizeDiffForGitApply(diffText: string): string {
+  if (/\bdiff --git\b/.test(diffText)) {
+    return diffText.endsWith("\n") ? diffText : `${diffText}\n`;
+  }
+  const lines = diffText.split(/\r?\n/);
+  const normalized: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (typeof line !== "string") {
+      continue;
+    }
+    const nextLine = lines[index + 1];
+    if (line.startsWith("--- ") && typeof nextLine === "string" && nextLine.startsWith("+++ ")) {
+      const oldPath = normalizePatchPath(line.slice(4).trim());
+      const newPath = normalizePatchPath(nextLine.slice(4).trim());
+      const headerOld = oldPath ?? newPath;
+      const headerNew = newPath ?? oldPath;
+      if (headerOld && headerNew) {
+        normalized.push(`diff --git a/${headerOld} b/${headerNew}`);
+      }
+      normalized.push(`--- ${oldPath ? `a/${oldPath}` : "/dev/null"}`);
+      normalized.push(`+++ ${newPath ? `b/${newPath}` : "/dev/null"}`);
+      index += 1;
+      continue;
+    }
+    normalized.push(line);
+  }
+  const output = normalized.join("\n");
+  return output.endsWith("\n") ? output : `${output}\n`;
 }
 
 export async function gitDiff(repoPath: string): Promise<string> {

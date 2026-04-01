@@ -39,7 +39,7 @@ orchestrum delivery import \
   --file response.txt
 ```
 
-## Run Browser QA
+## Run Browser Smoke
 
 ```bash
 orchestrum qa \

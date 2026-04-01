@@ -7,6 +7,7 @@ import {
   addWorkspaceApproval,
   cancelRun,
   exportRunBundle,
+  getWorkspaceSignalsPath,
   importRunBundle,
   loadDeliverySession,
   loadMissionRun,
@@ -55,6 +56,8 @@ export function registerRunRoutes(
     stateIndex: StateIndex;
     runIndex: RunIndexLike;
     agentPlatform: AgentPlatformLike;
+    listWorkspacePaths: () => Promise<string[]>;
+    resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
   }
 ): void {
   const rebuildStateIndex = () => {
@@ -168,62 +171,47 @@ export function registerRunRoutes(
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    const seenStatuses = new Map<string, string>();
     let closed = false;
+    const workspaceId = typeof req.query.workspace === "string" ? req.query.workspace : undefined;
+    const tails = new Map<string, { position: number; buffer: string }>();
     req.on("close", () => {
       closed = true;
     });
 
-    const sendEvent = (name: string, payload: Record<string, unknown>) => {
+    const sendSignal = (payload: Record<string, unknown>) => {
       if (closed) return;
-      res.write(`event: ${name}\n`);
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    const signalFiles = async () => {
+      if (workspaceId) {
+        const workspacePath = await options.resolveWorkspacePath(workspaceId);
+        return workspacePath ? [getWorkspaceSignalsPath(workspacePath)] : [];
+      }
+      const repoPaths = await options.listWorkspacePaths().catch(() => []);
+      return repoPaths.map((repoPath) => getWorkspaceSignalsPath(repoPath));
     };
 
     const tick = async () => {
       if (closed) return;
-      const runs = options.runIndex.list().slice(0, 100);
-      for (const run of runs) {
-        const key = `${run.workspaceId}:${run.runId}`;
-        const previous = seenStatuses.get(key);
-        if (!previous && run.status === "running") {
-          sendEvent("run:started", {
-            runId: run.runId,
-            workspaceId: run.workspaceId,
-            status: run.status,
-            ts: Date.now()
-          });
+      for (const filePath of await signalFiles()) {
+        const current = tails.get(filePath) ?? { position: 0, buffer: "" };
+        const result = await readAppendedLines(filePath, current).catch(() => ({ lines: [], state: current }));
+        tails.set(filePath, result.state);
+        for (const line of result.lines) {
+          try {
+            sendSignal(JSON.parse(line));
+          } catch {
+            // ignore malformed signal lines
+          }
         }
-        if (run.status === "running") {
-          sendEvent("run:step", {
-            runId: run.runId,
-            workspaceId: run.workspaceId,
-            status: run.status,
-            ts: Date.now()
-          });
-        }
-        if (previous === "running" && run.status !== "running") {
-          sendEvent("run:updated", {
-            runId: run.runId,
-            workspaceId: run.workspaceId,
-            status: run.status,
-            ts: Date.now()
-          });
-        }
-        seenStatuses.set(key, run.status);
       }
-
-      sendEvent("agent:updated", {
-        queued: 0,
-        running: runs.filter((run) => run.status === "running").length,
-        ts: Date.now()
-      });
     };
 
     await tick();
     const timer = setInterval(() => {
       void tick();
-    }, 2000);
+    }, 1500);
     req.on("close", () => clearInterval(timer));
   });
 

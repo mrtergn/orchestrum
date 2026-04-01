@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import type { SafetyFinding } from "../security/safety.js";
 import type { GovernanceProfile } from "./types.js";
 import type { OrchestrumConfig } from "./config.js";
+import { loadWorkspacePolicies } from "./config.js";
 import { runCommands } from "./commands.js";
 import { appendLine, readJsonIfExists, writeJson } from "./fs.js";
 
@@ -49,11 +50,19 @@ export function resolveGovernanceSettings(
   };
 }
 
-export function scanGovernedCommands(commands: string[], settings: GovernanceSettings): SafetyFinding[] {
+export function scanGovernedCommands(
+  commands: string[],
+  settings: GovernanceSettings,
+  policy?: OrchestrumConfig["policy"] | null
+): SafetyFinding[] {
   if (!settings.enabled || !settings.dangerous_command_guard) return [];
   const findings: SafetyFinding[] = [];
+  const blockedCommands = normalizePolicyMatchers(policy?.blocked_commands);
   for (const command of commands) {
-    if (/\b(git\s+reset\s+--hard|git\s+clean\s+-fd|chmod\s+777|rm\s+-rf|sudo\s+)/i.test(command)) {
+    if (
+      /\b(git\s+reset\s+--hard|git\s+clean\s+-fd|chmod\s+777|rm\s+-rf|sudo\s+)/i.test(command) ||
+      blockedCommands.some((pattern) => pattern.test(command))
+    ) {
       findings.push({
         level: "high",
         message: `Governance blocked a dangerous command: ${command}`
@@ -63,9 +72,18 @@ export function scanGovernedCommands(commands: string[], settings: GovernanceSet
   return findings;
 }
 
-export function scanGovernedDiff(diffText: string, changedFiles: string[], settings: GovernanceSettings): SafetyFinding[] {
+export function scanGovernedDiff(
+  diffText: string,
+  changedFiles: string[],
+  settings: GovernanceSettings,
+  policy?: OrchestrumConfig["policy"] | null
+): SafetyFinding[] {
   if (!settings.enabled || !settings.config_protection) return [];
-  const protectedFiles = changedFiles.filter((file) => CRITICAL_FILE_PATTERNS.some((pattern) => pattern.test(file)));
+  const protectedPathMatchers = [
+    ...CRITICAL_FILE_PATTERNS,
+    ...normalizePolicyMatchers([...(policy?.protected_paths ?? []), ...(policy?.approval_paths ?? []), ...(policy?.forbidden_paths ?? [])])
+  ];
+  const protectedFiles = changedFiles.filter((file) => protectedPathMatchers.some((pattern) => pattern.test(file)));
   if (protectedFiles.length === 0) return [];
   return [{
     level: "high",
@@ -79,13 +97,14 @@ export async function runQualityGate(options: {
   stepId: string;
   runId: string;
   settings: GovernanceSettings;
+  policy?: OrchestrumConfig["policy"] | null;
   emit?: (event: Record<string, unknown>) => void;
 }): Promise<{ ok: boolean; commands: string[]; logPath?: string; findings: SafetyFinding[] }> {
   if (!options.settings.enabled || !options.settings.quality_gate) {
     return { ok: true, commands: [], findings: [] };
   }
 
-  const commands = await discoverQualityGateCommands(options.repoPath);
+  const commands = await resolveQualityGateCommands(options.repoPath, options.policy);
   if (commands.length === 0) {
     return { ok: true, commands: [], findings: [] };
   }
@@ -162,9 +181,30 @@ export async function loadDocsSyncState(repoPath: string): Promise<{
 }
 
 async function discoverQualityGateCommands(repoPath: string): Promise<string[]> {
+  const workspacePolicy = await loadWorkspacePolicies(repoPath).catch(() => null);
+  return resolveQualityGateCommands(repoPath, workspacePolicy);
+}
+
+async function resolveQualityGateCommands(repoPath: string, policy?: OrchestrumConfig["policy"] | null): Promise<string[]> {
+  if (policy?.quality_gate_commands && policy.quality_gate_commands.length > 0) {
+    return policy.quality_gate_commands;
+  }
+  if (policy?.validation_commands && policy.validation_commands.length > 0) {
+    return policy.validation_commands;
+  }
   const packageJson = await readJsonIfExists<{ scripts?: Record<string, string> }>(path.join(repoPath, "package.json"));
   const scripts = packageJson?.scripts ?? {};
   const order = ["typecheck", "test", "lint", "build"];
   const selected = order.filter((name) => typeof scripts[name] === "string" && scripts[name]?.trim()).slice(0, 2);
   return selected.map((name) => `npm run ${name}`);
+}
+
+function normalizePolicyMatchers(values?: string[] | null): RegExp[] {
+  return (values ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => {
+      const escaped = value.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+      return new RegExp(escaped, "i");
+    });
 }

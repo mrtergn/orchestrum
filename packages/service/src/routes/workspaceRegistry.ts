@@ -19,12 +19,21 @@ export function registerWorkspaceRegistryRoutes(
     rootDir: string;
     runIndex: RunIndexLike;
     resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
+    listWorkspacePaths: () => Promise<string[]>;
+    rememberWorkspacePath: (repoPath: string) => Promise<{ id: string; path: string; name?: string; createdAt?: string; updatedAt?: string }>;
+    forgetWorkspacePath: (repoPath: string) => Promise<void>;
   }
 ): void {
   const workspaceListRoutes = ["/workspaces", "/api/workspaces"] as const;
   for (const route of workspaceListRoutes) {
-    app.get(route, async (_req, res) => {
-      const workspaces = await loadWorkspaces(options.rootDir);
+    app.get(route, async (req, res) => {
+      const explicitPaths = extractWorkspacePaths(req.query);
+      const workspaces = await loadWorkspaces(options.rootDir, {
+        repoPaths: Array.from(new Set([...(await options.listWorkspacePaths()), ...explicitPaths]))
+      });
+      for (const workspace of workspaces) {
+        await options.rememberWorkspacePath(workspace.path);
+      }
       const enriched = await Promise.all(workspaces.map((workspace) => buildWorkspaceSummary(workspace, options.runIndex)));
       res.json({ workspaces: enriched });
     });
@@ -36,6 +45,7 @@ export function registerWorkspaceRegistryRoutes(
       if (!workspacePath) return res.status(400).json({ error: "path required" });
       try {
         const workspace = await addWorkspace(options.rootDir, workspacePath, { id, name });
+        await options.rememberWorkspacePath(workspace.path);
         const summary = await buildWorkspaceSummary(workspace, options.runIndex);
         res.json({ workspace: summary });
       } catch (err: any) {
@@ -48,15 +58,22 @@ export function registerWorkspaceRegistryRoutes(
   for (const route of workspaceItemRoutes) {
     app.patch(route, async (req, res) => {
       const name = typeof req.body?.name === "string" ? req.body.name : "";
-      const workspace = await updateWorkspace(options.rootDir, req.params.id, { name });
+      const explicitPaths = extractWorkspacePaths(req.body);
+      const workspace = await updateWorkspace(options.rootDir, req.params.id, { name }, {
+        repoPaths: Array.from(new Set([...(await options.listWorkspacePaths()), ...explicitPaths]))
+      });
       if (!workspace) return res.status(404).json({ error: "Workspace not found" });
       const summary = await buildWorkspaceSummary(workspace, options.runIndex);
       res.json({ workspace: summary });
     });
 
     app.delete(route, async (req, res) => {
-      const removed = await removeWorkspace(options.rootDir, req.params.id);
+      const explicitPaths = extractWorkspacePaths(req.body);
+      const removed = await removeWorkspace(options.rootDir, req.params.id, {
+        repoPaths: Array.from(new Set([...(await options.listWorkspacePaths()), ...explicitPaths]))
+      });
       if (!removed) return res.status(404).json({ error: "Workspace not found" });
+      await options.forgetWorkspacePath(removed.path);
       res.json({ ok: true, workspace: removed });
     });
   }
@@ -75,6 +92,22 @@ export function registerWorkspaceRegistryRoutes(
       }
     });
   }
+}
+
+function extractWorkspacePaths(input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const query = input as Record<string, unknown>;
+  const raw = query.path ?? query.paths ?? [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  return Array.from(
+    new Set(
+      values
+        .flatMap((value) => String(value ?? "").split(","))
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => path.resolve(value))
+    )
+  );
 }
 
 async function buildWorkspaceSummary(

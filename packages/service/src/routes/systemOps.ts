@@ -4,10 +4,8 @@ import path from "node:path";
 import type express from "express";
 import {
   checkForUpdates,
-  getLicenseStatus,
   installPlugin,
   installUpdate,
-  isFeatureAllowed,
   listInstalledPlugins,
   removePlugin,
   selectUpdateAsset,
@@ -18,8 +16,14 @@ export function registerSystemOpsRoutes(
   app: express.Express,
   options: {
     rootDir: string;
+    resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
   }
 ): void {
+  const requireWorkspacePath = async (workspaceId?: string) => {
+    if (!workspaceId) return null;
+    return options.resolveWorkspacePath(workspaceId);
+  };
+
   app.get("/updates/status", async (req, res) => {
     try {
       const remote =
@@ -96,22 +100,23 @@ export function registerSystemOpsRoutes(
   });
 
   app.get("/plugins", async (_req, res) => {
-    const license = await getLicenseStatus();
-    const tier = license.valid ? license.tier : "Free";
-    const plugins = await listInstalledPlugins();
-    res.json({ plugins, tier });
+    const workspaceId = typeof _req.query.workspace === "string" ? _req.query.workspace : undefined;
+    const workspacePath = await requireWorkspacePath(workspaceId);
+    if (!workspacePath) {
+      return res.status(400).json({ error: "workspace is required for plugin operations" });
+    }
+    const plugins = await listInstalledPlugins(workspacePath);
+    res.json({ plugins });
   });
 
   app.post("/plugins/install", async (req, res) => {
-    const license = await getLicenseStatus();
-    const tier = license.valid ? license.tier : "Free";
-    if (!isFeatureAllowed(tier, "plugins")) {
-      return res.status(403).json({ error: "Plugins require Studio tier." });
-    }
     const pluginPath = String(req.body?.path ?? "");
+    const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+    const workspacePath = await requireWorkspacePath(workspaceId);
     if (!pluginPath) return res.status(400).json({ error: "path required" });
+    if (!workspacePath) return res.status(400).json({ error: "workspaceId required" });
     try {
-      const plugin = await installPlugin(pluginPath);
+      const plugin = await installPlugin(workspacePath, pluginPath);
       res.json({ plugin });
     } catch (err: any) {
       res.status(400).json({ error: err?.message ?? "Plugin install failed" });
@@ -119,16 +124,14 @@ export function registerSystemOpsRoutes(
   });
 
   app.post("/plugins/enable", async (req, res) => {
-    const license = await getLicenseStatus();
-    const tier = license.valid ? license.tier : "Free";
-    if (!isFeatureAllowed(tier, "plugins")) {
-      return res.status(403).json({ error: "Plugins require Studio tier." });
-    }
     const name = String(req.body?.name ?? "");
     const enabled = Boolean(req.body?.enabled);
+    const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+    const workspacePath = await requireWorkspacePath(workspaceId);
     if (!name) return res.status(400).json({ error: "name required" });
+    if (!workspacePath) return res.status(400).json({ error: "workspaceId required" });
     try {
-      await setPluginEnabled(name, enabled);
+      await setPluginEnabled(workspacePath, name, enabled);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(400).json({ error: err?.message ?? "Plugin update failed" });
@@ -136,14 +139,12 @@ export function registerSystemOpsRoutes(
   });
 
   app.post("/plugins/remove", async (req, res) => {
-    const license = await getLicenseStatus();
-    const tier = license.valid ? license.tier : "Free";
-    if (!isFeatureAllowed(tier, "plugins")) {
-      return res.status(403).json({ error: "Plugins require Studio tier." });
-    }
     const name = String(req.body?.name ?? "");
+    const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
+    const workspacePath = await requireWorkspacePath(workspaceId);
     if (!name) return res.status(400).json({ error: "name required" });
-    await removePlugin(name);
+    if (!workspacePath) return res.status(400).json({ error: "workspaceId required" });
+    await removePlugin(workspacePath, name);
     res.json({ ok: true });
   });
 }

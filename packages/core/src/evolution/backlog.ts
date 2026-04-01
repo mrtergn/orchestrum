@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { writeJson } from "../runner/fs.js";
+import { getWorkspaceControlDir } from "../runner/control.js";
 
 export type Opportunity = {
   id: string;
@@ -74,7 +75,7 @@ export async function generateOpportunities(options: {
 }
 
 export async function loadOpportunities(workspacePath: string): Promise<Opportunity[]> {
-  const filePath = path.join(workspacePath, ".memory", "opportunities.json");
+  const filePath = path.join(getWorkspaceControlDir(workspacePath), "opportunities.json");
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw) as Opportunity[];
@@ -88,7 +89,7 @@ export async function loadOpportunities(workspacePath: string): Promise<Opportun
 }
 
 async function saveOpportunities(workspacePath: string, opportunities: Opportunity[]): Promise<void> {
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await writeJson(path.join(memoryDir, "opportunities.json"), opportunities);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await writeJson(path.join(controlDir, "opportunities.json"), opportunities);
 }

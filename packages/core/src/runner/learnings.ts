@@ -3,28 +3,48 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type { LearningEntry } from "../contracts/service.js";
 import type { RunState } from "./types.js";
-import { readJsonIfExists, writeJson } from "./fs.js";
+import { appendLine, ensureDir, readTextIfExists } from "./fs.js";
+import { getWorkspaceLearningsPath } from "./control.js";
 
 const LEARNINGS_LIMIT = 250;
 
 export function getLearningsPath(workspacePath: string): string {
-  return path.join(workspacePath, ".memory", "learnings.json");
+  return getWorkspaceLearningsPath(workspacePath);
 }
 
 export async function loadLearnings(workspacePath: string): Promise<LearningEntry[]> {
-  const data = await readJsonIfExists<LearningEntry[]>(getLearningsPath(workspacePath));
-  return Array.isArray(data) ? data : [];
+  const raw = await readTextIfExists(getLearningsPath(workspacePath));
+  if (!raw?.trim()) return [];
+  return raw
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line) as LearningEntry;
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry): entry is LearningEntry => Boolean(entry));
 }
 
 export async function appendLearnings(workspacePath: string, entries: LearningEntry[]): Promise<void> {
   if (entries.length === 0) return;
   const existing = await loadLearnings(workspacePath);
-  const merged = [...existing, ...entries]
-    .filter((entry) => Boolean(entry.insight?.trim()))
+  const deduped = new Map<string, LearningEntry>();
+  for (const entry of [...existing, ...entries]) {
+    if (!entry.insight?.trim()) continue;
+    deduped.set(`${entry.sourceRunId}:${entry.category}:${entry.insight}`, entry);
+  }
+  const merged = [...deduped.values()]
     .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
     .slice(0, LEARNINGS_LIMIT);
-  await fs.mkdir(path.dirname(getLearningsPath(workspacePath)), { recursive: true });
-  await writeJson(getLearningsPath(workspacePath), merged);
+  const filePath = getLearningsPath(workspacePath);
+  await ensureDir(path.dirname(filePath));
+  await fs.writeFile(filePath, "", "utf8");
+  for (const entry of merged) {
+    await appendLine(filePath, JSON.stringify(entry));
+  }
 }
 
 export async function loadRelevantLearnings(workspacePath: string, query: string, limit = 3): Promise<LearningEntry[]> {

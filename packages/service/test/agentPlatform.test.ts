@@ -23,7 +23,6 @@ type Fixture = Awaited<ReturnType<typeof createFixture>>;
 
 let fixture: Fixture | null = null;
 let originalHome = process.env.HOME;
-let originalOrchestrumHome = process.env.ORCHESTRUM_HOME;
 
 beforeEach(async () => {
   fixture = await createFixture();
@@ -34,7 +33,6 @@ afterEach(async () => {
   fixture = null;
   runMissionDetailedMock.mockReset();
   process.env.HOME = originalHome;
-  process.env.ORCHESTRUM_HOME = originalOrchestrumHome;
 });
 
 test("mission-backed implement task fails explicitly when mission execution fails", async () => {
@@ -66,7 +64,7 @@ test("repo-changing tasks are mission-backed and mirror mission truth", async ()
       end: now,
       workspaceId: "demo",
       repoPath: fixture.repoPath,
-      missionTemplateId: "feature-dev",
+      missionTemplateId: "implement-only",
       goal: "Implement the requested change.",
       totalSteps: 4,
       completedSteps: 4,
@@ -102,17 +100,17 @@ test("repo-changing tasks are mission-backed and mirror mission truth", async ()
   await waitFor(() => task.status === "succeeded");
 
   assert.equal(task.status, "succeeded");
-  assert.equal(task.linkedTemplateId, "feature-dev");
+  assert.equal(task.linkedTemplateId, "implement-only");
   assert.equal(task.linkedRunId, "run-1");
   assert.equal(task.change?.status, "validated");
   assert.equal(task.validation?.status, "passed");
   assert.equal(task.verdict, "ready_to_merge");
 
   const call = runMissionDetailedMock.mock.calls[0]?.[0] as { templateId?: string; agents?: Array<{ role?: string }> };
-  assert.equal(call?.templateId, "feature-dev");
+  assert.equal(call?.templateId, "implement-only");
   assert.deepEqual(
     (call?.agents ?? []).map((agent) => agent.role).sort(),
-    ["audit", "dev", "pm"]
+    ["dev"]
   );
   assert.equal(fsSync.existsSync(path.join(task.artifactsPath, "linked-run.json")), true);
   assert.equal(fsSync.existsSync(path.join(task.artifactsPath, "run-result.json")), true);
@@ -121,15 +119,13 @@ test("repo-changing tasks are mission-backed and mirror mission truth", async ()
 async function createFixture() {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-service-agent-"));
   const homeDir = path.join(rootDir, "home");
-  const appHome = path.join(homeDir, ".orchestrum");
   const repoPath = path.join(rootDir, "repo");
   process.env.HOME = homeDir;
-  process.env.ORCHESTRUM_HOME = appHome;
-  await fs.mkdir(path.join(repoPath, ".orchestrum"), { recursive: true });
-  await fs.mkdir(appHome, { recursive: true });
+  await fs.mkdir(path.join(rootDir, ".orchestrum", "control"), { recursive: true });
+  await fs.mkdir(path.join(repoPath, ".orchestrum", "control"), { recursive: true });
   await fs.writeFile(
-    path.join(appHome, "workspaces.json"),
-    JSON.stringify({ workspaces: [{ id: "demo", path: repoPath, name: "Demo" }] }, null, 2),
+    path.join(repoPath, ".orchestrum", "control", "workspace.json"),
+    JSON.stringify({ id: "demo", path: repoPath, name: "Demo" }, null, 2),
     "utf8"
   );
   const agent = {
@@ -156,17 +152,20 @@ async function createFixture() {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
-  await fs.writeFile(path.join(repoPath, ".orchestrum", "agents.json"), JSON.stringify([agent], null, 2), "utf8");
-  await fs.writeFile(path.join(repoPath, ".orchestrum", "org.json"), "[]", "utf8");
+  await fs.writeFile(path.join(repoPath, ".orchestrum", "control", "agents.json"), JSON.stringify([agent], null, 2), "utf8");
+  await fs.writeFile(path.join(repoPath, ".orchestrum", "control", "org.json"), "[]", "utf8");
 
-  const platform = new AgentPlatform({ rootDir });
+  const platform = new AgentPlatform({
+    rootDir,
+    listWorkspacePaths: async () => [repoPath]
+  });
   await platform.init();
-  return { platform, agent, rootDir, repoPath, appHome };
+  return { platform, agent, rootDir, repoPath };
 }
 
-async function createQueuedTask(fixture: Fixture, type: "implement" | "spec" | "audit" | "generic") {
+async function createQueuedTask(fixture: Fixture, type: "implement" | "spec" | "audit") {
   const taskId = `task-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  const taskDir = path.join(fixture.appHome, "tasks", taskId);
+  const taskDir = path.join(fixture.repoPath, ".orchestrum", "control", "tasks", taskId);
   await fs.mkdir(path.join(taskDir, "artifacts"), { recursive: true });
   const task = {
     id: taskId,
@@ -175,6 +174,9 @@ async function createQueuedTask(fixture: Fixture, type: "implement" | "spec" | "
     type,
     payload: {},
     assignedToAgentId: fixture.agent.id,
+    dependsOnTaskIds: [],
+    waitingOnTaskIds: [],
+    blockedByTaskIds: [],
     status: "queued",
     createdAt: new Date().toISOString(),
     attempts: 0,

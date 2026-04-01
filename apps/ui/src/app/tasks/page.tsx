@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
 import { normalizeTaskStatus } from "@/lib/runtime";
@@ -8,11 +9,20 @@ import { normalizeTaskStatus } from "@/lib/runtime";
 type Agent = { id: string; name: string; role: string };
 type Task = {
   id: string;
+  workspaceId?: string;
   title: string;
   description: string;
-  type: "spec" | "implement" | "audit" | "generic";
+  type: "spec" | "implement" | "validate" | "qa" | "audit";
   status: string;
   assignedToAgentId: string;
+  dependsOnTaskIds?: string[];
+  waitingOnTaskIds?: string[];
+  blockedByTaskIds?: string[];
+  linkedWorkItemId?: string;
+  linkedWorkItemTitle?: string;
+  plannerTaskId?: string;
+  laneId?: string;
+  laneLabel?: string;
   attempts: number;
   maxAttempts: number;
   createdAt: string;
@@ -39,28 +49,32 @@ const sts = (s: string) => STATUS[s] ?? STATUS["queued"]!;
 const TYPE_ICON: Record<string, { icon: string; color: string }> = {
   spec:      { icon: "📋", color: "text-violet-400" },
   implement: { icon: "⚙", color: "text-sky-400" },
+  validate:  { icon: "🧪", color: "text-emerald-400" },
+  qa:        { icon: "🌐", color: "text-cyan-400" },
   audit:     { icon: "🔍", color: "text-amber-400" },
-  generic:   { icon: "◆", color: "text-slate-400" },
 };
-const tIcon = (t: string) => TYPE_ICON[t] ?? TYPE_ICON["generic"]!;
+const tIcon = (t: string) => TYPE_ICON[t] ?? TYPE_ICON["spec"]!;
 
 export default function TasksPage() {
+  const searchParams = useSearchParams();
   const { pushToast } = useAppUi();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [taskType, setTaskType] = useState<Task["type"]>("generic");
+  const [taskType, setTaskType] = useState<Task["type"]>("spec");
   const [assignedToAgentId, setAssignedToAgentId] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [taskLogs, setTaskLogs] = useState("");
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const workItemFilter = searchParams.get("workItem") ?? "";
 
   const load = useCallback(async () => {
+    const taskQuery = workItemFilter ? `?workItem=${encodeURIComponent(workItemFilter)}` : "";
     const [agentRes, taskRes] = await Promise.all([
       fetch("/api/agents", { cache: "no-store" }),
-      fetch("/api/tasks", { cache: "no-store" })
+      fetch(`/api/tasks${taskQuery}`, { cache: "no-store" })
     ]);
     const agentData = await agentRes.json().catch(() => ({ agents: [] }));
     const taskData = await taskRes.json().catch(() => ({ tasks: [] }));
@@ -70,7 +84,7 @@ export default function TasksPage() {
     if (!assignedToAgentId && loadedAgents[0]?.id) {
       setAssignedToAgentId(loadedAgents[0].id);
     }
-  }, [assignedToAgentId]);
+  }, [assignedToAgentId, workItemFilter]);
 
   useEffect(() => {
     void load();
@@ -138,8 +152,13 @@ export default function TasksPage() {
           <p className="text-sm text-slate-400">
             {tasks.length > 0
               ? `${tasks.length} task${tasks.length !== 1 ? "s" : ""} · ${running} running`
-              : "Route manual or mission-backed work through the agent layer."}
+              : "Route mission-backed and browser smoke work through the coordination layer."}
           </p>
+          {workItemFilter && (
+            <p className="mt-2 text-xs text-slate-500">
+              Filtered to work item <code>{workItemFilter}</code>
+            </p>
+          )}
         </div>
         {agents.length > 0 && (
           <button
@@ -175,7 +194,7 @@ export default function TasksPage() {
       {agents.length === 0 && (
         <section className="rounded-2xl border border-dashed border-slate-700 p-12 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-500/20 to-violet-500/20 text-2xl">◈</div>
-          <h3 className="mt-4 text-lg font-semibold text-white">Create agents first</h3>
+          <h3 className="mt-4 text-lg font-semibold text-white">Create specialists first</h3>
           <p className="mt-1 text-sm text-slate-400">
             You need at least one agent before you can assign tasks.
           </p>
@@ -183,7 +202,7 @@ export default function TasksPage() {
             href="/agents"
             className="mt-5 inline-block rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-amber-200 transition-colors hover:bg-amber-400/20"
           >
-            Go to Agents
+            Go to Specialists
           </Link>
         </section>
       )}
@@ -216,9 +235,10 @@ export default function TasksPage() {
                 onChange={(event) => setTaskType(event.target.value as Task["type"])}
                 className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-xs text-slate-200 focus:border-amber-400/40 focus:outline-none"
               >
-                <option value="generic">◆ Generic</option>
                 <option value="spec">📋 Spec (requirements)</option>
                 <option value="implement">⚙ Implement (code)</option>
+                <option value="validate">🧪 Validate</option>
+                <option value="qa">🌐 Browser Smoke</option>
                 <option value="audit">🔍 Audit (review)</option>
               </select>
               <select
@@ -286,6 +306,12 @@ export default function TasksPage() {
                         <span>{agentNameById.get(task.assignedToAgentId) ?? "?"}</span>
                         <span className="text-slate-700">·</span>
                         <span className="capitalize">{task.type}</span>
+                        {task.laneLabel && (
+                          <>
+                            <span className="text-slate-700">·</span>
+                            <span>{task.laneLabel}</span>
+                          </>
+                        )}
                         <span className="text-slate-700">·</span>
                         <span>{task.attempts}/{task.maxAttempts} attempts</span>
                       </div>
@@ -298,8 +324,17 @@ export default function TasksPage() {
                       {task.resultSummary && (
                         <div className="mt-1.5 truncate text-[10px] text-slate-600">{task.resultSummary}</div>
                       )}
+                      {task.waitingOnTaskIds && task.waitingOnTaskIds.length > 0 && (
+                        <div className="mt-1 text-[10px] text-cyan-300">Waiting on: {task.waitingOnTaskIds.join(", ")}</div>
+                      )}
+                      {task.blockedByTaskIds && task.blockedByTaskIds.length > 0 && (
+                        <div className="mt-1 text-[10px] text-fuchsia-300">Blocked by: {task.blockedByTaskIds.join(", ")}</div>
+                      )}
                       {task.linkedRunId && (
                         <div className="mt-1 text-[10px] text-slate-500">Mission run: {task.linkedRunId}</div>
+                      )}
+                      {task.linkedWorkItemTitle && (
+                        <div className="mt-1 text-[10px] text-slate-500">Work item: {task.linkedWorkItemTitle}</div>
                       )}
                     </div>
                   </div>
@@ -329,6 +364,12 @@ export default function TasksPage() {
                           <>
                             <span className="text-slate-700">·</span>
                             <span>{selectedTask.linkedTemplateId}</span>
+                          </>
+                        )}
+                        {selectedTask.laneLabel && (
+                          <>
+                            <span className="text-slate-700">·</span>
+                            <span>{selectedTask.laneLabel}</span>
                           </>
                         )}
                         <span className="text-slate-700">·</span>
@@ -370,6 +411,34 @@ export default function TasksPage() {
                 </div>
 
                 <div className="mt-4 grid gap-2 text-[10px] text-slate-400 md:grid-cols-2">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Work item</div>
+                    <div className="mt-1 text-slate-200">{selectedTask.linkedWorkItemTitle ?? "none"}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Dependencies</div>
+                    <div className="mt-1 text-slate-200">
+                      {selectedTask.dependsOnTaskIds && selectedTask.dependsOnTaskIds.length > 0
+                        ? selectedTask.dependsOnTaskIds.join(", ")
+                        : "none"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Waiting on</div>
+                    <div className="mt-1 text-slate-200">
+                      {selectedTask.waitingOnTaskIds && selectedTask.waitingOnTaskIds.length > 0
+                        ? selectedTask.waitingOnTaskIds.join(", ")
+                        : "none"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
+                    <div className="uppercase tracking-wider text-slate-500">Blocked by</div>
+                    <div className="mt-1 text-slate-200">
+                      {selectedTask.blockedByTaskIds && selectedTask.blockedByTaskIds.length > 0
+                        ? selectedTask.blockedByTaskIds.join(", ")
+                        : "none"}
+                    </div>
+                  </div>
                   <div className="rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2">
                     <div className="uppercase tracking-wider text-slate-500">Change</div>
                     <div className="mt-1 text-slate-200">{selectedTask.change?.status ?? "none"}</div>

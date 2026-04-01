@@ -14,17 +14,14 @@ import { StateIndex } from "../src/state/index.js";
 test("state index rebuilds from workspace and run files", async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-state-root-"));
   const runsDir = path.join(rootDir, "runs");
-  const appHome = path.join(rootDir, "app-home");
-  const originalHome = process.env.ORCHESTRUM_HOME;
-  process.env.ORCHESTRUM_HOME = appHome;
-  await fs.mkdir(appHome, { recursive: true });
+  const repoPath = path.join(rootDir, "repo");
+  await fs.mkdir(path.join(repoPath, ".orchestrum", "control"), { recursive: true });
   await fs.writeFile(
-    path.join(appHome, "workspaces.json"),
-    JSON.stringify({ workspaces: [{ id: "demo", path: path.join(rootDir, "repo"), name: "Demo" }] }, null, 2),
+    path.join(repoPath, ".orchestrum", "control", "workspace.json"),
+    JSON.stringify({ id: "demo", path: repoPath, name: "Demo" }, null, 2),
     "utf8"
   );
-  await fs.mkdir(path.join(rootDir, "repo", ".memory"), { recursive: true });
-  await fs.writeFile(path.join(rootDir, "repo", ".memory", "learnings.json"), "[]", "utf8");
+  await fs.writeFile(path.join(repoPath, ".orchestrum", "control", "learnings.ndjson"), "", "utf8");
   await fs.mkdir(path.join(runsDir, "demo", "run-1"), { recursive: true });
   await fs.writeFile(
     path.join(runsDir, "demo", "run-1", "run.json"),
@@ -44,19 +41,15 @@ test("state index rebuilds from workspace and run files", async () => {
   const index = new StateIndex({
     rootDir,
     runsDir,
-    dbPath: path.join(rootDir, "state-index.sqlite")
+    listWorkspacePaths: async () => [repoPath]
   });
-  try {
-    const health = await index.rebuild();
-    assert.equal(health.ok, true);
+  const health = await index.rebuild();
+  assert.equal(health.ok, true);
 
-    const runs = await index.queryRuns("demo");
-    assert.equal(runs.length, 1);
-    assert.equal(runs[0]!.runId, "run-1");
-    assert.equal(runs[0]!.readinessScore, 80);
-  } finally {
-    process.env.ORCHESTRUM_HOME = originalHome;
-  }
+  const runs = await index.queryRuns("demo");
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]!.runId, "run-1");
+  assert.equal(runs[0]!.readinessScore, 80);
 });
 
 test("state index SQL statements avoid template interpolation", async () => {
@@ -70,20 +63,16 @@ test("state index exposes latest delivery import analysis in summary", async () 
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-state-delivery-"));
   const runsDir = path.join(rootDir, "runs");
   const repoPath = path.join(rootDir, "repo");
-  const appHome = path.join(rootDir, "app-home");
-  const originalHome = process.env.ORCHESTRUM_HOME;
-  process.env.ORCHESTRUM_HOME = appHome;
-  await fs.mkdir(appHome, { recursive: true });
-  await fs.writeFile(
-    path.join(appHome, "workspaces.json"),
-    JSON.stringify({ workspaces: [{ id: "demo", path: repoPath, name: "Demo" }] }, null, 2),
-    "utf8"
-  );
   await fs.mkdir(path.join(repoPath, "src"), { recursive: true });
   await fs.writeFile(path.join(repoPath, "package.json"), JSON.stringify({ name: "demo", version: "1.0.0" }, null, 2), "utf8");
   await fs.writeFile(path.join(repoPath, "src", "index.ts"), "export const ok = true;\n", "utf8");
-  await fs.mkdir(path.join(repoPath, ".memory"), { recursive: true });
-  await fs.writeFile(path.join(repoPath, ".memory", "learnings.json"), "[]", "utf8");
+  await fs.mkdir(path.join(repoPath, ".orchestrum", "control"), { recursive: true });
+  await fs.writeFile(
+    path.join(repoPath, ".orchestrum", "control", "workspace.json"),
+    JSON.stringify({ id: "demo", path: repoPath, name: "Demo" }, null, 2),
+    "utf8"
+  );
+  await fs.writeFile(path.join(repoPath, ".orchestrum", "control", "learnings.ndjson"), "", "utf8");
 
   const session = await runDeliverySessionDetailed({
     repoPath,
@@ -109,18 +98,14 @@ test("state index exposes latest delivery import analysis in summary", async () 
   const index = new StateIndex({
     rootDir,
     runsDir,
-    dbPath: path.join(rootDir, "state-index.sqlite")
+    listWorkspacePaths: async () => [repoPath]
   });
-  try {
-    await index.rebuild();
+  await index.rebuild();
 
-    const summary = await index.getDeliverySummary("demo");
-    assert.equal(summary.importConfidenceCounts.high, 1);
-    assert.equal(summary.latestImport?.runId, session.runId);
-    assert.equal(summary.latestImport?.matchStatus, "matched");
-    assert.equal(summary.latestImport?.confidence, "high");
-    assert.ok((summary.latestImport?.matchReasons ?? []).some((reason) => reason.includes("Requested packet")));
-  } finally {
-    process.env.ORCHESTRUM_HOME = originalHome;
-  }
+  const summary = await index.getDeliverySummary("demo");
+  assert.equal(summary.importConfidenceCounts.high, 1);
+  assert.equal(summary.latestImport?.runId, session.runId);
+  assert.equal(summary.latestImport?.matchStatus, "matched");
+  assert.equal(summary.latestImport?.confidence, "high");
+  assert.ok((summary.latestImport?.matchReasons ?? []).some((reason) => reason.includes("Requested packet")));
 });

@@ -1,19 +1,17 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
-import vm from "node:vm";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ensureDir, readJsonIfExists, writeJson } from "../runner/fs.js";
-import type { LicenseTier } from "../licensing/index.js";
 import type { OrchestrumPlugin } from "../runner/plugins.js";
-import { getAppHome } from "../appHome.js";
+import { getWorkspacePluginsDir } from "../runner/control.js";
 
 const ManifestSchema = z.object({
   name: z.string().min(1),
   version: z.string().min(1),
   entry: z.string().optional(),
   capabilities_required: z.array(z.string()).optional(),
-  min_tier: z.enum(["Free", "Pro", "Studio"]).optional(),
   description: z.string().optional()
 });
 
@@ -32,21 +30,31 @@ type RegistryFile = {
 };
 
 const DEFAULT_ENTRY = "index.js";
+const SUPPORTED_PLUGIN_CAPABILITIES = new Set([
+  "run.start",
+  "run.finish",
+  "step.start",
+  "step.finish",
+  "browser.run.start",
+  "browser.run.finish",
+  "browser.step.start",
+  "browser.step.finish"
+]);
 
-export function getPluginsDir(): string {
-  return path.join(getAppHome(), "plugins");
+export function getPluginsDir(repoPath = process.cwd()): string {
+  return getWorkspacePluginsDir(repoPath);
 }
 
-export function getRegistryPath(): string {
-  return path.join(getPluginsDir(), "plugins.json");
+export function getRegistryPath(repoPath = process.cwd()): string {
+  return path.join(getPluginsDir(repoPath), "plugins.json");
 }
 
-export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
-  const registry = await loadRegistry();
+export async function listInstalledPlugins(repoPath = process.cwd()): Promise<InstalledPlugin[]> {
+  const registry = await loadRegistry(repoPath);
   return registry.plugins;
 }
 
-export async function installPlugin(sourcePath: string): Promise<InstalledPlugin> {
+export async function installPlugin(repoPath: string, sourcePath: string): Promise<InstalledPlugin> {
   const resolved = path.resolve(sourcePath);
   if (!fsSync.existsSync(resolved)) {
     throw new Error("Plugin path not found.");
@@ -56,7 +64,8 @@ export async function installPlugin(sourcePath: string): Promise<InstalledPlugin
     throw new Error("Plugin path must be a directory.");
   }
   const manifest = await loadManifest(resolved);
-  const targetDir = path.join(getPluginsDir(), manifest.name);
+  assertManifestCapabilities(manifest);
+  const targetDir = path.join(getPluginsDir(repoPath), manifest.name);
   await ensureDir(targetDir);
   await copyRecursive(resolved, targetDir);
   const installed: InstalledPlugin = {
@@ -66,40 +75,45 @@ export async function installPlugin(sourcePath: string): Promise<InstalledPlugin
     enabled: false,
     manifest
   };
-  const registry = await loadRegistry();
+  const registry = await loadRegistry(repoPath);
   const existingIndex = registry.plugins.findIndex((p) => p.name === manifest.name);
   if (existingIndex >= 0) {
     registry.plugins[existingIndex] = installed;
   } else {
     registry.plugins.push(installed);
   }
-  await saveRegistry(registry);
+  await saveRegistry(repoPath, registry);
   return installed;
 }
 
-export async function removePlugin(name: string): Promise<void> {
-  const registry = await loadRegistry();
+export async function removePlugin(repoPath: string, name: string): Promise<void> {
+  const registry = await loadRegistry(repoPath);
   const entry = registry.plugins.find((p) => p.name === name);
   if (entry) {
     await fs.rm(entry.path, { recursive: true, force: true }).catch(() => undefined);
   }
   registry.plugins = registry.plugins.filter((p) => p.name !== name);
-  await saveRegistry(registry);
+  await saveRegistry(repoPath, registry);
 }
 
-export async function setPluginEnabled(name: string, enabled: boolean): Promise<void> {
-  const registry = await loadRegistry();
+export async function setPluginEnabled(repoPath: string, name: string, enabled: boolean): Promise<void> {
+  const registry = await loadRegistry(repoPath);
   const entry = registry.plugins.find((p) => p.name === name);
   if (!entry) throw new Error("Plugin not installed.");
+  assertManifestCapabilities(entry.manifest);
   entry.enabled = enabled;
-  await saveRegistry(registry);
+  await saveRegistry(repoPath, registry);
 }
 
-export async function loadEnabledPlugins(tier: LicenseTier): Promise<InstalledPlugin[]> {
-  const registry = await loadRegistry();
+export async function loadEnabledPlugins(repoPath = process.cwd()): Promise<InstalledPlugin[]> {
+  const registry = await loadRegistry(repoPath);
   return registry.plugins.filter((plugin) => {
-    const required = plugin.manifest.min_tier ?? "Free";
-    return plugin.enabled && isTierAllowed(tier, required);
+    try {
+      assertManifestCapabilities(plugin.manifest);
+      return plugin.enabled;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -109,17 +123,9 @@ export async function loadPluginModule(plugin: InstalledPlugin): Promise<Orchest
   if (!fsSync.existsSync(entryPath)) {
     throw new Error(`Plugin entry not found: ${entryPath}`);
   }
-  const source = await fs.readFile(entryPath, "utf8");
-  const context = vm.createContext({
-    console,
-    exports: {},
-    module: { exports: {} },
-    process: undefined,
-    require: undefined
-  });
-  const script = new vm.Script(source, { filename: entryPath });
-  script.runInContext(context, { timeout: 1000 });
-  const pluginExport = (context.module as any).exports ?? (context.exports as any);
+  const moduleUrl = `${pathToFileURL(entryPath).href}?t=${Date.now()}`;
+  const loaded = await import(moduleUrl);
+  const pluginExport = (loaded as any)?.default ?? loaded;
   const pluginObj: OrchestrumPlugin | undefined = pluginExport?.default ?? pluginExport?.plugin ?? pluginExport;
   if (!pluginObj || typeof pluginObj !== "object") return null;
   return pluginObj;
@@ -139,21 +145,23 @@ async function loadManifest(sourcePath: string): Promise<PluginManifest> {
   return parsed.data;
 }
 
-async function loadRegistry(): Promise<RegistryFile> {
-  const filePath = getRegistryPath();
+async function loadRegistry(repoPath: string): Promise<RegistryFile> {
+  const filePath = getRegistryPath(repoPath);
   const existing = await readJsonIfExists<RegistryFile>(filePath);
   if (existing?.plugins) return existing;
   return { plugins: [] };
 }
 
-async function saveRegistry(registry: RegistryFile): Promise<void> {
-  await ensureDir(path.dirname(getRegistryPath()));
-  await writeJson(getRegistryPath(), registry);
+async function saveRegistry(repoPath: string, registry: RegistryFile): Promise<void> {
+  await ensureDir(path.dirname(getRegistryPath(repoPath)));
+  await writeJson(getRegistryPath(repoPath), registry);
 }
 
-function isTierAllowed(current: LicenseTier, required: LicenseTier): boolean {
-  const rank = (tier: LicenseTier) => (tier === "Studio" ? 3 : tier === "Pro" ? 2 : 1);
-  return rank(current) >= rank(required);
+function assertManifestCapabilities(manifest: PluginManifest): void {
+  const unsupported = (manifest.capabilities_required ?? []).filter((entry) => !SUPPORTED_PLUGIN_CAPABILITIES.has(entry));
+  if (unsupported.length > 0) {
+    throw new Error(`Unsupported plugin capabilities: ${unsupported.join(", ")}`);
+  }
 }
 
 async function copyRecursive(src: string, dest: string): Promise<void> {

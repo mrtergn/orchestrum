@@ -31,7 +31,31 @@ export {
 export * from "./runner/types.js";
 export { normalizeUsage, resolvePricing, estimateCostUsd } from "./runner/cost.js";
 export type { LlmUsage, Pricing } from "./runner/cost.js";
-export { writeJson, writeText, ensureDir, appendLine } from "./runner/fs.js";
+export { writeJson, writeText, ensureDir, appendLine, readJsonIfExists } from "./runner/fs.js";
+export {
+  getWorkspaceControlDir,
+  getWorkspaceManifestPath,
+  getWorkspaceConfigPath,
+  getWorkspacePoliciesPath,
+  getWorkspaceSignalsPath,
+  getWorkspaceLearningsPath,
+  getWorkspacePluginsDir,
+  getWorkspaceWorktreesRoot,
+  getWorkspaceAgentsPath,
+  getWorkspaceOrgPath,
+  getWorkspaceTasksPath,
+  getWorkspaceTaskArtifactsRoot,
+  getWorkspaceMessagesPath,
+  getWorkspaceWorkItemsPath,
+  getWorkspaceSprintSupervisorsPath,
+  getWorkspaceOrganizationSupervisorPath,
+  getWorkspaceStateIndexPath,
+  getOperatorControlDir,
+  loadWorkspaceManifest,
+  ensureWorkspaceManifest,
+  discoverWorkspaceManifests
+} from "./runner/control.js";
+export type { WorkspaceManifest } from "./runner/control.js";
 export { runBinary, lookupBinary } from "./runner/bin.js";
 export { Logger } from "./runner/logger.js";
 export { readAppendedLines, readTailLines } from "./runner/tailer.js";
@@ -73,6 +97,7 @@ export { exportRunBundle, importRunBundle } from "./runner/share.js";
 export { runBrowserRunDetailed } from "./runner/browser.js";
 export { appendLearnings, buildRunLearnings, loadLearnings, loadRelevantLearnings, formatLearningsForContext } from "./runner/learnings.js";
 export { getWorktreesRoot, prepareWorktreeContext, createRunWorktree, removeRunWorktree, scanStaleWorktrees } from "./runner/worktrees.js";
+export { appendWorkspaceSignal } from "./runner/signals.js";
 export { resolveGovernanceSettings, scanGovernedCommands, scanGovernedDiff, runQualityGate, appendGovernanceEvent, loadGovernanceEvents } from "./runner/governance.js";
 export {
   addWorkspaceApproval,
@@ -109,15 +134,6 @@ export { loadAnalytics, updateAnalytics } from "./analytics/store.js";
 export type { AnalyticsData } from "./analytics/store.js";
 export { loadKnowledgeGraph, updateKnowledgeGraph } from "./analytics/knowledge.js";
 export type { KnowledgeGraph, KnowledgeNode, KnowledgeEdge } from "./analytics/knowledge.js";
-export {
-  buildTask,
-  enqueueTask,
-  waitForResult,
-  ensureClusterPaths,
-  recordWorkerStat
-} from "./cluster/queue.js";
-export type { ClusterTask, ClusterResult, ClusterPaths } from "./cluster/queue.js";
-export { startCluster } from "./cluster/manager.js";
 export {
   runSandboxedLLM,
   isDockerAvailable
@@ -212,7 +228,11 @@ export type {
 } from "./delivery/types.js";
 export type { StateIndexHealth, IndexedRunRecord, IndexedDeliverySessionRecord } from "./state/index.js";
 export {
+  WORK_ITEM_SOURCE_TYPES,
+  WORK_ITEM_STATUSES,
+  WORK_ITEM_EXECUTION_MODES,
   normalizeTaskStatus,
+  normalizeWorkItemStatus,
   normalizeAgentRuntimeState,
   isAgentRuntimeBusy
 } from "./contracts/service.js";
@@ -246,7 +266,76 @@ export type {
   LearningsResponse,
   DocsSyncResponse,
   ReleaseReadiness,
-  WorkspaceProfileShape
+  WorkspaceProfileShape,
+  WorkItemSourceType,
+  WorkItemStatus,
+  WorkItemExecutionMode,
+  WorkItemReviewStatus,
+  WorkItemReviewAction,
+  WorkItemReviewGate,
+  WorkItemReviewSignalStatus,
+  WorkItemCycleKind,
+  WorkItemCycleStatus,
+  WorkItemRemediationPlanStatus,
+  WorkItemBrief,
+  WorkItemRecord,
+  WorkItemsResponse,
+  WorkItemCreateRequest,
+  WorkItemStartRequest,
+  WorkItemStartResponse,
+  WorkItemReviewRequest,
+  WorkItemReviewSignal,
+  WorkItemReviewSummary,
+  WorkItemReviewResponse,
+  WorkItemCycleRecord,
+  WorkItemRemediationPlan,
+  WorkPlanTaskKind,
+  WorkPlanLane,
+  WorkPlanTask,
+  WorkPlanLaneMatch,
+  WorkPlanLaneAssignment,
+  WorkItemCyclePlan,
+  WorkItemSourceSnapshot,
+  WorkItemExecutionStep,
+  WorkItemPlanningDetail,
+  WorkItemDetailResponse,
+  WorkItemPbiPreviewResponse,
+  WorkSprintBacklogItem,
+  WorkSprintPreview,
+  WorkSprintPreviewResponse,
+  WorkItemSprintImportRequest,
+  WorkItemImportSkip,
+  WorkItemSprintImportResponse,
+  WorkSprintControlPbiState,
+  WorkSprintControlRecommendation,
+  WorkSprintGovernance,
+  WorkSprintLaunchCandidateDisposition,
+  WorkSprintLaunchCandidate,
+  WorkSprintControlTimelineEntry,
+  WorkSprintBurndownPoint,
+  WorkSprintControlPbi,
+  WorkSprintControl,
+  WorkSprintControlResponse,
+  WorkSprintControlAction,
+  WorkSprintControlActionRequest,
+  WorkSprintControlActionReport,
+  WorkSprintControlActionResponse,
+  WorkSprintSupervisorState,
+  WorkSprintSupervisor,
+  WorkSprintSupervisorRequest,
+  WorkSprintSupervisorResponse,
+  WorkOrganizationLaunchCandidate,
+  WorkOrganizationControlAction,
+  WorkOrganizationControlActionReport,
+  WorkOrganizationLaunchSkip,
+  WorkOrganizationSupervisorState,
+  WorkOrganizationSupervisor,
+  WorkOrganizationControl,
+  WorkOrganizationControlResponse,
+  WorkOrganizationControlActionRequest,
+  WorkOrganizationControlActionResponse,
+  WorkOrganizationSupervisorRequest,
+  WorkOrganizationSupervisorResponse
 } from "./contracts/service.js";
 export type {
   CanonicalProvider,

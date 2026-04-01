@@ -1,8 +1,6 @@
-import path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { OrchestrumConfig } from "./config.js";
 import type { RunState, StepState } from "./types.js";
-import type { LicenseTier } from "../licensing/index.js";
+import { appendWorkspaceSignal } from "./signals.js";
 import { loadEnabledPlugins, loadPluginModule } from "../plugins/registry.js";
 
 export interface OrchestrumPlugin {
@@ -13,51 +11,62 @@ export interface OrchestrumPlugin {
   onRunFinish?: (runState: RunState) => void | Promise<void>;
 }
 
-export async function loadPlugins(repoPath: string, config: OrchestrumConfig | null, tier: LicenseTier): Promise<OrchestrumPlugin[]> {
+type PluginHookContext = {
+  repoPath?: string;
+  workspaceId?: string;
+  entityId?: string;
+};
+
+export async function loadPlugins(repoPath: string, config: OrchestrumConfig | null): Promise<OrchestrumPlugin[]> {
   const plugins: OrchestrumPlugin[] = [];
-  const configured = config?.plugins ?? [];
+  const configured = (config?.plugins ?? []).map((entry) => String(entry ?? "").trim()).filter(Boolean);
+  const registryPlugins = await loadEnabledPlugins(repoPath);
+  const registryByName = new Map(registryPlugins.map((plugin) => [plugin.name, plugin]));
+  const selectedNames = configured.length === 0
+    ? registryPlugins.map((plugin) => plugin.name)
+    : configured.map((entry) => {
+        if (entry.includes("/") || entry.includes("\\") || entry.endsWith(".js") || entry.endsWith(".mjs") || entry.endsWith(".ts")) {
+          throw new Error(`Direct path plugins are no longer supported: ${entry}`);
+        }
+        return entry.startsWith("registry:") ? entry.slice("registry:".length) : entry;
+      });
 
-  for (const entry of configured) {
-    if (!entry) continue;
-    if (entry.startsWith("registry:")) {
-      const name = entry.replace("registry:", "");
-      const enabled = await loadEnabledPlugins(tier);
-      const match = enabled.find((p) => p.name === name);
-      if (!match) continue;
-      const plugin = await loadPluginModule(match);
-      if (plugin) plugins.push(plugin);
-      continue;
-    }
-    const resolved = path.isAbsolute(entry)
-      ? entry
-      : path.resolve(repoPath, entry);
-    const mod = await import(pathToFileURL(resolved).toString());
-    const plugin: OrchestrumPlugin | undefined = mod.default ?? mod.plugin;
-    if (plugin) plugins.push(plugin);
-  }
-
-  const registryPlugins = await loadEnabledPlugins(tier);
-  for (const pluginEntry of registryPlugins) {
-    if (configured.some((entry) => entry.endsWith(pluginEntry.name) || entry.includes(pluginEntry.name))) continue;
+  for (const name of selectedNames) {
+    const pluginEntry = registryByName.get(name);
+    if (!pluginEntry) continue;
     const plugin = await loadPluginModule(pluginEntry);
     if (plugin) plugins.push(plugin);
   }
-
   return plugins;
 }
 
 export async function runPluginHook(
   plugins: OrchestrumPlugin[],
   hook: keyof OrchestrumPlugin,
-  payload: RunState | StepState
+  payload: RunState | StepState,
+  context: PluginHookContext = {}
 ): Promise<void> {
   for (const plugin of plugins) {
     const fn = plugin[hook];
     if (typeof fn === "function") {
       try {
         await (fn as (arg: RunState | StepState) => void | Promise<void>)(payload);
-      } catch {
-        // ignore plugin errors
+      } catch (error) {
+        if (context.repoPath && context.workspaceId) {
+          await appendWorkspaceSignal(context.repoPath, {
+            workspaceId: context.workspaceId,
+            source: "plugin",
+            type: "plugin.hook.failed",
+            entityId: context.entityId ?? plugin.name,
+            status: "warning",
+            summary: `${plugin.name} failed during ${String(hook)}`,
+            payload: {
+              plugin: plugin.name,
+              hook,
+              error: error instanceof Error ? error.message : String(error)
+            }
+          }).catch(() => undefined);
+        }
       }
     }
   }

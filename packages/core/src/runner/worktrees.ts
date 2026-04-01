@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { getAppHome } from "../appHome.js";
 import { ensureDir } from "./fs.js";
+import { getWorkspaceWorktreesRoot } from "./control.js";
 
 export type ExecutionMode = "inline" | "worktree";
 
@@ -22,8 +22,8 @@ export type StaleWorktree = {
   reason: string;
 };
 
-export function getWorktreesRoot(): string {
-  return path.join(getAppHome(), "worktrees");
+export function getWorktreesRoot(repoPath = process.cwd()): string {
+  return getWorkspaceWorktreesRoot(repoPath);
 }
 
 export async function prepareWorktreeContext(options: {
@@ -77,7 +77,7 @@ export async function createRunWorktree(options: {
   runId: string;
   headSha?: string;
 }): Promise<string> {
-  const root = getWorktreesRoot();
+  const root = getWorktreesRoot(options.repoPath);
   const worktreePath = path.join(root, sanitizeSegment(options.workspaceId), sanitizeSegment(options.runId));
   await ensureDir(path.dirname(worktreePath));
 
@@ -106,8 +106,8 @@ export async function removeRunWorktree(options: {
   });
 }
 
-export async function scanStaleWorktrees(runsDir: string): Promise<StaleWorktree[]> {
-  const root = getWorktreesRoot();
+export async function scanStaleWorktrees(runsDir: string, repoPath = process.cwd()): Promise<StaleWorktree[]> {
+  const root = getWorktreesRoot(repoPath);
   const results: StaleWorktree[] = [];
   const workspaceDirs = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
   for (const workspaceDir of workspaceDirs) {

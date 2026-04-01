@@ -51,11 +51,6 @@ const ConfigSchema = z.object({
     })
     .optional(),
   models: z.record(z.string()).optional(),
-  cluster: z
-    .object({
-      enabled: z.boolean().optional()
-    })
-    .optional(),
   shell_allowlist: z.array(z.string()).optional(),
   telemetry: z
     .object({
@@ -122,7 +117,6 @@ export default function SettingsPage() {
   const [sandboxNetwork, setSandboxNetwork] = useState(false);
   const [arbMode, setArbMode] = useState<"score" | "vote" | "fastest">("score");
   const [arbMin, setArbMin] = useState(2);
-  const [clusterEnabled, setClusterEnabled] = useState(false);
   const [modelsText, setModelsText] = useState("{}");
   const [shellAllowlistText, setShellAllowlistText] = useState("");
   const [telemetryEnabled, setTelemetryEnabled] = useState(false);
@@ -236,7 +230,6 @@ export default function SettingsPage() {
       setSandboxNetwork(Boolean(config.sandbox?.network));
       setArbMode(config.arbitration?.mode ?? "score");
       setArbMin(config.arbitration?.min_models ?? 2);
-      setClusterEnabled(Boolean(config.cluster?.enabled));
       setModelsText(JSON.stringify(config.models ?? {}, null, 2));
       setPmModelDefault(config.models?.pm ?? "gpt-5");
       setDevModelDefault(config.models?.dev ?? "codex");
@@ -321,7 +314,6 @@ export default function SettingsPage() {
       concurrency: { max_agents: maxAgents },
       sandbox: { enabled: sandboxEnabled, image: sandboxImage, network: sandboxNetwork },
       arbitration: { mode: arbMode, min_models: arbMin },
-      cluster: { enabled: clusterEnabled },
       models,
       shell_allowlist: shell_allowlist.length > 0 ? shell_allowlist : undefined,
       telemetry: { enabled: telemetryEnabled, endpoint: telemetryEndpoint || undefined }
@@ -854,15 +846,10 @@ export default function SettingsPage() {
                 <input type="checkbox" checked={sandboxNetwork} onChange={(e) => setSandboxNetwork(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
                 Allow network inside the sandbox
               </label>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                <input type="checkbox" checked={clusterEnabled} onChange={(e) => setClusterEnabled(e.target.checked)} className="rounded border-slate-700 bg-slate-900" />
-                Use background worker cluster
-              </label>
             </div>
             <div className="mt-4 grid gap-2 sm:grid-cols-3 text-[11px] text-slate-500">
               <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2">Docker isolation: safer, more predictable, slightly slower.</div>
               <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2">Network in sandbox: only enable if runs need package installs, APIs, or remote services.</div>
-              <div className="rounded-xl border border-slate-800 bg-slate-900/25 px-3 py-2">Worker cluster: useful when you want more background throughput on stronger machines.</div>
             </div>
           </div>
 

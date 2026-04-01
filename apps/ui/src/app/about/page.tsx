@@ -212,7 +212,7 @@ export default function AboutPage() {
             <div className="text-lg">🔒</div>
             <div className="mt-2 text-xs font-medium text-white">Local-first Privacy</div>
             <div className="mt-1 text-[11px] leading-relaxed text-slate-400">
-              Your code never leaves your machine. Agent execution, logs, and artifacts stay on local disk.
+              Runs, logs, and artifacts stay on local disk. API-backed providers can still receive prompts and repo context.
             </div>
           </div>
           <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4">
@@ -226,7 +226,7 @@ export default function AboutPage() {
             <div className="text-lg">🧩</div>
             <div className="mt-2 text-xs font-medium text-white">Plugin Ecosystem</div>
             <div className="mt-1 text-[11px] leading-relaxed text-slate-400">
-              Extend with local plugins. Cost alerts, custom loggers, and mission hooks stay local.
+              Install local plugins and run lifecycle hooks on mission and browser workflows without leaving your machine.
             </div>
           </div>
         </div>

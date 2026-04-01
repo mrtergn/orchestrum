@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { ensureDir, writeJson } from "./fs.js";
 import { loadWorkspaces, getWorkspacesPath } from "./workspaces.js";
 import { getGlobalConfigPath } from "./config.js";
+import { getWorkspaceControlDir } from "./control.js";
 
 export async function createBackup(options: {
   rootDir: string;
@@ -23,7 +24,7 @@ export async function createBackup(options: {
 
   const workspacesFile = getWorkspacesPath(options.rootDir);
   if (fsSync.existsSync(workspacesFile)) {
-    await fs.copyFile(workspacesFile, path.join(staging, "workspaces.json"));
+    await fs.copyFile(workspacesFile, path.join(staging, "root-workspace.json"));
   }
 
   const globalConfig = getGlobalConfigPath();
@@ -39,13 +40,9 @@ export async function createBackup(options: {
   const workspaceMeta: Array<{ id: string; path: string }> = [];
   for (const ws of workspaces) {
     workspaceMeta.push({ id: ws.id, path: ws.path });
-    const memoryDir = path.join(ws.path, ".memory");
-    const orchestrumDir = path.join(ws.path, ".orchestrum");
-    if (fsSync.existsSync(memoryDir)) {
-      await fs.cp(memoryDir, path.join(staging, `workspace_${ws.id}_memory`), { recursive: true });
-    }
-    if (fsSync.existsSync(orchestrumDir)) {
-      await fs.cp(orchestrumDir, path.join(staging, `workspace_${ws.id}_orchestrum`), { recursive: true });
+    const controlDir = getWorkspaceControlDir(ws.path);
+    if (fsSync.existsSync(controlDir)) {
+      await fs.cp(controlDir, path.join(staging, `workspace_${ws.id}_control`), { recursive: true });
     }
   }
   await writeJson(path.join(staging, "workspace_map.json"), workspaceMeta);

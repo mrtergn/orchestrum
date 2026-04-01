@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { ModalFrame } from "@/components/ModalFrame";
@@ -34,9 +34,20 @@ type Agent = {
   name: string;
   role: string;
   tags: string[];
+  profile: {
+    specialization: string;
+    seniority: string;
+    maxParallelWork: number;
+  };
   provider: ProviderSpec;
   capabilities: { shell: boolean; fs: boolean; network: boolean };
-  status: { state: string; currentTaskId?: string; lastHeartbeatAt: string };
+  status: { state: string; currentTaskId?: string; currentTaskIds?: string[]; activeLoad?: number; lastHeartbeatAt: string };
+};
+
+type AgentProfile = {
+  specialization: string;
+  seniority: AgentSeniority;
+  maxParallelWork: number;
 };
 
 type Draft = {
@@ -44,6 +55,7 @@ type Draft = {
   name: string;
   role: string;
   tags: string;
+  profile: AgentProfile;
   provider: ProviderSpec;
   capabilities: {
     shell: boolean;
@@ -52,21 +64,110 @@ type Draft = {
   };
 };
 
-type RolePreset = "pm" | "dev" | "audit" | "custom";
+type AgentPresetKey =
+  | "pm"
+  | "frontend"
+  | "backend"
+  | "fullstack"
+  | "tester"
+  | "qa"
+  | "audit"
+  | "custom";
+
+type AgentSeniority = "junior" | "mid" | "senior" | "lead";
 
 type PermissionKey = keyof Draft["capabilities"];
 
-const roleSuggestions: Array<{
-  preset: RolePreset;
+const agentPresets: Array<{
+  preset: AgentPresetKey;
   role: string;
+  specialization: string;
   label: string;
   desc: string;
   defaultName: string;
+  defaultSeniority: AgentSeniority;
+  defaultParallelWork: number;
 }> = [
-  { preset: "pm", role: "pm", label: "PM", desc: "Plans scope, writes specs, and coordinates work.", defaultName: "PM Agent" },
-  { preset: "dev", role: "dev", label: "Developer", desc: "Implements changes, edits code, and verifies fixes.", defaultName: "Developer Agent" },
-  { preset: "audit", role: "audit", label: "Auditor", desc: "Reviews quality, regressions, and delivery risks.", defaultName: "Auditor Agent" },
-  { preset: "custom", role: "", label: "Custom", desc: "Start from a general-purpose template and tune it later.", defaultName: "Custom Agent" }
+  {
+    preset: "pm",
+    role: "pm",
+    specialization: "pm",
+    label: "PM",
+    desc: "Breaks work down, writes specs, and coordinates the rest of the team.",
+    defaultName: "PM Agent",
+    defaultSeniority: "lead",
+    defaultParallelWork: 1
+  },
+  {
+    preset: "frontend",
+    role: "dev",
+    specialization: "frontend",
+    label: "Senior Frontend",
+    desc: "Owns UI structure, components, state flow, and visual regressions.",
+    defaultName: "Senior Frontend Agent",
+    defaultSeniority: "senior",
+    defaultParallelWork: 2
+  },
+  {
+    preset: "backend",
+    role: "dev",
+    specialization: "backend",
+    label: "Backend",
+    desc: "Owns API, server behavior, data flow, and storage-heavy changes.",
+    defaultName: "Backend Agent",
+    defaultSeniority: "senior",
+    defaultParallelWork: 2
+  },
+  {
+    preset: "fullstack",
+    role: "dev",
+    specialization: "fullstack",
+    label: "Fullstack",
+    desc: "Covers cross-cutting implementation when the work spans UI and server edges.",
+    defaultName: "Fullstack Agent",
+    defaultSeniority: "senior",
+    defaultParallelWork: 2
+  },
+  {
+    preset: "tester",
+    role: "dev",
+    specialization: "tester",
+    label: "Tester",
+    desc: "Focuses on validation depth, regression checks, and proving the change works.",
+    defaultName: "Tester Agent",
+    defaultSeniority: "mid",
+    defaultParallelWork: 2
+  },
+  {
+    preset: "qa",
+    role: "dev",
+    specialization: "qa",
+    label: "Browser Smoke",
+    desc: "Explores user journeys, browser behavior, and smoke-level UI regressions.",
+    defaultName: "Browser Smoke Specialist",
+    defaultSeniority: "mid",
+    defaultParallelWork: 1
+  },
+  {
+    preset: "audit",
+    role: "audit",
+    specialization: "audit",
+    label: "Auditor",
+    desc: "Reviews regressions, risk, and readiness before human approval.",
+    defaultName: "Audit Agent",
+    defaultSeniority: "senior",
+    defaultParallelWork: 1
+  },
+  {
+    preset: "custom",
+    role: "",
+    specialization: "custom",
+    label: "Custom",
+    desc: "Define a custom routing identity when the built-in specialist profiles are not enough.",
+    defaultName: "Custom Agent",
+    defaultSeniority: "mid",
+    defaultParallelWork: 1
+  }
 ];
 
 const permissionOptions: Array<{
@@ -86,46 +187,59 @@ function joinClasses(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
 
-function rolePresetFromRole(role: string): RolePreset {
-  const normalized = role.trim().toLowerCase();
-  if (normalized === "pm") return "pm";
-  if (normalized === "dev") return "dev";
-  if (normalized === "audit") return "audit";
+function presetFromProfile(profile: Pick<AgentProfile, "specialization">): AgentPresetKey {
+  const normalized = profile.specialization.trim().toLowerCase();
+  if (agentPresets.some((entry) => entry.preset === normalized)) {
+    return normalized as AgentPresetKey;
+  }
   return "custom";
 }
 
-function roleLabelForPreset(preset: RolePreset) {
-  return roleSuggestions.find((entry) => entry.preset === preset)?.label ?? "Custom";
+function labelForPreset(preset: AgentPresetKey) {
+  return agentPresets.find((entry) => entry.preset === preset)?.label ?? "Custom";
 }
 
-function displayRole(role: string) {
-  const preset = rolePresetFromRole(role);
-  return preset === "custom" ? role || "custom" : roleLabelForPreset(preset);
-}
-
-function defaultCapabilitiesForPreset(preset: RolePreset): Draft["capabilities"] {
-  if (preset === "dev") {
-    return { shell: true, fs: true, network: true };
+function displayRole(agent: Pick<Agent, "role" | "profile">) {
+  const preset = presetFromProfile(agent.profile);
+  if (preset === "custom") {
+    return agent.role || agent.profile.specialization || "custom";
   }
-  if (preset === "audit") {
-    return { shell: false, fs: true, network: false };
-  }
-  return { shell: false, fs: true, network: true };
+  return labelForPreset(preset);
 }
 
-function createDraft(workspaceId = "", preset: RolePreset = "dev"): Draft {
-  const suggestion = roleSuggestions.find((entry) => entry.preset === preset) ?? {
-    preset: "dev" as const,
+function displayProfileSummary(profile: AgentProfile) {
+  const seniorityLabel = profile.seniority.charAt(0).toUpperCase() + profile.seniority.slice(1);
+  const laneLabel = profile.maxParallelWork === 1 ? "1 parallel slot" : `${profile.maxParallelWork} parallel slots`;
+  return `${seniorityLabel} · ${laneLabel}`;
+}
+
+function defaultCapabilitiesForPreset(preset: AgentPresetKey): Draft["capabilities"] {
+  if (preset === "pm") return { shell: false, fs: true, network: true };
+  if (preset === "audit") return { shell: false, fs: true, network: false };
+  return { shell: true, fs: true, network: true };
+}
+
+function createDraft(workspaceId = "", preset: AgentPresetKey = "fullstack"): Draft {
+  const suggestion = agentPresets.find((entry) => entry.preset === preset) ?? {
+    preset: "fullstack" as const,
     role: "dev",
-    label: "Developer",
-    desc: "Implements changes, edits code, and verifies fixes.",
-    defaultName: "Developer Agent"
+    specialization: "fullstack",
+    label: "Fullstack",
+    desc: "Covers cross-cutting implementation when the work spans UI and server edges.",
+    defaultName: "Fullstack Agent",
+    defaultSeniority: "senior" as const,
+    defaultParallelWork: 2
   };
   const role = suggestion.role;
   return {
     workspaceId,
     name: suggestion.defaultName,
     role,
+    profile: {
+      specialization: suggestion.specialization,
+      seniority: suggestion.defaultSeniority,
+      maxParallelWork: suggestion.defaultParallelWork
+    },
     tags: "",
     provider: defaultProviderForRole(role || "general"),
     capabilities: defaultCapabilitiesForPreset(preset)
@@ -137,16 +251,27 @@ function createDraftFromAgent(agent: Agent): Draft {
     workspaceId: agent.workspaceId,
     name: agent.name,
     role: agent.role,
+    profile: {
+      specialization: agent.profile?.specialization || "custom",
+      seniority: (agent.profile?.seniority as AgentSeniority) || "mid",
+      maxParallelWork: Math.max(1, agent.profile?.maxParallelWork ?? 1)
+    },
     tags: agent.tags.join(", "),
     provider: agent.provider,
     capabilities: agent.capabilities
   };
 }
 
-function applyPresetToDraft(previous: Draft, preset: RolePreset): Draft {
+function applyPresetToDraft(previous: Draft, preset: AgentPresetKey): Draft {
   const next = createDraft(previous.workspaceId, preset);
-  if (preset === "custom" && rolePresetFromRole(previous.role) === "custom" && previous.role.trim()) {
+  if (preset === "custom" && presetFromProfile(previous.profile) === "custom" && previous.role.trim()) {
     next.role = previous.role;
+    next.profile = {
+      ...next.profile,
+      specialization: previous.profile.specialization || "custom",
+      seniority: previous.profile.seniority,
+      maxParallelWork: previous.profile.maxParallelWork
+    };
   }
   return {
     ...next,
@@ -235,8 +360,8 @@ type AgentEditorModalProps = {
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onToggleAdvanced: () => void;
-  onPresetSelect: (preset: RolePreset) => void;
-  setDraft: React.Dispatch<React.SetStateAction<Draft>>;
+  onPresetSelect: (preset: AgentPresetKey) => void;
+  setDraft: Dispatch<SetStateAction<Draft>>;
 };
 
 function AgentEditorModal({
@@ -256,8 +381,18 @@ function AgentEditorModal({
   onPresetSelect,
   setDraft
 }: AgentEditorModalProps) {
-  const activePreset = rolePresetFromRole(draft.role);
+  const activePreset = presetFromProfile(draft.profile);
   const selectedWorkspace = workspaces.find((workspace) => workspace.id === draft.workspaceId) ?? null;
+  const selectedPreset = agentPresets.find((entry) => entry.preset === activePreset) ?? {
+    preset: "custom" as const,
+    role: draft.role,
+    specialization: draft.profile.specialization,
+    label: "Custom",
+    desc: "Define a custom routing identity when the built-in specialist profiles are not enough.",
+    defaultName: "Custom Agent",
+    defaultSeniority: "mid" as const,
+    defaultParallelWork: 1
+  };
   const selectedVendor = providers.find((provider) => provider.vendor === draft.provider.vendor);
   const selectedTransport = selectedVendor?.transports.find((entry) => entry.transport === draft.provider.transport) ?? null;
   const selectedProfiles = selectedTransport?.profiles ?? [];
@@ -283,7 +418,7 @@ function AgentEditorModal({
           <div>
             <h3 className="text-lg font-semibold text-white">{isEditing ? "Edit Agent" : "Create Agent"}</h3>
             <p className="mt-1 text-sm text-slate-400">
-              Start with a role and workspace. Routing details stay tucked away unless you need to override them.
+              Start with a specialist profile and workspace. Routing details stay tucked away unless you need to override them.
             </p>
           </div>
           <button
@@ -303,7 +438,7 @@ function AgentEditorModal({
           <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/35 p-6">
             <div className="text-sm font-semibold text-white">Add a workspace first</div>
             <div className="mt-2 text-sm text-slate-400">
-              Agents are saved inside a workspace. Add a local repo first, then come back to create routing.
+              Specialists are saved inside a workspace. Add a local repo first, then come back to create routing.
             </div>
             <div className="mt-4">
               <Link
@@ -320,7 +455,7 @@ function AgentEditorModal({
               <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/35 p-5">
                 <div>
                   <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Basic</div>
-                  <div className="mt-2 text-sm text-slate-400">Choose where this agent lives and what its main job is.</div>
+                  <div className="mt-2 text-sm text-slate-400">Choose where this agent lives and what kind of work it should naturally own.</div>
                 </div>
 
                 <div>
@@ -347,9 +482,9 @@ function AgentEditorModal({
                 </div>
 
                 <div>
-                  <label className="text-xs text-slate-400">Role</label>
+                  <label className="text-xs text-slate-400">Specialization</label>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                    {roleSuggestions.map((suggestion) => {
+                    {agentPresets.map((suggestion) => {
                       const selected = activePreset === suggestion.preset;
                       return (
                         <button
@@ -371,16 +506,46 @@ function AgentEditorModal({
                   </div>
                 </div>
 
+                <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-4">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Routing identity</div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-[10px] uppercase tracking-[0.15em] text-slate-300">
+                      Mission role: {draft.role || "unset"}
+                    </span>
+                    <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-[10px] uppercase tracking-[0.15em] text-slate-300">
+                      Specialization: {draft.profile.specialization || "unset"}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-xs text-slate-500">
+                    Missions still route by core role, then break ties using specialization, seniority, tags, and available capacity.
+                  </div>
+                </div>
+
                 {activePreset === "custom" && (
-                  <div>
-                    <label className="text-xs text-slate-400">Role key</label>
-                    <input
-                      value={draft.role}
-                      onChange={(event) => setDraft((prev) => ({ ...prev, role: event.target.value }))}
-                      placeholder="research, qa, security"
-                      className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
-                    />
-                    <div className="mt-2 text-xs text-slate-500">Use a short role key. This is what missions and presets will reference later.</div>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <div>
+                      <label className="text-xs text-slate-400">Role key</label>
+                      <input
+                        value={draft.role}
+                        onChange={(event) => setDraft((prev) => ({ ...prev, role: event.target.value }))}
+                        placeholder="dev, qa, research"
+                        className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                      />
+                      <div className="mt-2 text-xs text-slate-500">This is the role mission templates and runtime routing expect.</div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-400">Specialization key</label>
+                      <input
+                        value={draft.profile.specialization}
+                        onChange={(event) => setDraft((prev) => ({
+                          ...prev,
+                          profile: { ...prev.profile, specialization: event.target.value }
+                        }))}
+                        placeholder="security, mobile, data"
+                        className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                      />
+                      <div className="mt-2 text-xs text-slate-500">Use a short routing label that describes this agent&apos;s niche.</div>
+                    </div>
                   </div>
                 )}
 
@@ -392,12 +557,61 @@ function AgentEditorModal({
                     className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
                   />
                 </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div>
+                    <label className="text-xs text-slate-400">Seniority</label>
+                    <select
+                      value={draft.profile.seniority}
+                      onChange={(event) => setDraft((prev) => ({
+                        ...prev,
+                        profile: { ...prev.profile, seniority: event.target.value as AgentSeniority }
+                      }))}
+                      className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="junior">Junior</option>
+                      <option value="mid">Mid</option>
+                      <option value="senior">Senior</option>
+                      <option value="lead">Lead</option>
+                    </select>
+                    <div className="mt-2 text-xs text-slate-500">
+                      Used as a soft routing signal when multiple agents fit the same task.
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400">Parallel capacity</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={8}
+                      value={draft.profile.maxParallelWork}
+                      onChange={(event) => setDraft((prev) => ({
+                        ...prev,
+                        profile: {
+                          ...prev.profile,
+                          maxParallelWork: Math.max(1, Math.min(8, Number(event.target.value) || 1))
+                        }
+                      }))}
+                      className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                    />
+                    <div className="mt-2 text-xs text-slate-500">
+                      Higher values let the router keep assigning work before this agent is considered saturated.
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950/35 p-5">
                 <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Default routing</div>
                 <div className="mt-2 text-sm text-slate-400">
                   Orchestrum will prefer local tools first. Open Advanced only if you want to override the default route.
+                </div>
+
+                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/35 p-4">
+                  <div className="text-sm font-medium text-white">{selectedPreset.label}</div>
+                  <div className="mt-1 text-xs text-slate-500">{selectedPreset.desc}</div>
+                  <div className="mt-3 text-[11px] text-slate-400">{displayProfileSummary(draft.profile)}</div>
                 </div>
 
                 <div className="mt-4">
@@ -468,7 +682,7 @@ function AgentEditorModal({
                     <input
                       value={draft.tags}
                       onChange={(event) => setDraft((prev) => ({ ...prev, tags: event.target.value }))}
-                      placeholder="pm, delivery, frontend"
+                      placeholder="frontend, delivery, audit"
                       className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
                     />
                   </div>
@@ -707,10 +921,19 @@ export default function AgentsPage() {
     if (intent !== "create") return;
 
     const presetParam = searchParams.get("preset");
-    const preset: RolePreset =
-      presetParam === "pm" || presetParam === "dev" || presetParam === "audit" || presetParam === "custom"
+    const preset: AgentPresetKey =
+      presetParam === "pm"
+      || presetParam === "frontend"
+      || presetParam === "backend"
+      || presetParam === "fullstack"
+      || presetParam === "tester"
+      || presetParam === "qa"
+      || presetParam === "audit"
+      || presetParam === "custom"
         ? presetParam
-        : "dev";
+        : presetParam === "dev"
+          ? "fullstack"
+          : "fullstack";
     const workspaceParam = searchParams.get("workspace") ?? selectedWorkspaceId ?? "";
     const seedKey = `${intent}:${preset}:${workspaceParam}`;
 
@@ -730,14 +953,14 @@ export default function AgentsPage() {
     setEditorOpen(false);
   }, [selectedWorkspaceId]);
 
-  const openCreateEditor = useCallback((preset: RolePreset = "dev") => {
+  const openCreateEditor = useCallback((preset: AgentPresetKey = "fullstack") => {
     setEditingId("");
     setAdvancedOpen(false);
     setDraft(createDraft(selectedWorkspaceId || "", preset));
     setEditorOpen(true);
   }, [selectedWorkspaceId]);
 
-  const handlePresetSelect = useCallback((preset: RolePreset) => {
+  const handlePresetSelect = useCallback((preset: AgentPresetKey) => {
     setDraft((prev) => applyPresetToDraft(prev, preset));
   }, []);
 
@@ -751,6 +974,10 @@ export default function AgentsPage() {
       pushToast({ tone: "warning", title: "Enter a role key" });
       return;
     }
+    if (!draft.profile.specialization.trim()) {
+      pushToast({ tone: "warning", title: "Enter a specialization" });
+      return;
+    }
     if (!draft.name.trim()) {
       pushToast({ tone: "warning", title: "Agent name is required" });
       return;
@@ -762,6 +989,11 @@ export default function AgentsPage() {
       name: draft.name.trim(),
       role: draft.role.trim(),
       tags: draft.tags.split(",").map((item) => item.trim()).filter(Boolean),
+      profile: {
+        specialization: draft.profile.specialization.trim(),
+        seniority: draft.profile.seniority,
+        maxParallelWork: Math.max(1, Math.floor(draft.profile.maxParallelWork || 1))
+      },
       provider: draft.provider,
       capabilities: draft.capabilities
     };
@@ -822,13 +1054,13 @@ export default function AgentsPage() {
     <main className="space-y-6">
       <section className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-white">Agents</h2>
+          <h2 className="text-xl font-semibold text-white">Specialists</h2>
           <p className="text-sm text-slate-400">
             Create workspace agents with automatic local-provider routing and only open advanced settings when you need them.
           </p>
         </div>
         <button
-          onClick={() => openCreateEditor("dev")}
+          onClick={() => openCreateEditor("fullstack")}
           className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.25em] text-amber-200"
         >
           + Add Agent
@@ -882,12 +1114,12 @@ export default function AgentsPage() {
       <section className="rounded-2xl border border-slate-800 bg-slate-950/35 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-white">Quick start roles</div>
-            <div className="mt-1 text-sm text-slate-400">Start from a sensible default, then open Advanced only if you need overrides.</div>
+            <div className="text-sm font-semibold text-white">Quick start specialists</div>
+            <div className="mt-1 text-sm text-slate-400">Start from a sensible specialist profile, then open Advanced only if you need overrides.</div>
           </div>
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {roleSuggestions.map((suggestion) => (
+          {agentPresets.map((suggestion) => (
             <button
               key={suggestion.preset}
               onClick={() => openCreateEditor(suggestion.preset)}
@@ -911,13 +1143,16 @@ export default function AgentsPage() {
         <section className="rounded-2xl border border-dashed border-slate-700 p-8 text-center">
           <h3 className="text-lg font-semibold text-white">No agents in this workspace yet</h3>
           <p className="mt-2 text-sm text-slate-400">
-            Use one of the role presets above or open the create modal and customize the defaults.
+            Use one of the specialist presets above or open the create modal and customize the routing profile.
           </p>
         </section>
       ) : (
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {agents.map((agent) => {
             const record = providers.find((provider) => provider.vendor === agent.provider.vendor);
+            const activeLoad = Array.isArray(agent.status.currentTaskIds)
+              ? agent.status.currentTaskIds.length
+              : agent.status.activeLoad ?? (agent.status.currentTaskId ? 1 : 0);
             return (
               <div key={agent.id} className="group rounded-xl border border-slate-800 bg-slate-950/40 p-4 transition hover:border-slate-700">
                 <div className="flex items-start justify-between gap-3">
@@ -925,12 +1160,24 @@ export default function AgentsPage() {
                     <div className={`h-2.5 w-2.5 rounded-full ${stateColor(agent.status.state)}`} />
                     <div>
                       <div className="text-sm font-semibold text-white">{agent.name}</div>
-                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{displayRole(agent.role)}</div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{displayRole(agent)}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">{displayProfileSummary({
+                        specialization: agent.profile.specialization,
+                        seniority: agent.profile.seniority as AgentSeniority,
+                        maxParallelWork: agent.profile.maxParallelWork
+                      })}</div>
                     </div>
                   </div>
                   <div className={`text-[10px] uppercase tracking-widest ${stateLabel(agent.status.state)}`}>
                     {agent.status.state}
                   </div>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/30 px-3 py-2 text-[11px] text-slate-400">
+                  <span>Runtime load</span>
+                  <span className="text-slate-200">
+                    {activeLoad}/{agent.profile.maxParallelWork}
+                  </span>
                 </div>
 
                 <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/30 p-3 text-[11px] text-slate-400">
@@ -939,7 +1186,16 @@ export default function AgentsPage() {
                   {agent.provider.fallback && <div className="mt-1 text-slate-500">Fallback: {providerSummary(agent.provider.fallback)}</div>}
                 </div>
 
+                {Array.isArray(agent.status.currentTaskIds) && agent.status.currentTaskIds.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-[10px] text-amber-100">
+                    Active tasks: {agent.status.currentTaskIds.map((taskId) => taskId.slice(0, 8)).join(", ")}
+                  </div>
+                )}
+
                 <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] text-slate-400">
+                  <span className="rounded bg-slate-800/60 px-1.5 py-0.5">
+                    {agent.role}
+                  </span>
                   {permissionOptions
                     .filter((option) => agent.capabilities[option.key])
                     .map((option) => (
@@ -947,6 +1203,11 @@ export default function AgentsPage() {
                         {capabilityBadgeLabel(option.key)}
                       </span>
                     ))}
+                  {agent.tags.map((tag) => (
+                    <span key={tag} className="rounded border border-slate-800 px-1.5 py-0.5 text-slate-500">
+                      {tag}
+                    </span>
+                  ))}
                 </div>
 
                 <div className="mt-3 flex gap-2 opacity-0 transition-opacity group-hover:opacity-100">

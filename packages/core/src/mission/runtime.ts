@@ -2,16 +2,22 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, readJsonIfExists, readTextIfExists, safeRunId, writeJson, writeText, appendLine } from "../runner/fs.js";
-import { applyPatch, gitDiff } from "../runner/git.js";
+import { applyPatch, gitDiff, PatchApplyError } from "../runner/git.js";
 import { loadConfig } from "../runner/config.js";
 import { estimateCostUsd, normalizeUsage, resolvePricing } from "../runner/cost.js";
+import { appendLearnings, buildRunLearnings } from "../runner/learnings.js";
+import { buildStepState, loadPlugins, runPluginHook, type OrchestrumPlugin } from "../runner/plugins.js";
 import { createApprovalToken, isWorkspaceApproved, writeApprovalRequest } from "../runner/approvals.js";
 import { loadRepoExecutionProfile, runValidationSuite } from "../runner/repoExecution.js";
+import { appendWorkspaceSignal } from "../runner/signals.js";
+import type { RunState, StepState } from "../runner/types.js";
 import { applyDerivedSessionState } from "../delivery/sessionState.js";
 import { createRemediationTasks, extractFindingsFromImport, resolvePacketCompletionStatus } from "../delivery/triage.js";
 import { buildRemediationPacket } from "../delivery/workPackets.js";
 import { createDefaultTeamPreset, type DeliverySessionState, type PacketExport, type PacketImport, type WorkPacket } from "../delivery/types.js";
+import { getLicenseStatus, type LicenseTier } from "../licensing/index.js";
 import { requiresApproval, scanDiff, summarizeFindings } from "../security/safety.js";
+import { emitTelemetry, type TelemetryConfig } from "../telemetry/index.js";
 import { completeWithProvider, normalizeMissionProvider } from "./providers.js";
 import { loadMissionTemplate } from "./templates.js";
 import type {
@@ -45,6 +51,14 @@ type StartMissionOptions = {
   onEvent?: EventHandler;
 };
 
+type MissionRuntimeSignals = {
+  plugins: OrchestrumPlugin[];
+  telemetryConfig: TelemetryConfig | null | undefined;
+  tier: LicenseTier;
+  workspaceId: string;
+  finalized: boolean;
+};
+
 type ResumeMissionOptions = {
   runsDir: string;
   workspaceId?: string;
@@ -70,8 +84,17 @@ export async function runMissionDetailed(options: StartMissionOptions): Promise<
   const template = loadMissionTemplate(options.templateId);
   const baseConfig = await loadConfig(options.repoPath).catch(() => null);
   const config = applyMissionStartOptions(baseConfig, options.runOptions);
+  const license = await getLicenseStatus().catch(() => ({ tier: "Free" as const }));
+  const plugins = await loadPlugins(options.repoPath, config).catch(() => []);
+  const signals: MissionRuntimeSignals = {
+    plugins,
+    telemetryConfig: config?.telemetry ?? null,
+    tier: license.tier,
+    workspaceId,
+    finalized: false
+  };
   const profile = await loadRepoExecutionProfile(options.repoPath, config).catch(() => null);
-  const graph = createMissionGraph(template, options.agents, options.runOptions?.modelOverrides);
+  const graph = createMissionGraph(template, options.agents, options.goal, options.runOptions?.modelOverrides);
   const run: MissionRun = {
     schemaVersion: 2,
     runId,
@@ -102,6 +125,32 @@ export async function runMissionDetailed(options: StartMissionOptions): Promise<
   await ensureDir(path.join(runDir, "logs"));
   await writeText(path.join(runDir, "events.ndjson"), "");
   await persistMissionRun(runDir, run);
+  await runPluginHook(plugins, "onRunStart", buildMissionRunState(run), {
+    repoPath: options.repoPath,
+    workspaceId,
+    entityId: runId
+  });
+  await emitTelemetry({
+    t: "mission.run.started",
+    ts: nowIso(),
+    tier: license.tier,
+    run_kind: "mission",
+    run_status: run.status,
+    workspace_id: workspaceId,
+    template_id: template.id
+  }, signals.telemetryConfig, { workspacePath: options.repoPath });
+  await appendWorkspaceSignal(options.repoPath, {
+    workspaceId,
+    source: "mission",
+    type: "mission.run.started",
+    entityId: runId,
+    status: run.status,
+    summary: `Mission started from ${template.id}`,
+    payload: {
+      runId,
+      templateId: template.id
+    }
+  });
   await emitMissionEvent(runDir, {
     t: "mission.started",
     runId,
@@ -115,6 +164,7 @@ export async function runMissionDetailed(options: StartMissionOptions): Promise<
     repoPath: options.repoPath,
     config,
     run,
+    signals,
     onEvent: options.onEvent
   });
 }
@@ -126,6 +176,16 @@ export async function resumeMissionRun(options: ResumeMissionOptions): Promise<M
     throw new Error(`Mission run not found: ${options.runId}`);
   }
   hydrateMissionAgents(run, options.agents);
+  const config = await loadConfig(run.repoPath).catch(() => null);
+  const license = await getLicenseStatus().catch(() => ({ tier: "Free" as const }));
+  const plugins = await loadPlugins(run.repoPath, config).catch(() => []);
+  const signals: MissionRuntimeSignals = {
+    plugins,
+    telemetryConfig: config?.telemetry ?? null,
+    tier: license.tier,
+    workspaceId: run.workspaceId ?? options.workspaceId ?? "default",
+    finalized: false
+  };
   if (run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "blocked") {
     return { ok: run.status === "completed", runId: run.runId, runDir, run };
   }
@@ -142,8 +202,9 @@ export async function resumeMissionRun(options: ResumeMissionOptions): Promise<M
   return continueMissionRun({
     runDir,
     repoPath: run.repoPath,
-    config: await loadConfig(run.repoPath).catch(() => null),
+    config,
     run,
+    signals,
     onEvent: options.onEvent
   });
 }
@@ -205,7 +266,7 @@ export async function importMissionNodeInput(options: ImportMissionNodeInputOpti
       node.verdict = "ready_for_review";
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      node.status = "failed";
+      node.status = "blocked";
       node.error = message;
       node.change = {
         status: "apply_failed",
@@ -213,10 +274,17 @@ export async function importMissionNodeInput(options: ImportMissionNodeInputOpti
         applyError: message,
         source: "external"
       };
-      node.verdict = "failed";
-      node.artifacts = upsertArtifacts(node.artifacts, [
-        await writeArtifact(nodeDir, "apply-error.txt", message)
-      ]);
+      node.verdict = "blocked";
+      const applyArtifacts = [await writeArtifact(nodeDir, "apply-error.txt", message)];
+      if (err instanceof PatchApplyError && err.artifacts) {
+        applyArtifacts.push(
+          await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
+          await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
+          await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown")
+        );
+      }
+      node.artifacts = upsertArtifacts(node.artifacts, applyArtifacts);
     }
   }
   await recordMissionDeliveryImport({
@@ -234,15 +302,29 @@ export async function importMissionNodeInput(options: ImportMissionNodeInputOpti
   if (node.status === "blocked") {
     run.status = "blocked";
     run.end = nowIso();
-  } else if (node.status === "failed") {
-    run.status = "failed";
-    run.end = nowIso();
   } else {
     run.status = "running";
     run.end = null;
   }
   updateRunTruth(run);
   await persistMissionRun(runDir, run);
+  if (isTerminalMissionStatus(run.status)) {
+    const config = await loadConfig(run.repoPath).catch(() => null);
+    const license = await getLicenseStatus().catch(() => ({ tier: "Free" as const }));
+    const plugins = await loadPlugins(run.repoPath, config).catch(() => []);
+    await finalizeMissionSignals({
+      runDir,
+      repoPath: run.repoPath,
+      run,
+      signals: {
+        plugins,
+        telemetryConfig: config?.telemetry ?? null,
+        tier: license.tier,
+        workspaceId: run.workspaceId ?? options.workspaceId ?? "default",
+        finalized: false
+      }
+    });
+  }
   await emitMissionEvent(runDir, {
     t: "mission.node.imported",
     runId: run.runId,
@@ -284,6 +366,7 @@ async function continueMissionRun(options: {
   repoPath: string;
   config: Awaited<ReturnType<typeof loadConfig>>;
   run: MissionRun;
+  signals: MissionRuntimeSignals;
   onEvent?: EventHandler;
 }): Promise<MissionRunResult> {
   const concurrency = Math.max(1, resolveMissionConcurrency(options.config));
@@ -310,6 +393,7 @@ async function continueMissionRun(options: {
           config: options.config,
           run,
           nodeId: node.id,
+          signals: options.signals,
           onEvent: options.onEvent
         });
         const afterStatus = run.graph.nodes.find((entry) => entry.id === node.id)?.status;
@@ -352,6 +436,7 @@ async function continueMissionRun(options: {
         config: options.config,
         run,
         nodeId: node.id,
+        signals: options.signals,
         onEvent: options.onEvent
       });
       if (run.status !== "running") break;
@@ -372,6 +457,12 @@ async function continueMissionRun(options: {
     totalSteps: run.totalSteps ?? 0,
     ts: Date.now()
   }, options.onEvent);
+  await finalizeMissionSignals({
+    runDir: options.runDir,
+    repoPath: options.repoPath,
+    run,
+    signals: options.signals
+  });
 
   return {
     ok: run.status === "completed",
@@ -388,6 +479,7 @@ async function executeMissionNode(options: {
   config: Awaited<ReturnType<typeof loadConfig>>;
   run: MissionRun;
   nodeId: string;
+  signals: MissionRuntimeSignals;
   onEvent?: EventHandler;
 }): Promise<MissionRun> {
   const node = options.run.graph.nodes.find((entry) => entry.id === options.nodeId);
@@ -435,6 +527,11 @@ async function executeMissionNode(options: {
     model: node.model,
     ts: Date.now()
   }, options.onEvent);
+  await runPluginHook(options.signals.plugins, "onStepStart", buildMissionStepState(node), {
+    repoPath: options.repoPath,
+    workspaceId: options.run.workspaceId,
+    entityId: node.id
+  });
 
   try {
     const result = await runMissionNodeExecutor({
@@ -508,6 +605,11 @@ async function executeMissionNode(options: {
     error: node.error ?? null,
     ts: Date.now()
   }, options.onEvent);
+  await runPluginHook(options.signals.plugins, "onStepFinish", buildMissionStepState(node), {
+    repoPath: options.repoPath,
+    workspaceId: options.run.workspaceId,
+    entityId: node.id
+  });
   return options.run;
 }
 
@@ -722,6 +824,14 @@ async function executePatchNode(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       artifacts.push(await writeArtifact(nodeDir, "apply-error.txt", message));
+      if (err instanceof PatchApplyError && err.artifacts) {
+        artifacts.push(
+          await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
+          await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
+          await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown")
+        );
+      }
       return {
         outputText,
         diffText,
@@ -740,7 +850,8 @@ async function executePatchNode(
           applyError: message,
           source: "provider"
         },
-        verdict: "failed",
+        blocked: true,
+        verdict: "blocked",
         failureMessage: message
       };
     }
@@ -843,7 +954,7 @@ async function finalizeApprovedPatchNode(
       await applyPatch(repoPath, diffText);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      node.status = "failed";
+      node.status = "blocked";
       node.error = message;
       node.change = {
         status: "apply_failed",
@@ -851,7 +962,16 @@ async function finalizeApprovedPatchNode(
         applyError: message,
         source: "provider"
       };
+      node.verdict = "blocked";
       node.end = nowIso();
+      if (err instanceof PatchApplyError && err.artifacts) {
+        node.artifacts = upsertArtifacts(node.artifacts, [
+          await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
+          await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
+          await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown")
+        ]);
+      }
       await writeNodeStatus(nodeDir, node);
       await persistMissionRun(runDir, run);
       return run;
@@ -970,11 +1090,19 @@ async function collectRepoFiles(rootDir: string, currentDir: string, result: str
 function createMissionGraph(
   template: ReturnType<typeof loadMissionTemplate>,
   agents: MissionAgent[],
+  goal: string,
   modelOverrides?: Record<string, string>
 ): MissionGraph {
   const missingRoles = new Set<string>();
   const nodes = template.nodes.map((definition) => {
-    const agent = resolveMissionAgent(definition.role, agents);
+    const agent = resolveMissionAgent({
+      role: definition.role,
+      title: definition.title,
+      executor: definition.executor,
+      phase: definition.phase,
+      acceptanceCriteria: definition.acceptanceCriteria,
+      goal
+    }, agents);
     if (!agent) missingRoles.add(definition.role);
     const providerConfig = normalizeMissionProvider(agent?.provider ?? {}, definition.role);
     const roleOverride = resolveRoleModelOverride(definition.role, modelOverrides);
@@ -1029,7 +1157,14 @@ function createMissionGraph(
 
 function hydrateMissionAgents(run: MissionRun, agents: MissionAgent[]) {
   for (const node of run.graph.nodes) {
-    const agent = resolveMissionAgent(node.role, agents);
+    const agent = resolveMissionAgent({
+      role: node.role,
+      title: node.title,
+      executor: node.executor,
+      phase: node.phase,
+      acceptanceCriteria: node.acceptanceCriteria,
+      goal: run.goal
+    }, agents);
     if (!agent) continue;
     const providerConfig = normalizeMissionProvider(agent.provider, node.role);
     node.assignedAgentId = agent.id;
@@ -1043,13 +1178,119 @@ function hydrateMissionAgents(run: MissionRun, agents: MissionAgent[]) {
   }
 }
 
-function resolveMissionAgent(role: string, agents: MissionAgent[]): MissionAgent | null {
-  const needle = role.trim().toLowerCase();
-  return agents.find((agent) => {
-    const agentRole = agent.role.trim().toLowerCase();
-    if (agentRole === needle || agentRole.includes(needle)) return true;
-    return (agent.tags ?? []).some((tag) => tag.trim().toLowerCase() === needle);
-  }) ?? null;
+function resolveMissionAgent(
+  request: {
+    role: string;
+    title?: string;
+    executor?: string;
+    phase?: string;
+    acceptanceCriteria?: string[];
+    goal?: string;
+  },
+  agents: MissionAgent[]
+): MissionAgent | null {
+  const scored = agents
+    .map((agent) => ({ agent, score: scoreMissionAgent(agent, request) }))
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.agent.name.localeCompare(right.agent.name);
+    });
+  return scored[0]?.agent ?? null;
+}
+
+function scoreMissionAgent(
+  agent: MissionAgent,
+  request: {
+    role: string;
+    title?: string;
+    executor?: string;
+    phase?: string;
+    acceptanceCriteria?: string[];
+    goal?: string;
+  }
+): number {
+  const requiredRole = request.role.trim().toLowerCase();
+  const agentRole = agent.role.trim().toLowerCase();
+  const specialization = (agent.specialization ?? "").trim().toLowerCase();
+  const seniority = (agent.seniority ?? "").trim().toLowerCase();
+  const tags = (agent.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean);
+  const context = [
+    request.title ?? "",
+    request.goal ?? "",
+    ...(request.acceptanceCriteria ?? [])
+  ].join("\n").toLowerCase();
+  const isImplementationNeed = request.executor === "prompt" || request.executor === "patch";
+  const isValidationNeed = request.executor === "validate" || request.phase === "verify";
+  const isReviewNeed = request.executor === "audit" || request.phase === "review";
+
+  let score = 0;
+  const roleMatched =
+    agentRole === requiredRole ||
+    agentRole.includes(requiredRole) ||
+    tags.includes(requiredRole) ||
+    (requiredRole === "dev" && (agentRole === "developer" || agentRole === "engineering")) ||
+    (requiredRole === "dev" && ["frontend", "backend", "fullstack", "tester", "qa"].includes(specialization)) ||
+    (requiredRole === "pm" && ["pm", "product_manager"].includes(specialization)) ||
+    (requiredRole === "audit" && ["audit", "reviewer"].includes(specialization));
+
+  if (!roleMatched) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  if (agentRole === requiredRole) score += 24;
+  else if (tags.includes(requiredRole)) score += 18;
+  else score += 12;
+
+  if (requiredRole === "pm" && ["pm", "product_manager"].includes(specialization)) score += 22;
+  if (requiredRole === "audit" && ["audit", "reviewer"].includes(specialization)) score += 22;
+
+  if (requiredRole === "dev") {
+    const frontendNeed = /\b(frontend|ui|ux|component|layout|page|react|next|css|tailwind|modal)\b/.test(context);
+    const backendNeed = /\b(backend|api|server|database|schema|migration|endpoint|service|worker|queue)\b/.test(context);
+    const browserNeed = /\b(browser|playwright|e2e|journey|qa|smoke)\b/.test(context);
+
+    if (isValidationNeed) {
+      if (specialization === "tester") score += 28;
+      if (specialization === "qa") score += 24;
+      if (specialization === "fullstack") score += 12;
+    } else if (isReviewNeed) {
+      if (specialization === "qa") score += 8;
+      if (specialization === "tester") score += 6;
+    } else if (isImplementationNeed) {
+      if (frontendNeed && specialization === "frontend") score += 28;
+      if (backendNeed && specialization === "backend") score += 28;
+      if (frontendNeed && backendNeed && specialization === "fullstack") score += 26;
+      if (!frontendNeed && !backendNeed && specialization === "fullstack") score += 18;
+      if (frontendNeed && specialization === "fullstack") score += 14;
+      if (backendNeed && specialization === "fullstack") score += 14;
+      if (browserNeed && specialization === "qa") score += 8;
+    }
+
+    if (specialization === "tester" && !isValidationNeed) score -= 8;
+    if (specialization === "qa" && !isValidationNeed && !browserNeed) score -= 8;
+  }
+
+  if (tags.includes("frontend") && /\b(frontend|ui|react|next|css|tailwind)\b/.test(context)) score += 10;
+  if (tags.includes("backend") && /\b(backend|api|server|database|schema|queue)\b/.test(context)) score += 10;
+  if (tags.includes("tester") && isValidationNeed) score += 10;
+  if (tags.includes("qa") && /\b(browser|playwright|e2e|journey|qa|smoke)\b/.test(context)) score += 10;
+
+  if (seniority === "lead") score += 4;
+  else if (seniority === "senior") score += 3;
+  else if (seniority === "mid") score += 2;
+
+  const maxParallelWork = Math.max(1, Math.floor(agent.capacity?.maxParallelWork ?? 1));
+  const activeLoad = Math.max(0, Math.floor(agent.runtime?.activeLoad ?? 0));
+  if (activeLoad >= maxParallelWork) {
+    score -= 18 + activeLoad;
+  } else {
+    score += Math.max(0, maxParallelWork - activeLoad);
+  }
+  if ((agent.runtime?.state ?? "").trim().toLowerCase() === "sleeping") score -= 2;
+  if ((agent.runtime?.state ?? "").trim().toLowerCase() === "error") score -= 12;
+
+  return score;
 }
 
 async function persistMissionRun(runDir: string, run: MissionRun): Promise<void> {
@@ -1490,13 +1731,112 @@ function summarizeInput(text: string): string {
   return summary ? summary.slice("summary:".length).trim() : "";
 }
 
-function mapMissionNodeStatusToStepStatus(status: MissionNode["status"]): string {
+function mapMissionNodeStatusToStepStatus(status: MissionNode["status"]): StepState["status"] {
   if (status === "awaiting_approval" || status === "waiting_input") return "paused";
   return status;
 }
 
 function getNodeDir(runDir: string, nodeId: string): string {
   return path.join(runDir, "nodes", nodeId);
+}
+
+function buildMissionRunState(run: MissionRun): RunState {
+  return {
+    ...run,
+    workspacePath: run.repoPath,
+    meta: {
+      id: run.runId,
+      workspaceId: run.workspaceId,
+      startedAt: run.start,
+      finishedAt: run.end
+    },
+    stats: {
+      totalCost: run.totalCost,
+      totalTokens: run.totalTokens,
+      totalSteps: run.totalSteps
+    },
+    steps: missionGraphToStepStates(run.graph)
+  };
+}
+
+function buildMissionStepState(node: MissionNode) {
+  const step = buildStepState({
+    stepId: node.id,
+    status: mapMissionNodeStatusToStepStatus(node.status),
+    agentId: node.assignedAgentId ?? null,
+    ok: node.status === "completed",
+    error: node.error ?? null,
+    provider: node.provider ?? null,
+    model: node.model ?? null
+  });
+  step.start = node.start;
+  step.end = node.end;
+  step.pauseReason = node.pauseReason ?? null;
+  step.change = node.change ?? null;
+  step.validation = node.validation ?? null;
+  step.verdict = node.verdict ?? null;
+  return step;
+}
+
+async function finalizeMissionSignals(options: {
+  runDir: string;
+  repoPath: string;
+  run: MissionRun;
+  signals: MissionRuntimeSignals;
+}) {
+  if (!isTerminalMissionStatus(options.run.status)) return;
+  if (options.signals.finalized) return;
+  options.signals.finalized = true;
+
+  const learnings = await buildRunLearnings({
+    workspacePath: options.repoPath,
+    runMeta: buildMissionRunState(options.run),
+    runDir: options.runDir
+  }).catch(() => []);
+  await appendLearnings(options.repoPath, learnings).catch(() => undefined);
+  const signalWorkspaceId = options.run.workspaceId ?? options.signals.workspaceId;
+  await runPluginHook(options.signals.plugins, "onRunFinish", buildMissionRunState(options.run), {
+    repoPath: options.repoPath,
+    workspaceId: signalWorkspaceId,
+    entityId: options.run.runId
+  });
+  await emitTelemetry({
+    t: "mission.run.finished",
+    ts: nowIso(),
+    tier: options.signals.tier,
+    run_kind: "mission",
+    run_status: options.run.status,
+    workspace_id: options.run.workspaceId,
+    template_id: options.run.missionTemplateId,
+    duration_ms: durationMs(options.run.start, options.run.end),
+    total_tokens: options.run.totalTokens,
+    total_cost: options.run.totalCost
+  }, options.signals.telemetryConfig, { workspacePath: options.repoPath });
+  await appendWorkspaceSignal(options.repoPath, {
+    workspaceId: signalWorkspaceId,
+    source: "mission",
+    type: "mission.run.finished",
+    entityId: options.run.runId,
+    status: options.run.status,
+    summary: `Mission finished with ${options.run.verdict ?? options.run.status}`,
+    payload: {
+      runId: options.run.runId,
+      verdict: options.run.verdict,
+      templateId: options.run.missionTemplateId
+    }
+  }).catch(() => undefined);
+}
+
+function isTerminalMissionStatus(status: MissionRun["status"]) {
+  return status === "completed" || status === "failed" || status === "blocked" || status === "cancelled";
+}
+
+function durationMs(start?: string | null, end?: string | null): number | undefined {
+  if (!start || !end) return undefined;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return undefined;
+  return endMs - startMs;
 }
 
 function nowIso(): string {

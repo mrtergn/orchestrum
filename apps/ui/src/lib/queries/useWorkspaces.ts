@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchJson } from "./client";
+import { buildWorkspaceApiPath } from "../workspaces";
 
 export type WorkspaceSummary = {
   id: string;
@@ -19,7 +20,7 @@ export function useWorkspaces() {
   return useQuery({
     queryKey: ["workspaces"],
     queryFn: async () => {
-      const data = await fetchJson<{ workspaces?: WorkspaceSummary[] }>("/api/workspaces");
+      const data = await fetchJson<{ workspaces?: WorkspaceSummary[] }>(buildWorkspaceApiPath("/api/workspaces"));
       return data.workspaces ?? [];
     },
     staleTime: 5000

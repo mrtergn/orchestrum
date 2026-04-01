@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAppUi } from "@/components/AppUiProvider";
+import { buildWorkspaceApiPath } from "@/lib/workspaces";
 
 type Workspace = {
   id: string;
@@ -21,7 +22,7 @@ export function WorkspaceSelector({
 
   useEffect(() => {
     const load = async () => {
-      const res = await fetch("/api/workspaces", { cache: "no-store" });
+      const res = await fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
       setWorkspaces(data.workspaces ?? []);

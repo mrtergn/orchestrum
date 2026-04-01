@@ -31,7 +31,7 @@ export async function runDoctor(options: {
   const playwrightCheck = await inspectPlaywright();
   checks.push(playwrightCheck);
 
-  const staleWorktrees = await scanStaleWorktrees(options.runsDir);
+  const staleWorktrees = await scanStaleWorktrees(options.runsDir, options.repoPath ?? options.rootDir);
   checks.push({
     id: "worktrees",
     label: "Worktree Hygiene",
@@ -51,7 +51,7 @@ export async function runDoctor(options: {
     details: corruptedRuns.slice(0, 10)
   });
 
-  const plugins = await listInstalledPlugins().catch(() => []);
+  const plugins = await listInstalledPlugins(options.repoPath ?? options.rootDir).catch(() => []);
   const brokenPlugins = plugins.filter((plugin) => !fsSync.existsSync(plugin.path));
   checks.push({
     id: "plugins",
@@ -82,7 +82,7 @@ export async function runDoctor(options: {
   }
 
   const stateIndex = new StateIndex({
-    rootDir: options.rootDir,
+    rootDir: options.repoPath ?? options.rootDir,
     runsDir: options.runsDir
   });
   const indexHealth = await stateIndex.init();

@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { getAppHome } from "../appHome.js";
 import { ensureDir, readJsonIfExists } from "../runner/fs.js";
 import { loadWorkspaces } from "../runner/workspaces.js";
 import { listInstalledPlugins } from "../plugins/registry.js";
 import { loadGovernanceEvents } from "../runner/governance.js";
 import { loadLearnings } from "../runner/learnings.js";
+import { getWorkspaceStateIndexPath } from "../runner/control.js";
 import {
   DeliverySessionStateSchema,
   type DeliverySummary,
@@ -72,52 +72,43 @@ export type IndexedDeliverySessionRecord = {
   latestImport: DeliverySummaryLatestImport | null;
 };
 
-export function getStateIndexPath(): string {
-  return path.join(getAppHome(), "state-index.sqlite");
+export function getStateIndexPath(repoPath = process.cwd()): string {
+  return getWorkspaceStateIndexPath(repoPath);
 }
 
 export class StateIndex {
   private sqlModule: SqlJsModule | null = null;
-  private db: SqlJsDatabase | null = null;
+  private dbs = new Map<string, SqlJsDatabase>();
   private lastHealth: StateIndexHealth = {
     ok: false,
     rebuilt: false,
-    path: getStateIndexPath()
+    path: "workspace-local"
   };
 
-  constructor(private options: { rootDir: string; runsDir: string; dbPath?: string }) {}
+  constructor(
+    private options: {
+      rootDir: string;
+      runsDir: string;
+      dbPath?: string;
+      listWorkspacePaths?: () => Promise<string[]>;
+      resolveWorkspacePath?: (workspaceId: string) => Promise<string | null>;
+    }
+  ) {}
 
   async init(): Promise<StateIndexHealth> {
-    const dbPath = this.options.dbPath ?? getStateIndexPath();
-    await ensureDir(path.dirname(dbPath));
-    try {
-      const SQL = await this.loadSqlJs();
-      const existing = await fs.readFile(dbPath).catch(() => null);
-      this.db = existing ? new SQL.Database(existing) : new SQL.Database();
-      this.ensureSchema();
-      this.lastHealth = {
-        ok: true,
-        rebuilt: false,
-        path: dbPath,
-        updatedAt: new Date().toISOString()
-      };
-      await this.save();
-      return this.lastHealth;
-    } catch (err) {
-      return this.rebuild(err instanceof Error ? err.message : String(err));
-    }
+    return this.rebuild();
   }
 
   async rebuild(reason?: string): Promise<StateIndexHealth> {
-    const SQL = await this.loadSqlJs();
-    this.db = new SQL.Database();
-    this.ensureSchema();
-    await this.ingestAll();
-    await this.save();
+    this.dbs.clear();
+    const workspaces = await this.listWorkspaces();
+    for (const workspace of workspaces) {
+      await this.rebuildWorkspace(workspace);
+    }
     this.lastHealth = {
       ok: true,
       rebuilt: true,
-      path: this.options.dbPath ?? getStateIndexPath(),
+      path: workspaces[0] ? getStateIndexPath(workspaces[0].path) : getStateIndexPath(this.options.rootDir),
       error: reason,
       updatedAt: new Date().toISOString()
     };
@@ -125,11 +116,13 @@ export class StateIndex {
   }
 
   async health(): Promise<StateIndexHealth> {
-    if (!this.db) {
+    if (this.dbs.size === 0) {
       return this.init();
     }
     try {
-      this.db.exec("SELECT COUNT(*) FROM runs;");
+      for (const db of this.dbs.values()) {
+        db.exec("SELECT COUNT(*) FROM runs;");
+      }
       return {
         ...this.lastHealth,
         ok: true,
@@ -142,34 +135,37 @@ export class StateIndex {
 
   async queryRuns(workspaceId?: string): Promise<IndexedRunRecord[]> {
     await this.health();
-    if (!this.db) return [];
-    const statement = workspaceId
-      ? this.db.prepare("SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict FROM runs WHERE workspace_id = ? ORDER BY start DESC")
-      : this.db.prepare("SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict FROM runs ORDER BY start DESC");
     const rows: IndexedRunRecord[] = [];
-    if (workspaceId) {
-      statement.bind([workspaceId]);
+    const workspaces = workspaceId
+      ? (await this.resolveWorkspace(workspaceId)).filter(Boolean)
+      : await this.listWorkspaces();
+    for (const workspace of workspaces) {
+      const db = await this.ensureWorkspaceDb(workspace);
+      const statement = db.prepare(
+        "SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict FROM runs WHERE workspace_id = ? ORDER BY start DESC"
+      );
+      statement.bind([workspace.id]);
+      while (statement.step()) {
+        const row = statement.getAsObject();
+        rows.push({
+          workspaceId: String(row.workspace_id ?? ""),
+          runId: String(row.run_id ?? ""),
+          kind: String(row.kind ?? "unknown"),
+          status: String(row.status ?? ""),
+          start: String(row.start ?? ""),
+          end: row.end ? String(row.end) : null,
+          repoPath: String(row.repo_path ?? ""),
+          readinessScore: row.readiness_score == null ? null : Number(row.readiness_score),
+          readinessBlocking: parseJsonArray(row.readiness_blocking),
+          pauseReason: row.pause_reason == null ? null : String(row.pause_reason),
+          changeStatus: row.change_status == null ? null : String(row.change_status),
+          validationStatus: row.validation_status == null ? null : String(row.validation_status),
+          verdict: row.verdict == null ? null : String(row.verdict)
+        });
+      }
+      statement.free();
     }
-    while (statement.step()) {
-      const row = statement.getAsObject();
-      rows.push({
-        workspaceId: String(row.workspace_id ?? ""),
-        runId: String(row.run_id ?? ""),
-        kind: String(row.kind ?? "unknown"),
-        status: String(row.status ?? ""),
-        start: String(row.start ?? ""),
-        end: row.end ? String(row.end) : null,
-        repoPath: String(row.repo_path ?? ""),
-        readinessScore: row.readiness_score == null ? null : Number(row.readiness_score),
-        readinessBlocking: parseJsonArray(row.readiness_blocking),
-        pauseReason: row.pause_reason == null ? null : String(row.pause_reason),
-        changeStatus: row.change_status == null ? null : String(row.change_status),
-        validationStatus: row.validation_status == null ? null : String(row.validation_status),
-        verdict: row.verdict == null ? null : String(row.verdict)
-      });
-    }
-    statement.free();
-    return rows;
+    return rows.sort((left, right) => (left.start < right.start ? 1 : -1));
   }
 
   async getLatestReadiness(workspaceId?: string): Promise<{ workspaceId: string; score: number | null; blocking: string[]; runId: string | null } | null> {
@@ -186,38 +182,41 @@ export class StateIndex {
 
   async queryDeliverySessions(workspaceId?: string): Promise<IndexedDeliverySessionRecord[]> {
     await this.health();
-    if (!this.db) return [];
-    const statement = workspaceId
-      ? this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions WHERE workspace_id = ? ORDER BY updated_at DESC")
-      : this.db.prepare("SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions ORDER BY updated_at DESC");
     const rows: IndexedDeliverySessionRecord[] = [];
-    if (workspaceId) {
-      statement.bind([workspaceId]);
+    const workspaces = workspaceId
+      ? (await this.resolveWorkspace(workspaceId)).filter(Boolean)
+      : await this.listWorkspaces();
+    for (const workspace of workspaces) {
+      const db = await this.ensureWorkspaceDb(workspace);
+      const statement = db.prepare(
+        "SELECT workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import FROM delivery_sessions WHERE workspace_id = ? ORDER BY updated_at DESC"
+      );
+      statement.bind([workspace.id]);
+      while (statement.step()) {
+        const row = statement.getAsObject();
+        rows.push({
+          workspaceId: String(row.workspace_id ?? ""),
+          runId: String(row.run_id ?? ""),
+          status: String(row.status ?? ""),
+          updatedAt: String(row.updated_at ?? ""),
+          openFindings: Number(row.open_findings ?? 0),
+          resolvedFindings: Number(row.resolved_findings ?? 0),
+          remediationsOpen: Number(row.remediations_open ?? 0),
+          remediationsDone: Number(row.remediations_done ?? 0),
+          unresolvedManualPackets: Number(row.unresolved_manual_packets ?? 0),
+          unmatchedImportAttempts: Number(row.unmatched_import_attempts ?? 0),
+          packetStatusCounts: parseJsonRecord(row.packet_status_counts),
+          toolUsage: parseJsonRecord(row.tool_usage),
+          importConfidenceCounts: parseJsonRecord(row.import_confidence_counts),
+          findingCategoryCounts: parseJsonRecord(row.finding_category_counts),
+          findingSeverityCounts: parseJsonRecord(row.finding_severity_counts),
+          remediationPriorityCounts: parseJsonRecord(row.remediation_priority_counts),
+          latestImport: parseJsonObject<DeliverySummaryLatestImport>(row.latest_import)
+        });
+      }
+      statement.free();
     }
-    while (statement.step()) {
-      const row = statement.getAsObject();
-      rows.push({
-        workspaceId: String(row.workspace_id ?? ""),
-        runId: String(row.run_id ?? ""),
-        status: String(row.status ?? ""),
-        updatedAt: String(row.updated_at ?? ""),
-        openFindings: Number(row.open_findings ?? 0),
-        resolvedFindings: Number(row.resolved_findings ?? 0),
-        remediationsOpen: Number(row.remediations_open ?? 0),
-        remediationsDone: Number(row.remediations_done ?? 0),
-        unresolvedManualPackets: Number(row.unresolved_manual_packets ?? 0),
-        unmatchedImportAttempts: Number(row.unmatched_import_attempts ?? 0),
-        packetStatusCounts: parseJsonRecord(row.packet_status_counts),
-        toolUsage: parseJsonRecord(row.tool_usage),
-        importConfidenceCounts: parseJsonRecord(row.import_confidence_counts),
-        findingCategoryCounts: parseJsonRecord(row.finding_category_counts),
-        findingSeverityCounts: parseJsonRecord(row.finding_severity_counts),
-        remediationPriorityCounts: parseJsonRecord(row.remediation_priority_counts),
-        latestImport: parseJsonObject<DeliverySummaryLatestImport>(row.latest_import)
-      });
-    }
-    statement.free();
-    return rows;
+    return rows.sort((left, right) => (left.updatedAt < right.updatedAt ? 1 : -1));
   }
 
   async getDeliverySummary(workspaceId?: string): Promise<DeliverySummary> {
@@ -260,53 +259,70 @@ export class StateIndex {
     return summary;
   }
 
-  private async ingestAll(): Promise<void> {
-    if (!this.db) return;
-    this.db.run("DELETE FROM workspaces;");
-    this.db.run("DELETE FROM plugins;");
-    this.db.run("DELETE FROM runs;");
-    this.db.run("DELETE FROM delivery_sessions;");
-    this.db.run("DELETE FROM approvals;");
-    this.db.run("DELETE FROM governance_events;");
-    this.db.run("DELETE FROM learnings;");
+  private async listWorkspaces() {
+    const repoPaths = this.options.listWorkspacePaths ? await this.options.listWorkspacePaths().catch(() => []) : [];
+    return loadWorkspaces(this.options.rootDir, { repoPaths }).catch(() => []);
+  }
 
-    const workspaces = await loadWorkspaces(this.options.rootDir).catch(() => []);
-    for (const workspace of workspaces) {
-      this.db.run(
-        "INSERT OR REPLACE INTO workspaces (id, path, name, updated_at) VALUES (?, ?, ?, ?)",
-        [workspace.id, workspace.path, workspace.name ?? null, workspace.updatedAt ?? workspace.createdAt ?? null]
+  private async resolveWorkspace(workspaceId: string) {
+    const resolvedPath = this.options.resolveWorkspacePath
+      ? await this.options.resolveWorkspacePath(workspaceId).catch(() => null)
+      : null;
+    const repoPaths = resolvedPath
+      ? Array.from(new Set([resolvedPath, ...(this.options.listWorkspacePaths ? await this.options.listWorkspacePaths().catch(() => []) : [])]))
+      : this.options.listWorkspacePaths
+        ? await this.options.listWorkspacePaths().catch(() => [])
+        : [];
+    const workspaces = await loadWorkspaces(this.options.rootDir, { repoPaths }).catch(() => []);
+    const match = workspaces.find((workspace) => workspace.id === workspaceId);
+    return match ? [match] : [];
+  }
+
+  private async rebuildWorkspace(workspace: { id: string; path: string; name?: string; updatedAt?: string; createdAt?: string }) {
+    const db = await this.ensureWorkspaceDb(workspace);
+    db.run("DELETE FROM workspaces;");
+    db.run("DELETE FROM plugins;");
+    db.run("DELETE FROM runs;");
+    db.run("DELETE FROM delivery_sessions;");
+    db.run("DELETE FROM approvals;");
+    db.run("DELETE FROM governance_events;");
+    db.run("DELETE FROM learnings;");
+
+    db.run(
+      "INSERT OR REPLACE INTO workspaces (id, path, name, updated_at) VALUES (?, ?, ?, ?)",
+      [workspace.id, workspace.path, workspace.name ?? null, workspace.updatedAt ?? workspace.createdAt ?? null]
+    );
+
+    const learnings = await loadLearnings(workspace.path).catch(() => []);
+    for (const learning of learnings) {
+      db.run(
+        "INSERT OR REPLACE INTO learnings (id, workspace_id, ts, category, insight, related_files, run_id, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          learning.id,
+          workspace.id,
+          learning.timestamp,
+          learning.category,
+          learning.insight,
+          JSON.stringify(learning.relatedFiles ?? []),
+          learning.sourceRunId ?? null,
+          learning.confidence
+        ]
       );
-      const learnings = await loadLearnings(workspace.path).catch(() => []);
-      for (const learning of learnings) {
-        this.db.run(
-          "INSERT OR REPLACE INTO learnings (id, workspace_id, ts, category, insight, related_files, run_id, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          [
-            learning.id,
-            workspace.id,
-            learning.timestamp,
-            learning.category,
-            learning.insight,
-            JSON.stringify(learning.relatedFiles ?? []),
-            learning.sourceRunId ?? null,
-            learning.confidence
-          ]
-        );
-      }
     }
 
-    const plugins = await listInstalledPlugins().catch(() => []);
+    const plugins = await listInstalledPlugins(workspace.path).catch(() => []);
     for (const plugin of plugins) {
-      this.db.run(
+      db.run(
         "INSERT OR REPLACE INTO plugins (name, version, enabled, path) VALUES (?, ?, ?, ?)",
         [plugin.name, plugin.version, plugin.enabled ? 1 : 0, plugin.path]
       );
     }
 
     const runDirs = await scanRunDirs(this.options.runsDir);
-    for (const record of runDirs) {
+    for (const record of runDirs.filter((item) => item.workspaceId === workspace.id)) {
       const runMeta = await readJsonIfExists<any>(path.join(record.runDir, "run.json"));
       if (!runMeta) continue;
-      this.db.run(
+      db.run(
         "INSERT OR REPLACE INTO runs (workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           record.workspaceId,
@@ -335,7 +351,7 @@ export class StateIndex {
         const findingSeverityCounts = countFindingSeverityCounts(deliverySession.findings);
         const remediationPriorityCounts = countRemediationPriorityCounts(deliverySession.remediations);
         const latestImport = toDeliverySummaryLatestImport(deliverySession.imports[0], deliverySession.runId);
-        this.db.run(
+        db.run(
           "INSERT OR REPLACE INTO delivery_sessions (workspace_id, run_id, status, updated_at, open_findings, resolved_findings, remediations_open, remediations_done, unresolved_manual_packets, unmatched_import_attempts, packet_status_counts, tool_usage, import_confidence_counts, finding_category_counts, finding_severity_counts, remediation_priority_counts, latest_import) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [
             record.workspaceId,
@@ -365,7 +381,7 @@ export class StateIndex {
         if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
         const request = await readJsonIfExists<any>(path.join(approvalsDir, entry.name));
         if (!request) continue;
-        this.db.run(
+        db.run(
           "INSERT OR REPLACE INTO approvals (token, workspace_id, run_id, step_id, kind, ts) VALUES (?, ?, ?, ?, ?, ?)",
           [
             request.token ?? entry.name.replace(/\.json$/, ""),
@@ -380,7 +396,7 @@ export class StateIndex {
 
       const governanceEvents = await loadGovernanceEvents(record.runDir).catch(() => []);
       for (const event of governanceEvents) {
-        this.db.run(
+        db.run(
           "INSERT OR REPLACE INTO governance_events (id, workspace_id, run_id, step_id, category, severity, summary, ts, files, commands) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [
             event.id,
@@ -397,11 +413,26 @@ export class StateIndex {
         );
       }
     }
+
+    await this.saveWorkspaceDb(workspace.path, db);
   }
 
-  private ensureSchema(): void {
-    if (!this.db) return;
-    this.db.run(`
+  private async ensureWorkspaceDb(workspace: { path: string }) {
+    const key = path.resolve(workspace.path);
+    const existingDb = this.dbs.get(key);
+    if (existingDb) return existingDb;
+    const SQL = await this.loadSqlJs();
+    const dbPath = getStateIndexPath(workspace.path);
+    await ensureDir(path.dirname(dbPath));
+    const existing = await fs.readFile(dbPath).catch(() => null);
+    const db = existing ? new SQL.Database(existing) : new SQL.Database();
+    this.ensureSchema(db);
+    this.dbs.set(key, db);
+    return db;
+  }
+
+  private ensureSchema(db: SqlJsDatabase): void {
+    db.run(`
       CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
         path TEXT NOT NULL,
@@ -409,7 +440,7 @@ export class StateIndex {
         updated_at TEXT
       );
     `);
-    this.db.run(`
+    db.run(`
       CREATE TABLE IF NOT EXISTS plugins (
         name TEXT PRIMARY KEY,
         version TEXT,
@@ -417,7 +448,7 @@ export class StateIndex {
         path TEXT
       );
     `);
-    this.db.run(`
+    db.run(`
       CREATE TABLE IF NOT EXISTS runs (
         workspace_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -442,12 +473,12 @@ export class StateIndex {
       "ALTER TABLE runs ADD COLUMN verdict TEXT"
     ]) {
       try {
-        this.db.run(column);
+        db.run(column);
       } catch {
         // ignore existing columns for local rebuilds
       }
     }
-    this.db.run(`
+    db.run(`
       CREATE TABLE IF NOT EXISTS approvals (
         token TEXT PRIMARY KEY,
         workspace_id TEXT,
@@ -457,7 +488,7 @@ export class StateIndex {
         ts TEXT
       );
     `);
-    this.db.run(`
+    db.run(`
       CREATE TABLE IF NOT EXISTS delivery_sessions (
         workspace_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -487,12 +518,12 @@ export class StateIndex {
       "ALTER TABLE delivery_sessions ADD COLUMN latest_import TEXT"
     ]) {
       try {
-        this.db.run(column);
+        db.run(column);
       } catch {
         // ignore existing columns for older local indexes
       }
     }
-    this.db.run(`
+    db.run(`
       CREATE TABLE IF NOT EXISTS governance_events (
         id TEXT PRIMARY KEY,
         workspace_id TEXT,
@@ -506,7 +537,7 @@ export class StateIndex {
         commands TEXT
       );
     `);
-    this.db.run(`
+    db.run(`
       CREATE TABLE IF NOT EXISTS learnings (
         id TEXT PRIMARY KEY,
         workspace_id TEXT,
@@ -520,10 +551,9 @@ export class StateIndex {
     `);
   }
 
-  private async save(): Promise<void> {
-    if (!this.db) return;
-    const dbPath = this.options.dbPath ?? getStateIndexPath();
-    const payload = this.db.export();
+  private async saveWorkspaceDb(repoPath: string, db: SqlJsDatabase): Promise<void> {
+    const dbPath = getStateIndexPath(repoPath);
+    const payload = db.export();
     await fs.writeFile(dbPath, Buffer.from(payload));
   }
 

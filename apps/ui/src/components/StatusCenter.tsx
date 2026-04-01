@@ -148,8 +148,8 @@ export function StatusCenter() {
       ? `/settings?tab=Providers&scope=workspace&workspace=${encodeURIComponent(selectedWorkspaceId)}`
       : "/settings?tab=Providers&scope=workspace";
     const createAgentHref = selectedWorkspaceId
-      ? `/agents?intent=create&preset=dev&workspace=${encodeURIComponent(selectedWorkspaceId)}`
-      : "/agents?intent=create&preset=dev";
+      ? `/agents?intent=create&preset=fullstack&workspace=${encodeURIComponent(selectedWorkspaceId)}`
+      : "/agents?intent=create&preset=fullstack";
 
     if (!isFreshSetup && !isHome && providerDiscoveryReady && !hasAnyConfiguredProvider) {
       list.push({
@@ -166,8 +166,8 @@ export function StatusCenter() {
       list.push({
         id: "no-agents",
         tone: "info",
-        message: "No agents registered yet. Create your first agent in Agent Registry.",
-        actionLabel: "Open Agents",
+        message: "No specialists registered yet. Create your first specialist in the team registry.",
+        actionLabel: "Open Specialists",
         actionHref: createAgentHref
       });
     }

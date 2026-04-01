@@ -1,29 +1,37 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { useAppUi } from "@/components/AppUiProvider";
 
 type Plugin = {
   name: string;
   version: string;
   enabled: boolean;
-  manifest?: { capabilities_required?: string[]; min_tier?: string };
+  manifest?: { capabilities_required?: string[] };
 };
 
 export default function PluginsPage() {
   const confirm = useConfirm();
+  const { selectedWorkspaceId } = useAppUi();
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [pathInput, setPathInput] = useState("");
   const [message, setMessage] = useState<{ text: string; type: "info" | "error" | "success" } | null>(null);
 
-  const load = async () => {
-    const res = await fetch("/api/plugins", { cache: "no-store" });
+  const load = useCallback(async () => {
+    if (!selectedWorkspaceId) {
+      setPlugins([]);
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set("workspace", selectedWorkspaceId);
+    const res = await fetch(`/api/plugins?${params.toString()}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
     setPlugins(data.plugins ?? []);
-  };
+  }, [selectedWorkspaceId]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(); }, [load]);
 
   const flash = (text: string, type: "info" | "error" | "success" = "info") => {
     setMessage({ text, type });
@@ -32,10 +40,11 @@ export default function PluginsPage() {
 
   const handleInstall = async () => {
     if (!pathInput.trim()) { flash("Provide a plugin path.", "error"); return; }
+    if (!selectedWorkspaceId) { flash("Select a workspace before installing plugins.", "error"); return; }
     const res = await fetch("/api/plugins/install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: pathInput.trim() }),
+      body: JSON.stringify({ path: pathInput.trim(), workspaceId: selectedWorkspaceId }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) { flash(data.error ?? "Install failed.", "error"); return; }
@@ -45,10 +54,14 @@ export default function PluginsPage() {
   };
 
   const toggle = async (name: string, enabled: boolean) => {
+    if (!selectedWorkspaceId) {
+      flash("Select a workspace before changing plugins.", "error");
+      return;
+    }
     const res = await fetch("/api/plugins/enable", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, enabled }),
+      body: JSON.stringify({ name, enabled, workspaceId: selectedWorkspaceId }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -59,9 +72,13 @@ export default function PluginsPage() {
   };
 
   const remove = async (name: string) => {
+    if (!selectedWorkspaceId) {
+      flash("Select a workspace before removing plugins.", "error");
+      return;
+    }
     const ok = await confirm({
       title: "Remove plugin",
-      message: `Remove "${name}"? This will unregister the plugin but won't delete its files.`,
+      message: `Remove "${name}"? This deletes Orchestrum's installed copy and unregisters it. Your original source folder is unchanged.`,
       confirmLabel: "Remove",
       tone: "danger",
     });
@@ -69,7 +86,7 @@ export default function PluginsPage() {
     const res = await fetch("/api/plugins/remove", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, workspaceId: selectedWorkspaceId }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -116,6 +133,16 @@ export default function PluginsPage() {
       {/* Install */}
       <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5">
         <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 mb-3">Install Plugin</div>
+        {!selectedWorkspaceId && (
+          <div className="mb-3 rounded-xl border border-amber-400/20 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
+            Select a workspace first. Plugins are installed per workspace under <code>.orchestrum/control/plugins/</code>.
+          </div>
+        )}
+        {selectedWorkspaceId && (
+          <div className="mb-3 rounded-xl border border-slate-800 bg-slate-900/30 px-3 py-2 text-xs text-slate-400">
+            Plugins are trusted workspace-local JavaScript hooks. Orchestrum validates declared capabilities, but does not sandbox plugin code.
+          </div>
+        )}
         <div className="flex gap-3">
           <input
             value={pathInput}
@@ -123,10 +150,11 @@ export default function PluginsPage() {
             onKeyDown={(e) => e.key === "Enter" && handleInstall()}
             placeholder="Path to plugin folder…"
             className="flex-1 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:border-amber-500/40 focus:outline-none transition-colors"
+            disabled={!selectedWorkspaceId}
           />
           <button
             onClick={handleInstall}
-            disabled={!pathInput.trim()}
+            disabled={!pathInput.trim() || !selectedWorkspaceId}
             className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-[10px] uppercase tracking-[0.2em] text-amber-200 hover:bg-amber-400/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             Install
@@ -135,12 +163,22 @@ export default function PluginsPage() {
       </section>
 
       {/* Plugin grid */}
-      {plugins.length === 0 && (
+      {!selectedWorkspaceId && (
+        <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 text-2xl text-slate-500">⧉</div>
+          <h3 className="mt-3 text-base font-semibold text-white">Select a workspace</h3>
+          <p className="mt-1 text-sm text-slate-400">
+            Plugin installation and lifecycle are workspace-scoped.
+          </p>
+        </section>
+      )}
+
+      {selectedWorkspaceId && plugins.length === 0 && (
         <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 text-2xl text-slate-500">⧉</div>
           <h3 className="mt-3 text-base font-semibold text-white">No plugins installed</h3>
           <p className="mt-1 text-sm text-slate-400">
-            Add a local plugin folder above. Plugins extend Orchestrum with custom capabilities.
+            Add a local plugin folder above. Plugins extend Orchestrum with workspace-local lifecycle hooks.
           </p>
         </section>
       )}
@@ -195,10 +233,7 @@ export default function PluginsPage() {
 
             {/* Footer */}
             <div className="flex items-center justify-between pt-1 border-t border-slate-800/50">
-              {plugin.manifest?.min_tier && (
-                <span className="text-[9px] text-slate-600 uppercase tracking-wider">Manifest: {plugin.manifest.min_tier}</span>
-              )}
-              {!plugin.manifest?.min_tier && <span />}
+              <span className="text-[9px] text-slate-600 uppercase tracking-wider">Workspace-scoped plugin</span>
               <button
                 onClick={() => remove(plugin.name)}
                 className="text-[10px] text-rose-400/60 hover:text-rose-400 transition-colors"

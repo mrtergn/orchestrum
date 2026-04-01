@@ -6,6 +6,7 @@ import chokidar from "chokidar";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
+  ensureWorkspaceManifest,
   loadWorkspaces,
   migrateRuns,
   writeCrashReport,
@@ -25,6 +26,7 @@ import { registerPromptOpsRoutes } from "./routes/promptOps.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerSecretOpsRoutes } from "./routes/secretOps.js";
 import { registerSystemOpsRoutes } from "./routes/systemOps.js";
+import { registerWorkIntakeRoutes } from "./routes/workIntake.js";
 import { registerWorkspaceRegistryRoutes } from "./routes/workspaceRegistry.js";
 import { registerWorkspaceSupportRoutes } from "./routes/workspaceSupport.js";
 
@@ -42,7 +44,8 @@ type RunRecord = {
 };
 
 export async function startService(options: ServiceOptions = {}) {
-  const rootDir = options.rootDir ?? process.cwd();
+  const rootDir = options.rootDir ?? process.env.ORCHESTRUM_ROOT_DIR ?? process.cwd();
+  const installRoot = process.env.ORCHESTRUM_INSTALL_ROOT ?? rootDir;
   const runsDir =
     options.runsDir ??
     process.env.ORCHESTRUM_RUNS_DIR ??
@@ -57,17 +60,42 @@ export async function startService(options: ServiceOptions = {}) {
   const runIndex = new RunIndex(runsDir);
   await runIndex.init();
   await recoverInterruptedRunsIndex(runIndex);
-  const stateIndex = new StateIndex({ rootDir, runsDir });
-  await stateIndex.init();
+  const workspacePathById = new Map<string, string>();
+  const workspacePaths = new Set<string>();
+  await refreshWorkspaceCache(rootDir, workspacePaths, workspacePathById);
 
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: "20mb" }));
 
+  const rememberWorkspacePath = async (repoPath: string) => {
+    const manifest = await ensureWorkspaceManifest(repoPath);
+    workspacePaths.add(manifest.path);
+    workspacePathById.set(manifest.id, manifest.path);
+    await agentPlatform.reload();
+    await stateIndex.rebuild().catch(() => undefined);
+    return manifest;
+  };
+  const forgetWorkspacePath = async (repoPath: string) => {
+    const resolved = path.resolve(repoPath);
+    workspacePaths.delete(resolved);
+    for (const [workspaceId, workspacePath] of workspacePathById.entries()) {
+      if (path.resolve(workspacePath) === resolved) {
+        workspacePathById.delete(workspaceId);
+      }
+    }
+    await agentPlatform.reload();
+    await stateIndex.rebuild().catch(() => undefined);
+  };
+  const listWorkspacePaths = async () => Array.from(workspacePaths);
+  const resolveWorkspace = (workspaceId?: string) => resolveWorkspacePath(rootDir, workspaceId, {
+    workspacePaths,
+    workspacePathById
+  });
   const logger = new Logger(path.join(rootDir, "logs", "service.ndjson"));
-  const agentPlatform = new AgentPlatform({ rootDir });
+  const agentPlatform = new AgentPlatform({ rootDir, listWorkspacePaths });
   await agentPlatform.init(logger);
-  const versionMeta = await getCurrentVersion(rootDir).catch(() => null);
+  const versionMeta = await getCurrentVersion(installRoot).catch(() => null);
   if (!versionMeta) {
     console.warn("[orchestrum] version.json missing. Integrity check failed.");
     void logger.warn("integrity.missing_version", { rootDir });
@@ -92,8 +120,13 @@ export async function startService(options: ServiceOptions = {}) {
   });
 
   const useKeychain = process.env.ORCHESTRUM_USE_KEYCHAIN === "1";
-
-  const resolveWorkspace = (workspaceId?: string) => resolveWorkspacePath(rootDir, workspaceId);
+  const stateIndex = new StateIndex({
+    rootDir,
+    runsDir,
+    listWorkspacePaths,
+    resolveWorkspacePath: async (workspaceId) => resolveWorkspace(workspaceId)
+  });
+  await stateIndex.init();
 
   registerMetaOpsRoutes(app, {
     rootDir,
@@ -108,7 +141,10 @@ export async function startService(options: ServiceOptions = {}) {
   registerWorkspaceRegistryRoutes(app, {
     rootDir,
     runIndex,
-    resolveWorkspacePath: resolveWorkspace
+    resolveWorkspacePath: resolveWorkspace,
+    listWorkspacePaths,
+    rememberWorkspacePath,
+    forgetWorkspacePath
   });
   registerSecretOpsRoutes(app, {
     rootDir,
@@ -119,10 +155,11 @@ export async function startService(options: ServiceOptions = {}) {
     rootDir,
     runsDir,
     stateIndex,
-    resolveWorkspacePath
+    resolveWorkspacePath: resolveWorkspace
   });
   registerSystemOpsRoutes(app, {
-    rootDir
+    rootDir,
+    resolveWorkspacePath: resolveWorkspace
   });
   registerMissionRoutes(app, {
     runsDir,
@@ -139,11 +176,20 @@ export async function startService(options: ServiceOptions = {}) {
     runsDir,
     stateIndex,
     runIndex,
-    agentPlatform
+    agentPlatform,
+    listWorkspacePaths,
+    resolveWorkspacePath: resolveWorkspace
   });
   registerDeliveryRoutes(app, {
-    runsDir,
     stateIndex
+  });
+  registerWorkIntakeRoutes(app, {
+    rootDir,
+    runsDir,
+    stateIndex,
+    listWorkspacePaths,
+    resolveWorkspacePath: resolveWorkspace,
+    agentPlatform
   });
 
   agentPlatform.registerRoutes(app);
@@ -288,17 +334,38 @@ function resolveWorkspaceIdFromRunDir(runsDir: string, runDir: string): string |
   return null;
 }
 
-async function resolveWorkspacePath(rootDir: string, workspaceId?: string): Promise<string | null> {
-  const workspaces = await loadWorkspaces(rootDir);
-  if (workspaceId) {
-    const match = workspaces.find((ws) => ws.id === workspaceId);
-    return match?.path ?? null;
+async function resolveWorkspacePath(
+  rootDir: string,
+  workspaceId: string | undefined,
+  cache: {
+    workspacePaths: Set<string>;
+    workspacePathById: Map<string, string>;
   }
-  if (workspaces.length === 1) {
-    const onlyWorkspace = workspaces[0];
-    return onlyWorkspace ? onlyWorkspace.path : null;
+): Promise<string | null> {
+  await refreshWorkspaceCache(rootDir, cache.workspacePaths, cache.workspacePathById);
+  if (workspaceId) {
+    return cache.workspacePathById.get(workspaceId) ?? null;
+  }
+  const knownPaths = Array.from(cache.workspacePaths);
+  if (knownPaths.length === 1) {
+    return knownPaths[0] ?? null;
   }
   return null;
+}
+
+async function refreshWorkspaceCache(
+  rootDir: string,
+  workspacePaths: Set<string>,
+  workspacePathById: Map<string, string>
+) {
+  const workspaces = await loadWorkspaces(rootDir, {
+    repoPaths: Array.from(workspacePaths)
+  }).catch(() => []);
+  workspacePathById.clear();
+  for (const workspace of workspaces) {
+    workspacePaths.add(workspace.path);
+    workspacePathById.set(workspace.id, workspace.path);
+  }
 }
 
 async function recoverInterruptedRunsIndex(index: RunIndex) {

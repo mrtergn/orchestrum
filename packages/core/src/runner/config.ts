@@ -3,7 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import { ensureDir, writeJson } from "./fs.js";
 import { applyProfileToConfig, loadWorkspaceProfile } from "../profiles/index.js";
-import { getAppHome } from "../appHome.js";
+import { getOperatorControlDir, getWorkspaceConfigPath, getWorkspacePoliciesPath } from "./control.js";
 import { migrateOrchestrumConfig } from "../migrations/index.js";
 import type { RepoExecutionProfile } from "./types.js";
 
@@ -25,7 +25,14 @@ const PolicySchema = z.object({
   max_files_changed: z.number().int().min(1).optional(),
   forbidden_paths: z.array(z.string()).optional(),
   max_cost_usd: z.number().min(0).optional(),
-  risk_tolerance: z.enum(["low", "medium", "high"]).optional()
+  risk_tolerance: z.enum(["low", "medium", "high"]).optional(),
+  protected_paths: z.array(z.string()).optional(),
+  blocked_commands: z.array(z.string()).optional(),
+  approval_paths: z.array(z.string()).optional(),
+  approval_commands: z.array(z.string()).optional(),
+  approval_providers: z.array(z.string()).optional(),
+  validation_commands: z.array(z.string()).optional(),
+  quality_gate_commands: z.array(z.string()).optional()
 });
 
 const RepoExecutionSchema: z.ZodType<RepoExecutionProfile> = z.object({
@@ -58,14 +65,6 @@ const ConfigSchema = z.object({
       provider: z.string(),
       endpoint: z.string(),
       model: z.string().optional()
-    })
-    .optional(),
-  cluster: z
-    .object({
-      enabled: z.boolean().optional(),
-      min_workers: z.number().int().min(1).optional(),
-      max_workers: z.number().int().min(1).optional(),
-      queue_dir: z.string().optional()
     })
     .optional(),
   reward: z
@@ -139,9 +138,10 @@ export type OrchestrumConfig = z.infer<typeof ConfigSchema>;
 export async function loadConfig(repoPath: string, overrides?: Partial<OrchestrumConfig>): Promise<OrchestrumConfig | null> {
   const global = await loadGlobalConfig().catch(() => null);
   const workspace = await loadWorkspaceConfig(repoPath).catch(() => null);
+  const workspacePolicies = await loadWorkspacePolicies(repoPath).catch(() => null);
   const profile = await loadWorkspaceProfile(repoPath).catch(() => null);
   const profileConfig = applyProfileToConfig(profile, null);
-  return mergeConfigs(global, workspace, profileConfig, overrides);
+  return mergeConfigs(global, workspace, workspacePolicies ? { policy: workspacePolicies } : null, profileConfig, overrides);
 }
 
 export async function loadGlobalConfig(): Promise<OrchestrumConfig | null> {
@@ -151,7 +151,7 @@ export async function loadGlobalConfig(): Promise<OrchestrumConfig | null> {
 
 export async function loadWorkspaceConfig(repoPath: string): Promise<OrchestrumConfig | null> {
   const rootPath = path.join(repoPath, "orchestrum.config.json");
-  const workspacePath = path.join(repoPath, ".orchestrum", "config.json");
+  const workspacePath = getWorkspaceConfigPath(repoPath);
   const rootConfig = await loadConfigFile(rootPath).catch(() => null);
   const workspaceConfig = await loadConfigFile(workspacePath).catch(() => null);
   return mergeConfigs(rootConfig, workspaceConfig);
@@ -164,9 +164,32 @@ export async function saveGlobalConfig(config: OrchestrumConfig): Promise<void> 
 }
 
 export async function saveWorkspaceConfig(repoPath: string, config: OrchestrumConfig): Promise<void> {
-  const configPath = path.join(repoPath, ".orchestrum", "config.json");
+  const configPath = getWorkspaceConfigPath(repoPath);
   await ensureDir(path.dirname(configPath));
   await writeJson(configPath, config);
+}
+
+export async function loadWorkspacePolicies(repoPath: string): Promise<OrchestrumConfig["policy"] | null> {
+  try {
+    const raw = await fs.readFile(getWorkspacePoliciesPath(repoPath), "utf8");
+    const parsed = PolicySchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) {
+      const message = parsed.error.issues.map((issue) => issue.message).join("; ");
+      throw new Error(`Invalid policy config: ${message}`);
+    }
+    return parsed.data;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function saveWorkspacePolicies(repoPath: string, policy: OrchestrumConfig["policy"]): Promise<void> {
+  const filePath = getWorkspacePoliciesPath(repoPath);
+  await ensureDir(path.dirname(filePath));
+  await writeJson(filePath, policy ?? {});
 }
 
 export function resolveConcurrency(config?: OrchestrumConfig | null): number | undefined {
@@ -176,7 +199,7 @@ export function resolveConcurrency(config?: OrchestrumConfig | null): number | u
 }
 
 export function getGlobalConfigPath(): string {
-  return path.join(getAppHome(), "config.json");
+  return path.join(getOperatorControlDir(process.cwd()), "config.json");
 }
 
 async function loadConfigFile(filePath: string): Promise<OrchestrumConfig | null> {

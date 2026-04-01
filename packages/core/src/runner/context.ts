@@ -1,6 +1,7 @@
 ﻿import fs from "node:fs/promises";
 import path from "node:path";
 import { MAX_FILE_CHARS, MAX_LIST_ENTRIES } from "../constants.js";
+import { getWorkspaceControlDir } from "./control.js";
 
 export type RepoContextOptions = {
   repoPath: string;
@@ -105,7 +106,7 @@ export async function buildRepoContext(options: RepoContextOptions): Promise<str
 
 async function loadKnowledgeSummary(repoPath: string): Promise<string | null> {
   try {
-    const raw = await fs.readFile(path.join(repoPath, ".memory", "knowledge.json"), "utf8");
+    const raw = await fs.readFile(path.join(getWorkspaceControlDir(repoPath), "knowledge.json"), "utf8");
     const parsed = JSON.parse(raw) as { nodes?: Array<{ id: string; type: string }>; edges?: Array<{ from: string; to: string; type: string; weight: number }> };
     if (!parsed?.edges || parsed.edges.length === 0) return null;
     const topEdges = [...parsed.edges]

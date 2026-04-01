@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { RunAnalysis } from "../analytics/runAnalysis.js";
 import { writeJson } from "../runner/fs.js";
+import { getWorkspaceControlDir } from "../runner/control.js";
 
 export type StrategyConfig = {
   mode: string;
@@ -79,7 +80,7 @@ export function resolveStrategyProfile(mode: string): StrategyProfile {
 }
 
 export async function loadStrategyState(workspacePath: string): Promise<StrategyState> {
-  const filePath = path.join(workspacePath, ".memory", "strategy_state.json");
+  const filePath = path.join(getWorkspaceControlDir(workspacePath), "strategy_state.json");
   try {
     const raw = await fs.readFile(filePath, "utf8");
     return JSON.parse(raw) as StrategyState;
@@ -92,9 +93,9 @@ export async function loadStrategyState(workspacePath: string): Promise<Strategy
 }
 
 export async function saveStrategyState(workspacePath: string, state: StrategyState): Promise<void> {
-  const memoryDir = path.join(workspacePath, ".memory");
-  await fs.mkdir(memoryDir, { recursive: true });
-  await writeJson(path.join(memoryDir, "strategy_state.json"), state);
+  const controlDir = getWorkspaceControlDir(workspacePath);
+  await fs.mkdir(controlDir, { recursive: true });
+  await writeJson(path.join(controlDir, "strategy_state.json"), state);
 }
 
 export function suggestStrategyMode(analysis: RunAnalysis, availableModes: string[], currentMode: string): string {

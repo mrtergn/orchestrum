@@ -3,6 +3,7 @@ import type express from "express";
 import {
   applySecretsToEnv,
   runBrowserRunDetailed,
+  type BrowserRunOptions,
   type StateIndex
 } from "@orchestrum/core";
 
@@ -166,25 +167,23 @@ function normalizeRunStartOptions(raw: unknown): {
   };
 }
 
-function normalizeBrowserRunOptions(raw: unknown): {
-  baseUrl?: string;
-  targetPath?: string;
-  iterations?: number;
-  intervalMs?: number;
-  passphrase?: string;
-} {
+function normalizeBrowserRunOptions(raw: unknown): BrowserRunOptions {
   const parsed = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const baseUrl = typeof parsed.baseUrl === "string" && parsed.baseUrl.trim() ? parsed.baseUrl.trim() : undefined;
   const targetPath = typeof parsed.targetPath === "string" && parsed.targetPath.trim() ? parsed.targetPath.trim() : undefined;
   const iterationsRaw = typeof parsed.iterations === "number" ? parsed.iterations : Number(parsed.iterations ?? NaN);
   const intervalRaw = typeof parsed.intervalMs === "number" ? parsed.intervalMs : Number(parsed.intervalMs ?? NaN);
   const passphrase = typeof parsed.passphrase === "string" && parsed.passphrase.trim() ? parsed.passphrase : undefined;
+  const scenario = Array.isArray(parsed.scenario)
+    ? parsed.scenario.filter((step): step is NonNullable<BrowserRunOptions["scenario"]>[number] => Boolean(step) && typeof step === "object" && typeof (step as { action?: unknown }).action === "string")
+    : undefined;
   return {
     baseUrl,
     targetPath,
     iterations: Number.isFinite(iterationsRaw) && iterationsRaw > 0 ? Math.floor(iterationsRaw) : undefined,
     intervalMs: Number.isFinite(intervalRaw) && intervalRaw > 0 ? Math.floor(intervalRaw) : undefined,
-    passphrase
+    passphrase,
+    scenario
   };
 }
 

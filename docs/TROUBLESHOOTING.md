@@ -9,10 +9,9 @@ Symptoms:
 Checks:
 1. Verify the service process is running.
 2. Confirm `ORCHESTRUM_SERVICE_PORT`.
-3. Check port conflicts.
+3. Check the printed service/UI URLs from `orchestrum ui`.
 
 ```bash
-lsof -i :4137
 npx orchestrum doctor
 ```
 
@@ -24,7 +23,7 @@ Symptoms:
 
 Checks:
 1. Verify `ORCHESTRUM_SERVICE_URL` or `NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL`.
-2. Confirm local proxy or API route configuration.
+2. Confirm the UI is pointing at the dynamically allocated service port printed at startup.
 3. Ensure CORS is enabled for your setup.
 
 ## Mission Cannot Start
@@ -37,6 +36,7 @@ Checks:
 1. Confirm the workspace exists.
 2. Set provider secrets such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
 3. Verify the mission template id is one of the built-in templates.
+4. If you use CLI providers, confirm the local CLI is installed and already authenticated.
 
 ## Delivery Import Does Not Match a Packet
 
@@ -65,9 +65,9 @@ Symptoms:
 - `Patch apply failed`
 
 Checks:
-1. Ensure the repository has no conflicting local edits.
+1. Ensure the repository has no overlapping local edits in the files the patch touches.
 2. Re-run with a narrower goal.
-3. Re-open the run detail page and inspect artifacts before retrying.
+3. Re-open the run detail page and inspect `apply.patch`, `git-status.txt`, `conflicts.json`, and `conflict-summary.md` before retrying.
 
 ## SSE or Event Stream Issues
 
@@ -78,13 +78,3 @@ Checks:
 1. Verify `/events` is reachable.
 2. Confirm no proxy strips `text/event-stream`.
 3. Inspect the browser network tab for disconnects.
-
-## Cluster Timeout
-
-Symptoms:
-- task timeout errors from cluster execution
-
-Checks:
-1. Confirm worker processes are alive.
-2. Inspect queue and results directories.
-3. Increase timeout if the workload is large.
