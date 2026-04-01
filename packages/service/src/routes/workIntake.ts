@@ -64,6 +64,7 @@ import {
   type WorkItemStatus,
   type WorkItemTeamRuntime,
   type WorkItemWorkstream,
+  type WorkItemWorkstreamRuntime,
   type WorkItemWorkstreamStatus,
   type WorkWorkspaceOptimizationSummary,
   type WorkPlanTask
@@ -122,7 +123,13 @@ type WorkAgentPlatform = {
     workspaceId: string;
     workItem: WorkItemRecord;
     detail: Awaited<ReturnType<typeof buildWorkItemPlanningDetail>>;
-  }): Promise<{ taskIds: string[] }>;
+    cycleId: string;
+    cycleSequence: number;
+    cycleKind: "initial" | "remediation";
+  }): Promise<{
+    taskIds: string[];
+    detail: Awaited<ReturnType<typeof buildWorkItemPlanningDetail>>;
+  }>;
 };
 
 type IndexedRunLike = {
@@ -136,20 +143,34 @@ type IndexedTaskLike = {
   id: string;
   workspaceId?: string;
   linkedWorkItemId?: string;
+  title?: string;
   status: string;
   type?: string;
   plannerTaskId?: string;
   assignedToAgentId?: string;
+  cycleId?: string | null;
   laneId?: string;
   laneLabel?: string;
   workstreamId?: string | null;
   workstreamType?: string | null;
+  gateRefs?: string[];
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  ownerRole?: string | null;
   qaMode?: "smoke" | "scenario" | null;
   linkedRunId?: string;
   verdict?: string | null;
   resultSummary?: string;
   waitingOnTaskIds?: string[];
   blockedByTaskIds?: string[];
+};
+
+type IndexedDeliverySessionLike = {
+  workspaceId: string;
+  runId: string;
+  openFindings: number;
+  remediationsOpen: number;
+  unresolvedManualPackets: number;
 };
 
 type RawWorkItemLookup = {
@@ -846,13 +867,25 @@ export function registerWorkIntakeRoutes(
         workItemId: found.workItem.id
       })
     );
+    const deliverySessions = await options.stateIndex.queryDeliverySessions(found.workItem.workspaceId).catch(() => []);
     const review = buildWorkItemReviewSummary({
       workItem: found.workItem,
       detail,
       relatedTasks,
-      runByKey
+      runByKey,
+      deliverySessions
     });
     const currentPlan = resolveCurrentCyclePlan(found.workItem, detail);
+    const workstreamRuntime = buildWorkstreamRuntime(currentPlan, relatedTasks).map((entry) => entry.workstream);
+    const gateRuntime = buildGateRuntime(
+      currentPlan,
+      relatedTasks,
+      resolveBlockingDeliveryFindingIds({
+        workItem: found.workItem,
+        relatedTasks,
+        deliverySessions
+      })
+    );
     const teamRuntime = buildWorkItemTeamRuntime({
       workItem: found.workItem,
       detail,
@@ -865,7 +898,9 @@ export function registerWorkIntakeRoutes(
       currentPlan,
       review,
       optimization: found.workItem.optimization ?? null,
-      teamRuntime
+      teamRuntime,
+      workstreamRuntime,
+      gateRuntime
     });
   };
 
@@ -2690,25 +2725,22 @@ async function startRawWorkItemExecution(options: {
       ? strategyState.recommendedMode.trim()
       : undefined);
   const nextCycleSequence = Math.max(1, (options.found.workItem.cycles?.length ?? 0) + 1);
-  const cyclePlan = createWorkItemCyclePlan({
-    detail: executionDetail,
-    source: options.found.workItem.reviewStatus === "changes_requested" ? "remediation" : "baseline",
-    sourceCycleId: options.found.workItem.reviewStatus === "changes_requested" ? options.found.workItem.currentCycleId ?? null : null,
-    sourceRemediationPlanId: options.found.workItem.remediationPlan?.id ?? null,
-    headline:
-      options.found.workItem.reviewStatus === "changes_requested"
-        ? `Cycle ${nextCycleSequence} remediation`
-        : `Cycle ${nextCycleSequence} execution`
-  });
+  const nextCycleId = crypto.randomUUID();
+  const cycleKind = options.found.workItem.reviewStatus === "changes_requested" ? "remediation" : "initial";
 
   const runId = createWorkRunId(options.found.workItem.id);
+  let resolvedExecutionDetail = executionDetail;
   let result: { ok: boolean; runId?: string; taskIds?: string[]; executionMode: WorkItemExecutionMode };
   if (shouldUseTaskGraphExecution(options.found.workItem, executionDetail)) {
     const queued = await options.agentPlatform.queueWorkItemExecution({
       workspaceId: options.found.workItem.workspaceId,
       workItem: options.found.workItem,
-      detail: executionDetail
+      detail: executionDetail,
+      cycleId: nextCycleId,
+      cycleSequence: nextCycleSequence,
+      cycleKind
     });
+    resolvedExecutionDetail = queued.detail;
     result = {
       ok: true,
       taskIds: queued.taskIds,
@@ -2734,16 +2766,28 @@ async function startRawWorkItemExecution(options: {
       executionMode: "mission"
     };
   }
+  const cyclePlan = createWorkItemCyclePlan({
+    detail: resolvedExecutionDetail,
+    source: options.found.workItem.reviewStatus === "changes_requested" ? "remediation" : "baseline",
+    sourceCycleId: options.found.workItem.reviewStatus === "changes_requested" ? options.found.workItem.currentCycleId ?? null : null,
+    sourceRemediationPlanId: options.found.workItem.remediationPlan?.id ?? null,
+    headline:
+      options.found.workItem.reviewStatus === "changes_requested"
+        ? `Cycle ${nextCycleSequence} remediation`
+        : `Cycle ${nextCycleSequence} execution`,
+    cycleId: nextCycleId
+  });
 
   const now = new Date().toISOString();
   const preparedWorkItem = closeCurrentCycle(options.found.workItem, hydrated.status, now);
   const nextCycle = createWorkItemCycle({
+    id: nextCycleId,
     workItem: options.found.workItem,
     startedAt: now,
     executionMode: result.executionMode,
     linkedRunId: result.executionMode === "mission" ? result.runId ?? null : null,
     linkedTaskIds: result.executionMode === "task_graph" ? result.taskIds ?? [] : [],
-    summary: executionDetail.summary,
+    summary: resolvedExecutionDetail.summary,
     plan: cyclePlan
   });
   const updatedWorkItem: WorkItemRecord = {
@@ -3265,11 +3309,15 @@ function normalizePlanningTask(value: unknown): WorkPlanTask | null {
     sourceLine: typeof raw.sourceLine === "number" ? raw.sourceLine : null,
     workstreamId: typeof raw.workstreamId === "string" && raw.workstreamId.trim() ? raw.workstreamId.trim() : null,
     workstreamType: normalizeWorkstreamType(raw.workstreamType),
-    gateIds: normalizeStringArray(raw.gateIds),
+    gateRefs: normalizeStringArray(raw.gateRefs),
     qaMode:
       typeof raw.qaMode === "string" && (raw.qaMode === "smoke" || raw.qaMode === "scenario")
         ? raw.qaMode
-        : null
+        : null,
+    cycleId: typeof raw.cycleId === "string" && raw.cycleId.trim() ? raw.cycleId.trim() : null,
+    ownerAgentId: typeof raw.ownerAgentId === "string" && raw.ownerAgentId.trim() ? raw.ownerAgentId.trim() : null,
+    ownerAgentName: typeof raw.ownerAgentName === "string" && raw.ownerAgentName.trim() ? raw.ownerAgentName.trim() : null,
+    ownerRole: typeof raw.ownerRole === "string" && raw.ownerRole.trim() ? raw.ownerRole.trim() : null
   };
 }
 
@@ -3416,9 +3464,11 @@ function normalizeWorkstreams(value: unknown): Array<{
   laneLabel: string;
   taskIds: string[];
   dependsOn: string[];
-  gateIds: string[];
-  preferredAgentId?: string | null;
-  preferredAgentName?: string | null;
+  gateRefs: string[];
+  cycleId?: string | null;
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  ownerRole?: string | null;
 }> {
   if (!Array.isArray(value)) return [];
   return value
@@ -3439,14 +3489,19 @@ function normalizeWorkstreams(value: unknown): Array<{
         laneLabel,
         taskIds: normalizeStringArray(raw.taskIds),
         dependsOn: normalizeStringArray(raw.dependsOn),
-        gateIds: normalizeStringArray(raw.gateIds),
-        preferredAgentId:
-          typeof raw.preferredAgentId === "string" && raw.preferredAgentId.trim()
-            ? raw.preferredAgentId.trim()
+        gateRefs: normalizeStringArray(raw.gateRefs),
+        cycleId: typeof raw.cycleId === "string" && raw.cycleId.trim() ? raw.cycleId.trim() : null,
+        ownerAgentId:
+          typeof raw.ownerAgentId === "string" && raw.ownerAgentId.trim()
+            ? raw.ownerAgentId.trim()
             : null,
-        preferredAgentName:
-          typeof raw.preferredAgentName === "string" && raw.preferredAgentName.trim()
-            ? raw.preferredAgentName.trim()
+        ownerAgentName:
+          typeof raw.ownerAgentName === "string" && raw.ownerAgentName.trim()
+            ? raw.ownerAgentName.trim()
+            : null,
+        ownerRole:
+          typeof raw.ownerRole === "string" && raw.ownerRole.trim()
+            ? raw.ownerRole.trim()
             : null
       };
     })
@@ -3661,6 +3716,7 @@ function normalizeVerdict(value: unknown): RunVerdict | null {
 }
 
 function createWorkItemCycle(options: {
+  id?: string;
   workItem: WorkItemRecord;
   startedAt: string;
   executionMode: WorkItemExecutionMode;
@@ -3671,7 +3727,7 @@ function createWorkItemCycle(options: {
 }): WorkItemCycleRecord {
   const previousCycles = options.workItem.cycles ?? [];
   return {
-    id: crypto.randomUUID(),
+    id: options.id ?? crypto.randomUUID(),
     sequence: previousCycles.length + 1,
     kind: options.workItem.reviewStatus === "changes_requested" ? "remediation" : "initial",
     status: "running",
@@ -3834,7 +3890,7 @@ function buildWorkstreamRuntime(
   plan: WorkItemCyclePlan | null,
   relatedTasks: IndexedTaskLike[]
 ): Array<{
-  workstream: WorkItemWorkstream;
+  workstream: WorkItemWorkstreamRuntime;
   status: WorkItemWorkstreamStatus;
   tasks: IndexedTaskLike[];
 }> {
@@ -3883,15 +3939,71 @@ function buildWorkstreamRuntime(
     } else if ((taskIdsByWorkstream.get(workstream.id) ?? []).length > 0) {
       status = "planned";
     }
+    const activeTask =
+      tasks.find((task) => {
+        const normalized = task.status.trim().toLowerCase();
+        return normalized === "running" || normalized === "active";
+      }) ??
+      tasks.find((task) => task.status.trim().toLowerCase() === "queued") ??
+      null;
+    const summary =
+      status === "failed"
+        ? tasks.find((task) => {
+            const normalized = task.status.trim().toLowerCase();
+            return normalized === "failed" || normalized === "cancelled" || normalized === "canceled";
+          })?.resultSummary ?? `${workstream.title} failed.`
+        : status === "blocked"
+          ? tasks.find((task) => {
+              const normalized = task.status.trim().toLowerCase();
+              return normalized === "blocked" || normalized === "paused";
+            })?.resultSummary ?? `${workstream.title} is blocked.`
+          : status === "running"
+            ? activeTask?.title ?? `${workstream.title} is executing now.`
+            : status === "queued"
+              ? activeTask?.title ?? `${workstream.title} is queued behind upstream dependencies.`
+              : status === "succeeded"
+                ? tasks.slice().reverse().find((task) => task.resultSummary?.trim())?.resultSummary ?? `${workstream.title} completed successfully.`
+                : `${workstream.title} is planned but has not started yet.`;
     return {
-      workstream,
+      workstream: {
+        ...workstream,
+        cycleId: workstream.cycleId ?? plan.tasks[0]?.cycleId ?? null,
+        status,
+        activeTaskId: activeTask?.id ?? null,
+        activeTaskTitle: activeTask?.title ?? null,
+        summary
+      },
       status,
       tasks
     };
   });
 }
 
-function buildGateRuntime(plan: WorkItemCyclePlan | null, relatedTasks: IndexedTaskLike[]): WorkItemGateRuntime[] {
+function resolveBlockingDeliveryFindingIds(options: {
+  workItem: WorkItemRecord;
+  relatedTasks: IndexedTaskLike[];
+  deliverySessions: IndexedDeliverySessionLike[];
+}): string[] {
+  const runIds = new Set(
+    [
+      options.workItem.linkedRunId,
+      ...options.relatedTasks.map((task) => task.linkedRunId ?? null)
+    ].filter((value): value is string => Boolean(value))
+  );
+  if (runIds.size === 0) return [];
+  return options.deliverySessions
+    .filter((session) =>
+      runIds.has(session.runId) &&
+      (session.openFindings > 0 || session.remediationsOpen > 0 || session.unresolvedManualPackets > 0)
+    )
+    .map((session) => `delivery:${session.runId}:open-${session.openFindings}:remediations-${session.remediationsOpen}:manual-${session.unresolvedManualPackets}`);
+}
+
+function buildGateRuntime(
+  plan: WorkItemCyclePlan | null,
+  relatedTasks: IndexedTaskLike[],
+  blockingDeliveryFindingIds: string[] = []
+): WorkItemGateRuntime[] {
   if (!plan) return [];
   const workstreamRuntime = buildWorkstreamRuntime(plan, relatedTasks);
   const runtimeByWorkstream = new Map(workstreamRuntime.map((entry) => [entry.workstream.id, entry]));
@@ -3910,11 +4022,19 @@ function buildGateRuntime(plan: WorkItemCyclePlan | null, relatedTasks: IndexedT
     } else if (streams.every((entry) => entry.status === "succeeded")) {
       status = "passed";
     }
+    if (gate.type === "audit" && blockingDeliveryFindingIds.length > 0) {
+      status = "blocked";
+    }
     return {
       ...gate,
+      cycleId: streams[0]?.workstream.cycleId ?? null,
       status,
+      evidenceTaskIds: gateTasks.map((task) => task.id),
+      blockingFindingIds: gate.type === "audit" ? [...blockingDeliveryFindingIds] : [],
       summary:
-        status === "passed"
+        gate.type === "audit" && blockingDeliveryFindingIds.length > 0
+          ? `${gate.label} is blocked by unresolved delivery findings for this cycle.`
+          : status === "passed"
           ? `${gate.label} passed.`
           : status === "failed"
             ? `${gate.label} failed.`
@@ -3965,8 +4085,8 @@ function buildWorkItemTeamRuntime(options: {
       workstreamIds: workstreams.map((entry) => entry.workstream.id),
       activeWorkstreamId: active?.workstream.id ?? null,
       status,
-      ownerAgentId: active?.workstream.preferredAgentId ?? preferredMatch?.id ?? null,
-      ownerAgentName: active?.workstream.preferredAgentName ?? preferredMatch?.name ?? null,
+      ownerAgentId: active?.workstream.ownerAgentId ?? preferredMatch?.id ?? null,
+      ownerAgentName: active?.workstream.ownerAgentName ?? preferredMatch?.name ?? null,
       summary:
         status === "running"
           ? `${active?.workstream.title ?? "Workstream"} is executing now.`
@@ -4029,9 +4149,15 @@ function buildWorkItemReviewSummary(options: {
   detail: Awaited<ReturnType<typeof buildWorkItemPlanningDetail>>;
   relatedTasks: IndexedTaskLike[];
   runByKey: Map<string, IndexedRunLike>;
+  deliverySessions?: IndexedDeliverySessionLike[];
 }): WorkItemReviewSummary {
   const currentPlan = resolveCurrentCyclePlan(options.workItem, options.detail);
-  const gateRuntime = buildGateRuntime(currentPlan, options.relatedTasks);
+  const blockingDeliveryFindingIds = resolveBlockingDeliveryFindingIds({
+    workItem: options.workItem,
+    relatedTasks: options.relatedTasks,
+    deliverySessions: options.deliverySessions ?? []
+  });
+  const gateRuntime = buildGateRuntime(currentPlan, options.relatedTasks, blockingDeliveryFindingIds);
   const runtimeByGateType = new Map(gateRuntime.map((gate) => [gate.type, gate]));
   const totals = {
     total: options.relatedTasks.length,
@@ -4069,6 +4195,13 @@ function buildWorkItemReviewSummary(options: {
     signals.push(buildGateSignal("Browser Scenario", runtimeByGateType.get("qa_scenario") ?? null));
   }
   signals.push(buildGateSignal("Audit", runtimeByGateType.get("audit") ?? null));
+  if (blockingDeliveryFindingIds.length > 0) {
+    signals.push({
+      label: "Delivery findings",
+      status: "blocked",
+      summary: `${blockingDeliveryFindingIds.length} unresolved delivery finding group(s) still block this cycle.`
+    });
+  }
 
   const openRisks: string[] = [];
   if (options.detail.sourceSnapshot.warnings.length > 0) {
@@ -4092,15 +4225,20 @@ function buildWorkItemReviewSummary(options: {
   if ((runtimeByGateType.get("audit")?.required ?? true) && runtimeByGateType.get("audit")?.status !== "passed") {
     openRisks.push("No successful audit/review signal is recorded yet.");
   }
+  if (blockingDeliveryFindingIds.length > 0) {
+    openRisks.push("Unresolved delivery findings still block this cycle.");
+  }
 
   const requiredGates = gateRuntime.filter((gate) => gate.required);
   const isGateReady =
     options.workItem.executionMode === "mission"
-      ? options.workItem.status === "ready_for_review" || options.workItem.status === "completed"
+      ? (options.workItem.status === "ready_for_review" || options.workItem.status === "completed") &&
+        blockingDeliveryFindingIds.length === 0
       : requiredGates.length > 0 &&
         requiredGates.every((gate) => gate.status === "passed" || gate.status === "skipped") &&
         totals.failed === 0 &&
         totals.blocked === 0 &&
+        blockingDeliveryFindingIds.length === 0 &&
         options.relatedTasks.length > 0 &&
         totals.succeeded === options.relatedTasks.length;
   const gate =

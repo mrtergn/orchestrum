@@ -120,7 +120,6 @@ export type {
   PromptVersion,
   PromptSuggestion
 } from "./evolution/promptEvolution.js";
-export { loadOpportunities, generateOpportunities } from "./evolution/backlog.js";
 export {
   loadStrategy,
   resolveStrategyProfile,
@@ -309,6 +308,7 @@ export type {
   WorkPlanLaneMatch,
   WorkPlanLaneAssignment,
   WorkItemWorkstream,
+  WorkItemWorkstreamRuntime,
   WorkItemGate,
   WorkItemGateRuntime,
   WorkItemCyclePlan,

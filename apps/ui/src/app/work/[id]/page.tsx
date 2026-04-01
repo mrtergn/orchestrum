@@ -6,11 +6,13 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   WorkItemDetailResponse,
   WorkItemCyclePlan,
+  WorkItemGateRuntime,
   WorkItemOptimizationSummary,
   WorkItemPlanningDetail,
   WorkItemRecord,
   WorkItemReviewSummary,
   WorkItemTeamRuntime,
+  WorkItemWorkstreamRuntime,
   WorkPlanTask
 } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
@@ -211,6 +213,8 @@ type DetailState = {
   review: WorkItemReviewSummary;
   optimization: WorkItemOptimizationSummary | null;
   teamRuntime: WorkItemTeamRuntime | null;
+  workstreamRuntime: WorkItemWorkstreamRuntime[];
+  gateRuntime: WorkItemGateRuntime[];
 };
 
 type RelatedTask = {
@@ -219,8 +223,15 @@ type RelatedTask = {
   type: string;
   status: string;
   assignedToAgentId: string;
+  cycleId?: string | null;
   laneId?: string;
   laneLabel?: string;
+  workstreamId?: string | null;
+  workstreamType?: string | null;
+  gateRefs?: string[];
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  ownerRole?: string | null;
   dependsOnTaskIds?: string[];
   waitingOnTaskIds?: string[];
   blockedByTaskIds?: string[];
@@ -278,7 +289,9 @@ export default function WorkItemDetailPage() {
             currentPlan: payload.currentPlan ?? null,
             review: payload.review,
             optimization: payload.optimization ?? null,
-            teamRuntime: payload.teamRuntime ?? null
+            teamRuntime: payload.teamRuntime ?? null,
+            workstreamRuntime: Array.isArray(payload.workstreamRuntime) ? payload.workstreamRuntime : [],
+            gateRuntime: Array.isArray(payload.gateRuntime) ? payload.gateRuntime : []
           });
           setRelatedTasks(Array.isArray(tasksPayload.tasks) ? tasksPayload.tasks as RelatedTask[] : []);
           const loadedAgents = Array.isArray(agentsPayload.agents) ? agentsPayload.agents as RuntimeAgentRecord[] : [];
@@ -340,9 +353,30 @@ export default function WorkItemDetailPage() {
     return map;
   }, [state?.currentPlan?.lanes, state?.currentPlan?.tasks]);
 
+  const cycleScopedTasks = useMemo(() => {
+    if (!state) return relatedTasks;
+    const activeTaskIds = new Set(state.workItem.linkedTaskIds ?? []);
+    if (state.workItem.currentCycleId) {
+      const scoped = relatedTasks.filter((task) => task.cycleId === state.workItem.currentCycleId || activeTaskIds.has(task.id));
+      if (scoped.length > 0) return scoped;
+    }
+    if (activeTaskIds.size > 0) {
+      const scoped = relatedTasks.filter((task) => activeTaskIds.has(task.id));
+      if (scoped.length > 0) return scoped;
+    }
+    return relatedTasks;
+  }, [relatedTasks, state]);
   const sortedRelatedTasks = useMemo(
-    () => relatedTasks.slice().sort((left, right) => left.title.localeCompare(right.title)),
-    [relatedTasks]
+    () => cycleScopedTasks.slice().sort((left, right) => left.title.localeCompare(right.title)),
+    [cycleScopedTasks]
+  );
+  const workstreamRuntimeById = useMemo(
+    () => new Map((state?.workstreamRuntime ?? []).map((entry) => [entry.id, entry])),
+    [state?.workstreamRuntime]
+  );
+  const gateRuntimeById = useMemo(
+    () => new Map((state?.gateRuntime ?? []).map((entry) => [entry.id, entry])),
+    [state?.gateRuntime]
   );
 
   const submitReviewDecision = async (decision: "approve" | "send_back") => {
@@ -765,6 +799,10 @@ export default function WorkItemDetailPage() {
                     <div className="mt-3 space-y-2">
                       {currentPlan.workstreams.map((workstream) => (
                         <div key={workstream.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                          {(() => {
+                            const runtime = workstreamRuntimeById.get(workstream.id) ?? null;
+                            return (
+                              <>
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div>
                               <div className="text-sm font-medium text-white">{workstream.title}</div>
@@ -772,11 +810,18 @@ export default function WorkItemDetailPage() {
                                 {workstream.laneLabel} · {workstream.type.replace(/_/g, " ")}
                               </div>
                             </div>
-                            {workstream.preferredAgentName && (
-                              <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
-                                {workstream.preferredAgentName}
-                              </span>
-                            )}
+                            <div className="flex flex-wrap items-center gap-2">
+                              {runtime && (
+                                <span className={`rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.16em] ${laneRuntimeClassName(runtime.status)}`}>
+                                  {laneRuntimeLabel(runtime.status)}
+                                </span>
+                              )}
+                              {(runtime?.ownerAgentName ?? workstream.ownerAgentName) && (
+                                <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                                  {runtime?.ownerAgentName ?? workstream.ownerAgentName}
+                                </span>
+                              )}
+                            </div>
                           </div>
                           {workstream.description && (
                             <div className="mt-2 text-xs leading-5 text-slate-400">{workstream.description}</div>
@@ -784,7 +829,16 @@ export default function WorkItemDetailPage() {
                           <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
                             <span>{workstream.taskIds.length} tasks</span>
                             {workstream.dependsOn.length > 0 && <span>Depends on {workstream.dependsOn.join(", ")}</span>}
+                            {workstream.gateRefs.length > 0 && <span>Gates {workstream.gateRefs.join(", ")}</span>}
                           </div>
+                          {runtime?.summary && (
+                            <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-300">
+                              {runtime.summary}
+                            </div>
+                          )}
+                              </>
+                            );
+                          })()}
                         </div>
                       ))}
                     </div>
@@ -793,12 +847,7 @@ export default function WorkItemDetailPage() {
                     <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Cycle gates</div>
                     <div className="mt-3 space-y-2">
                       {currentPlan.gates.length > 0 ? currentPlan.gates.map((gate) => {
-                        const reviewSignal = review.signals.find((signal) => {
-                          if (gate.type === "validation") return signal.label === "Validation";
-                          if (gate.type === "qa_scenario") return signal.label === "Browser Scenario";
-                          if (gate.type === "audit") return signal.label === "Audit";
-                          return false;
-                        });
+                        const runtime = gateRuntimeById.get(gate.id) ?? null;
                         return (
                           <div key={gate.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
                             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -808,22 +857,20 @@ export default function WorkItemDetailPage() {
                                   {gate.type.replace(/_/g, " ")} · {gate.required ? "required" : "optional"}
                                 </div>
                               </div>
-                              <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${gateStatusClassName(
-                                reviewSignal?.status === "passed"
-                                  ? "passed"
-                                  : reviewSignal?.status === "failed"
-                                    ? "failed"
-                                    : reviewSignal?.status === "blocked"
-                                      ? "blocked"
-                                      : reviewSignal?.status === "pending"
-                                        ? "pending"
-                                        : "missing"
-                              )}`}>
-                                {reviewSignal?.status ?? "missing"}
+                              <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${gateStatusClassName(runtime?.status ?? "missing")}`}>
+                                {runtime?.status ?? "missing"}
                               </span>
                             </div>
                             <div className="mt-2 text-xs leading-5 text-slate-400">
-                              {reviewSignal?.summary ?? "No gate evidence has been recorded yet."}
+                              {runtime?.summary ?? "No gate evidence has been recorded yet."}
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
+                              {runtime?.evidenceTaskIds && runtime.evidenceTaskIds.length > 0 && (
+                                <span>Evidence {runtime.evidenceTaskIds.join(", ")}</span>
+                              )}
+                              {runtime?.blockingFindingIds && runtime.blockingFindingIds.length > 0 && (
+                                <span>Blocking delivery findings {runtime.blockingFindingIds.length}</span>
+                              )}
                             </div>
                           </div>
                         );
@@ -901,7 +948,7 @@ export default function WorkItemDetailPage() {
             <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Agile Team Runtime</div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Supervised Team Runtime</div>
                   <div className="mt-2 text-lg font-medium text-white">{teamRuntime.headline}</div>
                   <div className="mt-2 text-sm leading-6 text-slate-400">{teamRuntime.currentStage}</div>
                 </div>
@@ -960,7 +1007,7 @@ export default function WorkItemDetailPage() {
           <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Final Review</div>
+                <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Operator Readiness Signal</div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${reviewGateClassName(review.gate)}`}>
                     {reviewGateLabel(review.gate)}
@@ -1131,8 +1178,8 @@ export default function WorkItemDetailPage() {
             <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Optimization</div>
-                  <div className="mt-2 text-lg font-medium text-white">Execution-backed prompt, strategy, and follow-up suggestions</div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Review Optimization</div>
+                  <div className="mt-2 text-lg font-medium text-white">Cycle-derived prompt, strategy, and follow-up suggestions</div>
                   <div className="mt-2 text-sm leading-6 text-slate-400">
                     Generated only from completed cycle evidence, review signals, and browser / validation outcomes.
                   </div>

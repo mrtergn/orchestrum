@@ -22,7 +22,6 @@ import { registerDeliveryRoutes } from "./routes/delivery.js";
 import { registerInsightsOpsRoutes } from "./routes/insightsOps.js";
 import { registerMetaOpsRoutes } from "./routes/metaOps.js";
 import { registerMissionRoutes } from "./routes/missions.js";
-import { registerPromptOpsRoutes } from "./routes/promptOps.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerSecretOpsRoutes } from "./routes/secretOps.js";
 import { registerSystemOpsRoutes } from "./routes/systemOps.js";
@@ -133,9 +132,7 @@ export async function startService(options: ServiceOptions = {}) {
     runsDir
   });
   registerInsightsOpsRoutes(app, {
-    runsDir,
     stateIndex,
-    agentPlatform,
     resolveWorkspacePath: resolveWorkspace
   });
   registerWorkspaceRegistryRoutes(app, {
@@ -168,9 +165,6 @@ export async function startService(options: ServiceOptions = {}) {
     agentPlatform,
     logger,
     useKeychain
-  });
-  registerPromptOpsRoutes(app, {
-    resolveWorkspacePath: resolveWorkspace
   });
   registerRunRoutes(app, {
     runsDir,

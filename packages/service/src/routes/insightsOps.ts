@@ -3,32 +3,13 @@ import {
   getLicenseStatus,
   isFeatureAllowed,
   loadAnalytics,
-  loadOpportunities,
   type StateIndex
 } from "@orchestrum/core";
-
-type InsightsAgentPlatform = {
-  startMission(options: {
-    runsDir: string;
-    workspaceId: string;
-    repoPath: string;
-    templateId: string;
-    goal: string;
-    runId?: string;
-    runOptions?: {
-      concurrency?: number;
-      modelOverrides?: Record<string, string>;
-      strategyMode?: string;
-    };
-  }): Promise<Record<string, unknown>>;
-};
 
 export function registerInsightsOpsRoutes(
   app: express.Express,
   options: {
-    runsDir: string;
     stateIndex: StateIndex;
-    agentPlatform: InsightsAgentPlatform;
     resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
   }
 ): void {
@@ -60,32 +41,5 @@ export function registerInsightsOpsRoutes(
       };
     }
     res.json({ analytics });
-  });
-
-  app.get("/opportunities", async (req, res) => {
-    const workspacePath = await options.resolveWorkspacePath(req.query.workspace as string | undefined);
-    if (!workspacePath) return res.json({ opportunities: [] });
-    const opportunities = await loadOpportunities(workspacePath);
-    res.json({ opportunities });
-  });
-
-  app.post("/opportunities/run", async (req, res) => {
-    const workspacePath = await options.resolveWorkspacePath(req.body?.workspaceId);
-    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
-    const workspaceId = String(req.body?.workspaceId ?? "");
-    const goal = req.body?.title ?? "Improve project";
-    try {
-      const result = await options.agentPlatform.startMission({
-        runsDir: options.runsDir,
-        workspaceId,
-        repoPath: workspacePath,
-        templateId: "feature-dev",
-        goal
-      });
-      void options.stateIndex.rebuild().catch(() => undefined);
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ ok: false, error: err?.message ?? "Mission start failed" });
-    }
   });
 }

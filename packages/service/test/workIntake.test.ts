@@ -122,6 +122,8 @@ test("task graph work items require the browser scenario gate before review", as
   const blockedDetail = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
   assert.equal(blockedDetail.response.status, 200);
   assert.equal(blockedDetail.body.teamRuntime?.lanes?.length > 0, true);
+  assert.equal(blockedDetail.body.workstreamRuntime?.length > 0, true);
+  assert.equal(blockedDetail.body.gateRuntime?.length > 0, true);
   assert.equal(blockedDetail.body.review?.gate, "not_ready");
   assert.equal(
     blockedDetail.body.review?.signals?.some((signal: { label: string; status: string }) => signal.label === "Browser Scenario" && signal.status === "pending"),
@@ -196,6 +198,58 @@ test("optimization opportunities can be converted into draft work items", async 
   assert.equal(convert.body.createdWorkItem?.brief.sourceRef?.startsWith("opportunity:"), true);
 });
 
+test("delivery findings block operator readiness until they are cleared", async () => {
+  assert.ok(fixture);
+
+  const created = await requestJson(fixture.baseUrl, "/api/work-items", {
+    method: "POST",
+    body: {
+      workspaceId: "demo",
+      sourceType: "feature",
+      title: "Ship a gated delivery",
+      request: "Run the feature and block review when delivery findings stay open."
+    }
+  });
+  const workItemId = String(created.body.workItem?.id ?? "");
+  assert.ok(workItemId);
+
+  const start = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/start`, {
+    method: "POST",
+    body: { workspaceId: "demo" }
+  });
+  const runId = String(start.body.workItem?.linkedRunId ?? "");
+  fixture.setWorkspaceRuns("demo", [{
+    workspaceId: "demo",
+    runId,
+    status: "completed",
+    verdict: "ready_for_review"
+  }]);
+  fixture.setDeliverySessions("demo", [{
+    workspaceId: "demo",
+    runId,
+    openFindings: 2,
+    remediationsOpen: 1,
+    unresolvedManualPackets: 0
+  }]);
+
+  const blocked = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
+  assert.equal(blocked.response.status, 200);
+  assert.equal(blocked.body.review?.gate, "not_ready");
+  assert.equal(
+    blocked.body.review?.signals?.some((signal: { label: string; status: string }) => signal.label === "Delivery findings" && signal.status === "blocked"),
+    true
+  );
+  assert.equal(
+    blocked.body.gateRuntime?.some((gate: { type: string; status: string }) => gate.type === "audit" && gate.status === "blocked"),
+    true
+  );
+
+  fixture.setDeliverySessions("demo", []);
+  const ready = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
+  assert.equal(ready.response.status, 200);
+  assert.equal(ready.body.review?.gate, "ready");
+});
+
 async function createFixture() {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-work-intake-"));
   const repoPath = path.join(rootDir, "repo");
@@ -206,6 +260,13 @@ async function createFixture() {
   await ensureWorkspaceManifest(repoPath, { id: "demo", name: "Demo" });
 
   const runsByWorkspace = new Map<string, Array<{ workspaceId: string; runId: string; status: string; verdict: string | null }>>();
+  const deliverySessionsByWorkspace = new Map<string, Array<{
+    workspaceId: string;
+    runId: string;
+    openFindings: number;
+    remediationsOpen: number;
+    unresolvedManualPackets: number;
+  }>>();
   const queuedTasks: Array<Record<string, unknown>> = [];
   const agentPlatform = {
     async startMission(options: {
@@ -235,12 +296,34 @@ async function createFixture() {
       workspaceId: string;
       workItem: { id: string; brief: { title: string } };
       detail: WorkItemPlanningDetail;
+      cycleId: string;
+      cycleSequence: number;
+      cycleKind: "initial" | "remediation";
     }) {
+      const workstreams = options.detail.workstreams.map((workstream) => ({
+        ...workstream,
+        cycleId: options.cycleId,
+        ownerAgentId: `${workstream.laneId}-agent`,
+        ownerAgentName: `${workstream.laneLabel} Specialist`,
+        ownerRole: workstream.laneId
+      }));
+      const workstreamById = new Map(workstreams.map((workstream) => [workstream.id, workstream]));
+      const plannedTasks = options.detail.tasks.map((plannerTask) => {
+        const workstream = plannerTask.workstreamId ? workstreamById.get(plannerTask.workstreamId) ?? null : null;
+        return {
+          ...plannerTask,
+          cycleId: options.cycleId,
+          gateRefs: plannerTask.gateRefs ?? workstream?.gateRefs ?? [],
+          ownerAgentId: workstream?.ownerAgentId ?? `${plannerTask.laneId}-agent`,
+          ownerAgentName: workstream?.ownerAgentName ?? `${plannerTask.laneLabel} Specialist`,
+          ownerRole: workstream?.ownerRole ?? plannerTask.laneId
+        };
+      });
       const plannerTaskToTaskId = new Map<string, string>();
-      for (const plannerTask of options.detail.tasks) {
+      for (const plannerTask of plannedTasks) {
         plannerTaskToTaskId.set(plannerTask.id, `task-${plannerTask.id}`);
       }
-      const createdTasks = options.detail.tasks.map((plannerTask) => ({
+      const createdTasks = plannedTasks.map((plannerTask) => ({
         id: plannerTaskToTaskId.get(plannerTask.id)!,
         workspaceId: options.workspaceId,
         linkedWorkItemId: options.workItem.id,
@@ -258,9 +341,14 @@ async function createFixture() {
                   : "implement",
         status: "queued",
         assignedToAgentId: `${plannerTask.laneId}-agent`,
+        ownerAgentId: plannerTask.ownerAgentId,
+        ownerAgentName: plannerTask.ownerAgentName,
+        ownerRole: plannerTask.ownerRole,
         plannerTaskId: plannerTask.id,
+        cycleId: options.cycleId,
         workstreamId: plannerTask.workstreamId ?? null,
         workstreamType: plannerTask.workstreamType ?? null,
+        gateRefs: plannerTask.gateRefs ?? [],
         qaMode: plannerTask.qaMode ?? null,
         laneId: plannerTask.laneId,
         laneLabel: plannerTask.laneLabel,
@@ -275,16 +363,27 @@ async function createFixture() {
         }
       }
       queuedTasks.push(...createdTasks);
-      return { taskIds: createdTasks.map((task) => String(task.id)) };
+      return {
+        taskIds: createdTasks.map((task) => String(task.id)),
+        detail: {
+          ...options.detail,
+          tasks: plannedTasks,
+          workstreams
+        }
+      };
     }
   };
-  const stateIndex: Pick<StateIndex, "rebuild" | "queryRuns"> = {
+  const stateIndex: Pick<StateIndex, "rebuild" | "queryRuns" | "queryDeliverySessions"> = {
     async rebuild() {
       return { ok: true, rebuilt: true, path: path.join(repoPath, ".orchestrum", "control", "state-index.sqlite") };
     },
     async queryRuns(workspaceId?: string) {
       if (workspaceId) return runsByWorkspace.get(workspaceId) ?? [];
       return Array.from(runsByWorkspace.values()).flat();
+    },
+    async queryDeliverySessions(workspaceId?: string) {
+      if (workspaceId) return deliverySessionsByWorkspace.get(workspaceId) ?? [];
+      return Array.from(deliverySessionsByWorkspace.values()).flat();
     }
   };
 
@@ -316,6 +415,15 @@ async function createFixture() {
     baseUrl: `http://127.0.0.1:${address.port}`,
     setWorkspaceRuns(workspaceId: string, runs: Array<{ workspaceId: string; runId: string; status: string; verdict: string | null }>) {
       runsByWorkspace.set(workspaceId, runs);
+    },
+    setDeliverySessions(workspaceId: string, sessions: Array<{
+      workspaceId: string;
+      runId: string;
+      openFindings: number;
+      remediationsOpen: number;
+      unresolvedManualPackets: number;
+    }>) {
+      deliverySessionsByWorkspace.set(workspaceId, sessions);
     },
     updateQueuedTaskStatuses(workItemId: string, resolveStatus: (task: Record<string, unknown>) => string) {
       for (const task of queuedTasks) {

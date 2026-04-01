@@ -52,7 +52,7 @@ function stateColor(state: string) {
 }
 
 export default function MissionPage() {
-  const { selectedWorkspaceId, openRunConfig } = useAppUi();
+  const { selectedWorkspaceId } = useAppUi();
   const [snapshot, setSnapshot] = useState<Snapshot>({ agents: [], org: [], missions: [], tasks: [], messages: [], queue: { queued: 0, running: 0 } });
   const [events, setEvents] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
@@ -161,15 +161,21 @@ export default function MissionPage() {
       <section className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">Execution Feed</h2>
-          <p className="text-sm text-slate-400">Real-time view of agents, tasks, and system events.</p>
+          <p className="text-sm text-slate-400">Canonical runtime signals for work items, missions, specialists, and review actions.</p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => openRunConfig({ workspaceId: selectedWorkspaceId || undefined, runKind: "mission" })}
+          <Link
+            href={selectedWorkspaceId ? `/work?workspace=${encodeURIComponent(selectedWorkspaceId)}` : "/work"}
             className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-cyan-200"
           >
-            Launch Mission
-          </button>
+            Open Work
+          </Link>
+          <Link
+            href={selectedWorkspaceId ? `/runs?workspace=${encodeURIComponent(selectedWorkspaceId)}` : "/runs"}
+            className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-slate-200"
+          >
+            Open Runs
+          </Link>
           <div className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-400"}`} />
           <span className={`text-[10px] uppercase tracking-[0.2em] ${connected ? "text-emerald-300" : "text-rose-300"}`}>
             {connected ? "Connected" : "Disconnected"}
@@ -181,14 +187,14 @@ export default function MissionPage() {
       {!hasData && (
         <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-500/20 to-cyan-500/5 text-2xl text-cyan-400">◎</div>
-          <h3 className="mt-3 text-base font-semibold text-white">Nothing running yet</h3>
-          <p className="mt-1 text-sm text-slate-400">Create workspace agents and start a mission to see the live feed populate.</p>
+          <h3 className="mt-3 text-base font-semibold text-white">No runtime signals yet</h3>
+          <p className="mt-1 text-sm text-slate-400">Launch work from the Work surface, then return here to watch the shared execution feed.</p>
           <div className="mt-4 flex justify-center gap-3">
-            <Link href="/agents" className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-amber-200 hover:bg-amber-400/20 transition-colors">
-              Create Specialists
+            <Link href="/work" className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs uppercase tracking-[0.2em] text-amber-200 hover:bg-amber-400/20 transition-colors">
+              Open Work
             </Link>
-            <Link href="/templates" className="rounded-lg border border-slate-700 px-4 py-2 text-xs uppercase tracking-[0.2em] text-slate-300 hover:bg-slate-800/40 transition-colors">
-              Browse Templates
+            <Link href="/agents" className="rounded-lg border border-slate-700 px-4 py-2 text-xs uppercase tracking-[0.2em] text-slate-300 hover:bg-slate-800/40 transition-colors">
+              Open Specialists
             </Link>
           </div>
         </section>

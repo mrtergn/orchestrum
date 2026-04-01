@@ -32,10 +32,17 @@ export type RuntimeTaskRecord = {
   status: string;
   type?: string;
   assignedToAgentId: string;
+  ownerAgentId?: string;
+  ownerAgentName?: string;
+  ownerRole?: string;
   linkedWorkItemId?: string;
   linkedWorkItemTitle?: string;
+  cycleId?: string;
   laneId?: string;
   laneLabel?: string;
+  workstreamId?: string;
+  workstreamType?: string;
+  gateRefs?: string[];
   dependsOnTaskIds?: string[];
   waitingOnTaskIds?: string[];
   blockedByTaskIds?: string[];

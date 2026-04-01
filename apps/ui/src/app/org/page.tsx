@@ -6,7 +6,15 @@ import { useAppUi } from "@/components/AppUiProvider";
 import { useConfirm } from "@/components/ConfirmDialog";
 
 /* ---------- types ---------- */
-type Agent = { id: string; name: string; role: string };
+type Agent = {
+  id: string;
+  name: string;
+  role: string;
+  status?: {
+    state?: string;
+    currentTaskIds?: string[];
+  };
+};
 type OrgNode = {
   id: string;
   agentId: string;
@@ -61,6 +69,7 @@ function TreeBranch({
   const colors = roleColors(agent?.role ?? "");
   const isSelected = node.id === selectedId;
   const reports = reportCounts.get(node.id) ?? 0;
+  const activeLoad = agent?.status?.currentTaskIds?.length ?? 0;
 
   return (
     <li>
@@ -85,6 +94,11 @@ function TreeBranch({
         {reports > 0 && (
           <div className="mt-1.5 text-[10px] text-slate-500">
             {reports} direct report{reports !== 1 ? "s" : ""}
+          </div>
+        )}
+        {activeLoad > 0 && (
+          <div className="mt-1 text-[10px] text-amber-300">
+            {activeLoad} active workstream task{activeLoad !== 1 ? "s" : ""}
           </div>
         )}
       </button>
@@ -244,7 +258,7 @@ export default function OrgPage() {
         <div>
           <h2 className="text-xl font-semibold text-white">Team Map</h2>
           <p className="text-sm text-slate-400">
-            Build your agent hierarchy visually. Click a node to edit its reporting line.
+            Runtime topology and handoff map for the supervised team. Click a node to edit ownership structure.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -269,7 +283,7 @@ export default function OrgPage() {
             ⬡
           </div>
           <h3 className="mt-3 text-lg font-semibold text-white">Create specialists first</h3>
-          <p className="mt-1 text-sm text-slate-400">You need at least one agent before you can build an org chart.</p>
+          <p className="mt-1 text-sm text-slate-400">You need at least one specialist before you can define runtime ownership and handoffs.</p>
           <Link
             href="/agents"
             className="mt-4 inline-block rounded-lg border border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs uppercase tracking-[0.3em] text-amber-200 hover:bg-amber-400/20 transition-colors"

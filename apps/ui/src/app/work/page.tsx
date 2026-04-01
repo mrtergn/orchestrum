@@ -916,7 +916,7 @@ export default function WorkIntakePage() {
             </div>
             {optimizationSummary && (
               <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Optimization summary</div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Review optimization summary</div>
                 <div className="mt-3 grid grid-cols-3 gap-2">
                   {[
                     { label: "Prompt suggestions", value: optimizationSummary.pendingPromptSuggestions },

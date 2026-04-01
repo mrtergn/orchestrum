@@ -323,8 +323,12 @@ export type WorkPlanTask = {
   sourceLine?: number | null;
   workstreamId?: string | null;
   workstreamType?: WorkItemWorkstreamType | null;
-  gateIds?: string[];
+  gateRefs?: string[];
   qaMode?: "smoke" | "scenario" | null;
+  cycleId?: string | null;
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  ownerRole?: string | null;
 };
 
 export type WorkItemWorkstream = {
@@ -336,9 +340,11 @@ export type WorkItemWorkstream = {
   laneLabel: string;
   taskIds: string[];
   dependsOn: string[];
-  gateIds: string[];
-  preferredAgentId?: string | null;
-  preferredAgentName?: string | null;
+  gateRefs: string[];
+  cycleId?: string | null;
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  ownerRole?: string | null;
 };
 
 export type WorkItemGate = {
@@ -351,6 +357,16 @@ export type WorkItemGate = {
 
 export type WorkItemGateRuntime = WorkItemGate & {
   status: WorkItemGateStatus;
+  summary: string;
+  cycleId?: string | null;
+  evidenceTaskIds?: string[];
+  blockingFindingIds?: string[];
+};
+
+export type WorkItemWorkstreamRuntime = WorkItemWorkstream & {
+  status: WorkItemWorkstreamStatus;
+  activeTaskId?: string | null;
+  activeTaskTitle?: string | null;
   summary: string;
 };
 
@@ -521,6 +537,8 @@ export type WorkItemDetailResponse = {
   review: WorkItemReviewSummary;
   optimization?: WorkItemOptimizationSummary | null;
   teamRuntime?: WorkItemTeamRuntime | null;
+  workstreamRuntime?: WorkItemWorkstreamRuntime[];
+  gateRuntime?: WorkItemGateRuntime[];
 };
 
 export type WorkItemPbiPreviewResponse = {

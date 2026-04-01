@@ -531,7 +531,7 @@ function AgentEditorModal({
                         placeholder="dev, qa, research"
                         className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
                       />
-                      <div className="mt-2 text-xs text-slate-500">This is the role mission templates and runtime routing expect.</div>
+                      <div className="mt-2 text-xs text-slate-500">This is the routing role the supervised team runtime uses for workstream ownership.</div>
                     </div>
                     <div>
                       <label className="text-xs text-slate-400">Specialization key</label>
@@ -1056,7 +1056,7 @@ export default function AgentsPage() {
         <div>
           <h2 className="text-xl font-semibold text-white">Specialists</h2>
           <p className="text-sm text-slate-400">
-            Create workspace agents with automatic local-provider routing and only open advanced settings when you need them.
+            Define the specialists that own real workstreams in the supervised team runtime, then tune provider routing only when needed.
           </p>
         </div>
         <button
@@ -1115,7 +1115,7 @@ export default function AgentsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm font-semibold text-white">Quick start specialists</div>
-            <div className="mt-1 text-sm text-slate-400">Start from a sensible specialist profile, then open Advanced only if you need overrides.</div>
+            <div className="mt-1 text-sm text-slate-400">Start from a lane-aligned runtime owner profile, then open Advanced only if you need overrides.</div>
           </div>
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -49,7 +49,7 @@ Workspace-scoped operational truth lives in:
   learnings.ndjson
   state-index.sqlite
   plugins/
-  work-items/
+  work-items.json
   worktrees/
 ```
 

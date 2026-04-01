@@ -407,6 +407,7 @@ export function createWorkItemCyclePlan(options: {
   sourceCycleId?: string | null;
   sourceRemediationPlanId?: string | null;
   headline?: string | null;
+  cycleId?: string | null;
 }): WorkItemCyclePlan {
   return {
     summary: options.detail.summary,
@@ -420,13 +421,21 @@ export function createWorkItemCyclePlan(options: {
     tasks: options.detail.tasks.map((task) => ({
       ...task,
       dependsOn: [...task.dependsOn],
-      gateIds: [...(task.gateIds ?? [])]
+      gateRefs: [...(task.gateRefs ?? [])],
+      cycleId: options.cycleId ?? task.cycleId ?? null,
+      ownerAgentId: task.ownerAgentId ?? null,
+      ownerAgentName: task.ownerAgentName ?? null,
+      ownerRole: task.ownerRole ?? null
     })),
     workstreams: options.detail.workstreams.map((workstream) => ({
       ...workstream,
       taskIds: [...workstream.taskIds],
       dependsOn: [...workstream.dependsOn],
-      gateIds: [...workstream.gateIds]
+      gateRefs: [...workstream.gateRefs],
+      cycleId: options.cycleId ?? workstream.cycleId ?? null,
+      ownerAgentId: workstream.ownerAgentId ?? null,
+      ownerAgentName: workstream.ownerAgentName ?? null,
+      ownerRole: workstream.ownerRole ?? null
     })),
     gates: options.detail.gates.map((gate) => ({
       ...gate,
@@ -968,7 +977,11 @@ function ensureExecutionLifecycleTasks(
   const nextTasks: WorkPlanTask[] = tasks.map((task): WorkPlanTask => ({
     ...task,
     dependsOn: [...task.dependsOn],
-    gateIds: [...(task.gateIds ?? [])]
+    gateRefs: [...(task.gateRefs ?? [])],
+    cycleId: task.cycleId ?? null,
+    ownerAgentId: task.ownerAgentId ?? null,
+    ownerAgentName: task.ownerAgentName ?? null,
+    ownerRole: task.ownerRole ?? null
   }));
 
   const planningTasks = nextTasks.filter((task) => task.kind === "planning" || task.laneId === "pm");
@@ -1366,12 +1379,12 @@ function buildWorkstreamPlan(options: {
     });
   }
 
-  const gateIdsByStreamId = new Map<string, string[]>();
+  const gateRefsByStreamId = new Map<string, string[]>();
   for (const gate of gates) {
     for (const streamId of gate.workstreamIds) {
-      const bucket = gateIdsByStreamId.get(streamId) ?? [];
+      const bucket = gateRefsByStreamId.get(streamId) ?? [];
       bucket.push(gate.id);
-      gateIdsByStreamId.set(streamId, bucket);
+      gateRefsByStreamId.set(streamId, bucket);
     }
   }
 
@@ -1396,9 +1409,10 @@ function buildWorkstreamPlan(options: {
       laneLabel: stream.laneLabel,
       taskIds: [...stream.taskIds],
       dependsOn: Array.from(dependencyIds),
-      gateIds: [...(gateIdsByStreamId.get(stream.id) ?? [])],
-      preferredAgentId: assignment?.matches[0]?.id ?? null,
-      preferredAgentName: assignment?.matches[0]?.name ?? null
+      gateRefs: [...(gateRefsByStreamId.get(stream.id) ?? [])],
+      ownerAgentId: assignment?.matches[0]?.id ?? null,
+      ownerAgentName: assignment?.matches[0]?.name ?? null,
+      ownerRole: assignment?.preferredRole ?? null
     };
   });
 
@@ -1409,8 +1423,11 @@ function buildWorkstreamPlan(options: {
       ...task,
       workstreamId,
       workstreamType: workstream?.type ?? null,
-      gateIds: workstream?.gateIds ?? [],
-      qaMode: task.kind === "qa" || task.laneId === "qa" ? task.qaMode ?? "smoke" : null
+      gateRefs: workstream?.gateRefs ?? [],
+      qaMode: task.kind === "qa" || task.laneId === "qa" ? task.qaMode ?? "smoke" : null,
+      ownerAgentId: workstream?.ownerAgentId ?? null,
+      ownerAgentName: workstream?.ownerAgentName ?? null,
+      ownerRole: workstream?.ownerRole ?? null
     };
   });
 

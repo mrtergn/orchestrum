@@ -107,8 +107,13 @@ type TaskRecord = {
   linkedWorkItemId?: string;
   linkedWorkItemTitle?: string;
   plannerTaskId?: string;
+  cycleId?: string;
   workstreamId?: string;
   workstreamType?: string;
+  gateRefs?: string[];
+  ownerAgentId?: string;
+  ownerAgentName?: string;
+  ownerRole?: string;
   qaMode?: "smoke" | "scenario";
   laneId?: string;
   laneLabel?: string;
@@ -399,6 +404,14 @@ export class AgentPlatform {
           linkedWorkItemId: typeof body.linkedWorkItemId === "string" ? body.linkedWorkItemId : undefined,
           linkedWorkItemTitle: typeof body.linkedWorkItemTitle === "string" ? body.linkedWorkItemTitle : undefined,
           plannerTaskId: typeof body.plannerTaskId === "string" ? body.plannerTaskId : undefined,
+          cycleId: typeof body.cycleId === "string" ? body.cycleId : undefined,
+          workstreamId: typeof body.workstreamId === "string" ? body.workstreamId : undefined,
+          workstreamType: typeof body.workstreamType === "string" ? body.workstreamType : undefined,
+          gateRefs: this.normalizeStringArray(body.gateRefs),
+          ownerAgentId: typeof body.ownerAgentId === "string" ? body.ownerAgentId : undefined,
+          ownerAgentName: typeof body.ownerAgentName === "string" ? body.ownerAgentName : undefined,
+          ownerRole: typeof body.ownerRole === "string" ? body.ownerRole : undefined,
+          qaMode: body.qaMode === "scenario" ? "scenario" : body.qaMode === "smoke" ? "smoke" : undefined,
           laneId: typeof body.laneId === "string" ? body.laneId : undefined,
           laneLabel: typeof body.laneLabel === "string" ? body.laneLabel : undefined,
           maxAttempts: typeof body.maxAttempts === "number" && body.maxAttempts > 0 ? Math.floor(body.maxAttempts) : 2
@@ -661,8 +674,10 @@ export class AgentPlatform {
     workspaceId: string;
     workItem: WorkItemRecord;
     detail: WorkItemPlanningDetail;
-  }): Promise<{ taskIds: string[] }> {
-    const nextCycleSequence = Math.max(1, (options.workItem.cycles?.length ?? 0) + 1);
+    cycleId: string;
+    cycleSequence: number;
+    cycleKind: "initial" | "remediation";
+  }): Promise<{ taskIds: string[]; detail: WorkItemPlanningDetail }> {
     const workspaceAgents = await this.loadAgentsForWorkspaceId(options.workspaceId);
     if (workspaceAgents.length === 0) {
       throw new Error(`No agents configured for workspace ${options.workspaceId}.`);
@@ -671,34 +686,82 @@ export class AgentPlatform {
     const assignmentByLane = new Map(options.detail.teamAssignments.map((assignment) => [assignment.laneId, assignment]));
     const laneErrors = new Set<string>();
     const taskIdByPlannerId = new Map<string, string>();
-    for (const plannedTask of options.detail.tasks) {
-      taskIdByPlannerId.set(plannedTask.id, crypto.randomUUID());
-      const assignment = assignmentByLane.get(plannedTask.laneId);
-      if (!assignment?.matches?.[0]) {
-        laneErrors.add(plannedTask.laneLabel || plannedTask.laneId);
-      }
-    }
-    if (laneErrors.size > 0) {
-      throw new Error(`No agent coverage for planned lanes: ${Array.from(laneErrors).join(", ")}`);
-    }
-
-    const createdTasks: TaskRecord[] = [];
     const batchAssignedCount = new Map<string, number>();
-    for (const plannedTask of options.detail.tasks) {
-      const assignment = assignmentByLane.get(plannedTask.laneId)!;
+    const ownerByWorkstreamId = new Map<string, {
+      id: string;
+      name: string;
+      role: string;
+    }>();
+
+    for (const workstream of options.detail.workstreams) {
+      const assignment = assignmentByLane.get(workstream.laneId);
+      if (!assignment?.matches?.[0]) {
+        laneErrors.add(workstream.laneLabel || workstream.laneId);
+        continue;
+      }
       const selectedMatch = this.selectLaneAgentMatch({
         matches: assignment.matches,
         workspaceAgents,
         batchAssignedCount
       });
       if (!selectedMatch) {
-        throw new Error(`Assigned lane ${plannedTask.laneLabel} no longer has an available specialist.`);
+        throw new Error(`Assigned lane ${workstream.laneLabel} no longer has an available specialist.`);
       }
       const assignedAgent = workspaceAgents.find((agent) => agent.id === selectedMatch.id);
       if (!assignedAgent) {
-        throw new Error(`Assigned agent ${selectedMatch.name} is no longer available for lane ${plannedTask.laneLabel}.`);
+        throw new Error(`Assigned agent ${selectedMatch.name} is no longer available for lane ${workstream.laneLabel}.`);
       }
       batchAssignedCount.set(assignedAgent.id, (batchAssignedCount.get(assignedAgent.id) ?? 0) + 1);
+      ownerByWorkstreamId.set(workstream.id, {
+        id: assignedAgent.id,
+        name: assignedAgent.name,
+        role: assignedAgent.role
+      });
+    }
+
+    for (const plannedTask of options.detail.tasks) {
+      taskIdByPlannerId.set(plannedTask.id, crypto.randomUUID());
+      if (plannedTask.workstreamId && ownerByWorkstreamId.has(plannedTask.workstreamId)) continue;
+      const assignment = assignmentByLane.get(plannedTask.laneId);
+      if (!assignment?.matches?.[0]) laneErrors.add(plannedTask.laneLabel || plannedTask.laneId);
+    }
+    if (laneErrors.size > 0) {
+      throw new Error(`No agent coverage for planned lanes: ${Array.from(laneErrors).join(", ")}`);
+    }
+
+    const annotatedWorkstreams = options.detail.workstreams.map((workstream) => {
+      const owner = ownerByWorkstreamId.get(workstream.id) ?? null;
+      return {
+        ...workstream,
+        cycleId: options.cycleId,
+        ownerAgentId: owner?.id ?? null,
+        ownerAgentName: owner?.name ?? null,
+        ownerRole: owner?.role ?? null
+      };
+    });
+    const annotatedWorkstreamById = new Map(annotatedWorkstreams.map((workstream) => [workstream.id, workstream]));
+    const annotatedTasks = options.detail.tasks.map((plannedTask) => {
+      const workstream = plannedTask.workstreamId
+        ? annotatedWorkstreamById.get(plannedTask.workstreamId) ?? null
+        : null;
+      return {
+        ...plannedTask,
+        cycleId: options.cycleId,
+        gateRefs: [...(plannedTask.gateRefs ?? workstream?.gateRefs ?? [])],
+        ownerAgentId: workstream?.ownerAgentId ?? null,
+        ownerAgentName: workstream?.ownerAgentName ?? null,
+        ownerRole: workstream?.ownerRole ?? null
+      };
+    });
+
+    const createdTasks: TaskRecord[] = [];
+    for (const plannedTask of annotatedTasks) {
+      const assignedOwner =
+        (plannedTask.workstreamId ? ownerByWorkstreamId.get(plannedTask.workstreamId) : null) ??
+        null;
+      if (!assignedOwner) {
+        throw new Error(`Workstream ownership is missing for planned task ${plannedTask.title}.`);
+      }
       const task = await this.createQueuedTask({
         id: taskIdByPlannerId.get(plannedTask.id),
         workspaceId: options.workspaceId,
@@ -721,27 +784,37 @@ export class AgentPlatform {
           constraints: options.detail.constraints,
           plannerTaskId: plannedTask.id,
           plannerTaskKind: plannedTask.kind,
+          cycleId: options.cycleId,
           workstreamId: plannedTask.workstreamId ?? null,
           workstreamType: plannedTask.workstreamType ?? null,
+          gateRefs: plannedTask.gateRefs ?? [],
           qaMode: plannedTask.qaMode ?? null,
           laneId: plannedTask.laneId,
           laneLabel: plannedTask.laneLabel,
           roleHint: plannedTask.roleHint ?? null,
-          cycleSequence: nextCycleSequence,
-          cycleKind: options.workItem.reviewStatus === "changes_requested" ? "remediation" : "initial",
+          ownerAgentId: assignedOwner.id,
+          ownerAgentName: assignedOwner.name,
+          ownerRole: assignedOwner.role,
+          cycleSequence: options.cycleSequence,
+          cycleKind: options.cycleKind,
           reviewStatus: options.workItem.reviewStatus ?? null,
           reviewNote: options.workItem.reviewNote ?? null,
           reviewedAt: options.workItem.reviewedAt ?? null
         },
-        assignedToAgentId: assignedAgent.id,
+        assignedToAgentId: assignedOwner.id,
         dependsOnTaskIds: plannedTask.dependsOn
           .map((dependency) => taskIdByPlannerId.get(dependency))
           .filter((dependency): dependency is string => Boolean(dependency)),
         linkedWorkItemId: options.workItem.id,
         linkedWorkItemTitle: options.workItem.brief.title,
         plannerTaskId: plannedTask.id,
+        cycleId: options.cycleId,
         workstreamId: plannedTask.workstreamId ?? undefined,
         workstreamType: plannedTask.workstreamType ?? undefined,
+        gateRefs: plannedTask.gateRefs ?? [],
+        ownerAgentId: assignedOwner.id,
+        ownerAgentName: assignedOwner.name,
+        ownerRole: assignedOwner.role,
         qaMode: plannedTask.qaMode ?? undefined,
         laneId: plannedTask.laneId,
         laneLabel: plannedTask.laneLabel,
@@ -762,7 +835,12 @@ export class AgentPlatform {
       await this.reconcileDependencyStates();
 
     return {
-      taskIds: createdTasks.map((task) => task.id)
+      taskIds: createdTasks.map((task) => task.id),
+      detail: {
+        ...options.detail,
+        tasks: annotatedTasks,
+        workstreams: annotatedWorkstreams
+      }
     };
   }
 
@@ -1181,8 +1259,13 @@ export class AgentPlatform {
     linkedWorkItemId?: string;
     linkedWorkItemTitle?: string;
     plannerTaskId?: string;
+    cycleId?: string;
     workstreamId?: string;
     workstreamType?: string;
+    gateRefs?: string[];
+    ownerAgentId?: string;
+    ownerAgentName?: string;
+    ownerRole?: string;
     qaMode?: "smoke" | "scenario";
     laneId?: string;
     laneLabel?: string;
@@ -1211,8 +1294,13 @@ export class AgentPlatform {
       linkedWorkItemId: input.linkedWorkItemId,
       linkedWorkItemTitle: input.linkedWorkItemTitle,
       plannerTaskId: input.plannerTaskId,
+      cycleId: input.cycleId,
       workstreamId: input.workstreamId,
       workstreamType: input.workstreamType,
+      gateRefs: [...(input.gateRefs ?? [])],
+      ownerAgentId: input.ownerAgentId ?? input.assignedToAgentId,
+      ownerAgentName: input.ownerAgentName,
+      ownerRole: input.ownerRole,
       qaMode: input.qaMode,
       laneId: input.laneId,
       laneLabel: input.laneLabel,
@@ -1824,8 +1912,13 @@ export class AgentPlatform {
       linkedWorkItemId: typeof record.linkedWorkItemId === "string" && record.linkedWorkItemId.trim() ? record.linkedWorkItemId : undefined,
       linkedWorkItemTitle: typeof record.linkedWorkItemTitle === "string" && record.linkedWorkItemTitle.trim() ? record.linkedWorkItemTitle : undefined,
       plannerTaskId: typeof record.plannerTaskId === "string" && record.plannerTaskId.trim() ? record.plannerTaskId : undefined,
+      cycleId: typeof record.cycleId === "string" && record.cycleId.trim() ? record.cycleId : undefined,
       workstreamId: typeof record.workstreamId === "string" && record.workstreamId.trim() ? record.workstreamId : undefined,
       workstreamType: typeof record.workstreamType === "string" && record.workstreamType.trim() ? record.workstreamType : undefined,
+      gateRefs: this.normalizeStringArray(record.gateRefs),
+      ownerAgentId: typeof record.ownerAgentId === "string" && record.ownerAgentId.trim() ? record.ownerAgentId : undefined,
+      ownerAgentName: typeof record.ownerAgentName === "string" && record.ownerAgentName.trim() ? record.ownerAgentName : undefined,
+      ownerRole: typeof record.ownerRole === "string" && record.ownerRole.trim() ? record.ownerRole : undefined,
       qaMode: record.qaMode === "scenario" ? "scenario" : record.qaMode === "smoke" ? "smoke" : undefined,
       laneId: typeof record.laneId === "string" && record.laneId.trim() ? record.laneId : undefined,
       laneLabel: typeof record.laneLabel === "string" && record.laneLabel.trim() ? record.laneLabel : undefined,
