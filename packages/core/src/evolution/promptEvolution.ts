@@ -56,6 +56,70 @@ export async function savePromptHistory(workspacePath: string, history: PromptHi
   await writeJson(path.join(controlDir, "prompt_history.json"), history);
 }
 
+export async function registerPromptSuggestions(options: {
+  workspacePath: string;
+  suggestions: Array<{
+    promptPath: string;
+    createdAt?: string;
+    score: number;
+    suggestions: string[];
+    proposedPrompt?: string;
+    runId: string;
+  }>;
+}): Promise<Array<{ promptPath: string; suggestionId: string }>> {
+  const history = await loadPromptHistory(options.workspacePath);
+  const registered: Array<{ promptPath: string; suggestionId: string }> = [];
+
+  for (const entry of options.suggestions) {
+    const promptPath = entry.promptPath.trim();
+    if (!promptPath) continue;
+    const record = history.prompts[promptPath] ?? { versions: [], suggestions: [] };
+    history.prompts[promptPath] = record;
+
+    if (record.versions.length === 0) {
+      const currentContent = await fs.readFile(promptPath, "utf8").catch(() => "");
+      if (currentContent.trim()) {
+        const version: PromptVersion = {
+          id: "v1",
+          createdAt: entry.createdAt ?? new Date().toISOString(),
+          hash: hashText(currentContent),
+          content: currentContent,
+          performanceScore: 0,
+          runId: entry.runId
+        };
+        record.versions.push(version);
+        record.currentVersionId = version.id;
+      }
+    }
+
+    const existing = record.suggestions.find((suggestion) =>
+      suggestion.runId === entry.runId &&
+      suggestion.proposedPrompt === entry.proposedPrompt &&
+      suggestion.suggestions.join("\n") === entry.suggestions.join("\n")
+    );
+    if (existing) {
+      registered.push({ promptPath, suggestionId: existing.id });
+      continue;
+    }
+
+    const suggestion: PromptSuggestion = {
+      id: crypto.randomUUID(),
+      createdAt: entry.createdAt ?? new Date().toISOString(),
+      score: entry.score,
+      suggestions: [...entry.suggestions],
+      proposedPrompt: entry.proposedPrompt,
+      status: "pending",
+      runId: entry.runId
+    };
+    record.suggestions.unshift(suggestion);
+    record.suggestions = record.suggestions.slice(0, MAX_PROMPT_VERSIONS);
+    registered.push({ promptPath, suggestionId: suggestion.id });
+  }
+
+  await savePromptHistory(options.workspacePath, history);
+  return registered;
+}
+
 export async function approvePromptSuggestion(options: {
   workspacePath: string;
   promptPath: string;

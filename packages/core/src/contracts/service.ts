@@ -120,6 +120,58 @@ export const WORK_ITEM_REMEDIATION_PLAN_STATUSES = [
 
 export type WorkItemRemediationPlanStatus = typeof WORK_ITEM_REMEDIATION_PLAN_STATUSES[number];
 
+export const WORK_ITEM_WORKSTREAM_TYPES = [
+  "plan",
+  "implement",
+  "integrate",
+  "validate",
+  "qa_smoke",
+  "qa_scenario",
+  "audit"
+] as const;
+
+export type WorkItemWorkstreamType = typeof WORK_ITEM_WORKSTREAM_TYPES[number];
+
+export const WORK_ITEM_WORKSTREAM_STATUSES = [
+  "planned",
+  "queued",
+  "running",
+  "blocked",
+  "succeeded",
+  "failed",
+  "cancelled"
+] as const;
+
+export type WorkItemWorkstreamStatus = typeof WORK_ITEM_WORKSTREAM_STATUSES[number];
+
+export const WORK_ITEM_GATE_TYPES = [
+  "validation",
+  "qa_scenario",
+  "audit",
+  "delivery"
+] as const;
+
+export type WorkItemGateType = typeof WORK_ITEM_GATE_TYPES[number];
+
+export const WORK_ITEM_GATE_STATUSES = [
+  "pending",
+  "passed",
+  "failed",
+  "blocked",
+  "skipped"
+] as const;
+
+export type WorkItemGateStatus = typeof WORK_ITEM_GATE_STATUSES[number];
+
+export const WORK_ITEM_OPTIMIZATION_STATUSES = [
+  "pending",
+  "approved",
+  "rejected",
+  "converted"
+] as const;
+
+export type WorkItemOptimizationStatus = typeof WORK_ITEM_OPTIMIZATION_STATUSES[number];
+
 export type WorkItemBrief = {
   workspaceId: string;
   sourceType: WorkItemSourceType;
@@ -148,6 +200,7 @@ export type WorkItemRecord = {
   currentCycleId?: string | null;
   cycles?: WorkItemCycleRecord[];
   remediationPlan?: WorkItemRemediationPlan | null;
+  optimization?: WorkItemOptimizationSummary | null;
   createdAt: string;
   updatedAt: string;
   lastStartedAt?: string | null;
@@ -268,6 +321,37 @@ export type WorkPlanTask = {
   source: "pbi" | "template";
   dependsOn: string[];
   sourceLine?: number | null;
+  workstreamId?: string | null;
+  workstreamType?: WorkItemWorkstreamType | null;
+  gateIds?: string[];
+  qaMode?: "smoke" | "scenario" | null;
+};
+
+export type WorkItemWorkstream = {
+  id: string;
+  type: WorkItemWorkstreamType;
+  title: string;
+  description?: string | null;
+  laneId: string;
+  laneLabel: string;
+  taskIds: string[];
+  dependsOn: string[];
+  gateIds: string[];
+  preferredAgentId?: string | null;
+  preferredAgentName?: string | null;
+};
+
+export type WorkItemGate = {
+  id: string;
+  type: WorkItemGateType;
+  label: string;
+  required: boolean;
+  workstreamIds: string[];
+};
+
+export type WorkItemGateRuntime = WorkItemGate & {
+  status: WorkItemGateStatus;
+  summary: string;
 };
 
 export type WorkItemSourceSnapshot = {
@@ -322,6 +406,8 @@ export type WorkItemCyclePlan = {
   constraints: string[];
   lanes: WorkPlanLane[];
   tasks: WorkPlanTask[];
+  workstreams: WorkItemWorkstream[];
+  gates: WorkItemGate[];
   teamAssignments: WorkPlanLaneAssignment[];
   executionSteps: WorkItemExecutionStep[];
 };
@@ -332,6 +418,9 @@ export type WorkItemPlanningDetail = {
   constraints: string[];
   lanes: WorkPlanLane[];
   tasks: WorkPlanTask[];
+  workstreams: WorkItemWorkstream[];
+  gates: WorkItemGate[];
+  qaCoverage: "none" | "scenario";
   teamAssignments: WorkPlanLaneAssignment[];
   executionSteps: WorkItemExecutionStep[];
   template: {
@@ -344,11 +433,94 @@ export type WorkItemPlanningDetail = {
   sourceSnapshot: WorkItemSourceSnapshot;
 };
 
+export type WorkItemTeamRuntimeLane = {
+  laneId: string;
+  laneLabel: string;
+  workstreamIds: string[];
+  activeWorkstreamId?: string | null;
+  status: WorkItemWorkstreamStatus | "missing";
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  summary: string;
+};
+
+export type WorkItemTeamRuntime = {
+  headline: string;
+  currentStage: string;
+  nextHandoff?: string | null;
+  activeAgents: number;
+  blockedLanes: number;
+  completedLanes: number;
+  missingCoverage: number;
+  lanes: WorkItemTeamRuntimeLane[];
+};
+
+export type WorkItemOptimizationPromptSuggestion = {
+  id: string;
+  promptPath: string;
+  label: string;
+  status: WorkItemOptimizationStatus;
+  createdAt: string;
+  score: number;
+  rationale: string[];
+  suggestionId?: string | null;
+};
+
+export type WorkItemOptimizationStrategyRecommendation = {
+  id: string;
+  mode: string;
+  status: WorkItemOptimizationStatus;
+  createdAt: string;
+  rationale: string[];
+};
+
+export type WorkItemOptimizationOpportunity = {
+  id: string;
+  title: string;
+  description: string;
+  status: WorkItemOptimizationStatus;
+  createdAt: string;
+  rationale: string[];
+  riskScore: number;
+  convertedWorkItemId?: string | null;
+};
+
+export type WorkItemOptimizationCycle = {
+  id: string;
+  cycleId: string;
+  sequence: number;
+  sourceStatus: "approved" | "changes_requested" | "failed";
+  createdAt: string;
+  promptSuggestions: WorkItemOptimizationPromptSuggestion[];
+  strategyRecommendation?: WorkItemOptimizationStrategyRecommendation | null;
+  opportunities: WorkItemOptimizationOpportunity[];
+};
+
+export type WorkItemOptimizationSummary = {
+  cycles: WorkItemOptimizationCycle[];
+};
+
+export type WorkWorkspaceOptimizationSummary = {
+  pendingPromptSuggestions: number;
+  pendingStrategies: number;
+  pendingOpportunities: number;
+  recentCycles: Array<{
+    workItemId: string;
+    title: string;
+    cycleId: string;
+    sequence: number;
+    sourceStatus: "approved" | "changes_requested" | "failed";
+    createdAt: string;
+  }>;
+};
+
 export type WorkItemDetailResponse = {
   workItem: WorkItemRecord;
   detail: WorkItemPlanningDetail;
   currentPlan?: WorkItemCyclePlan | null;
   review: WorkItemReviewSummary;
+  optimization?: WorkItemOptimizationSummary | null;
+  teamRuntime?: WorkItemTeamRuntime | null;
 };
 
 export type WorkItemPbiPreviewResponse = {

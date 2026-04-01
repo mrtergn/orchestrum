@@ -16,7 +16,8 @@ import type {
   WorkItemSprintImportResponse,
   WorkSprintPreview,
   WorkSprintPreviewResponse,
-  WorkItemsResponse
+  WorkItemsResponse,
+  WorkWorkspaceOptimizationSummary
 } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
 import {
@@ -42,6 +43,10 @@ type WorkItemStartResponse = {
   runId?: string;
   workItem?: WorkItemRecord;
   error?: string;
+};
+
+type WorkItemsPayload = WorkItemsResponse & {
+  optimizationSummary?: WorkWorkspaceOptimizationSummary | null;
 };
 
 const SOURCE_OPTIONS: Array<{
@@ -210,6 +215,7 @@ export default function WorkIntakePage() {
   const [blockLaunchWhenReviewPending, setBlockLaunchWhenReviewPending] = useState(true);
   const [allowImportDuringAutoLaunch, setAllowImportDuringAutoLaunch] = useState(true);
   const [backgroundSupervisorEnabled, setBackgroundSupervisorEnabled] = useState(false);
+  const [optimizationSummary, setOptimizationSummary] = useState<WorkWorkspaceOptimizationSummary | null>(null);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? workspaces[0] ?? null,
@@ -243,6 +249,7 @@ export default function WorkIntakePage() {
         setOrganizationControl(null);
         setAgents([]);
         setTasks([]);
+        setOptimizationSummary(null);
         return;
       }
 
@@ -257,7 +264,7 @@ export default function WorkIntakePage() {
         fetch(`/api/tasks?workspace=${encodeURIComponent(fallbackWorkspaceId)}`, { cache: "no-store" })
       ]);
       const workItemsData = workItemsRes.ok
-        ? ((await workItemsRes.json()) as WorkItemsResponse)
+        ? ((await workItemsRes.json()) as WorkItemsPayload)
         : { workItems: [] };
       const controlData = controlRes.ok
         ? ((await controlRes.json()) as WorkOrganizationControlResponse)
@@ -265,6 +272,7 @@ export default function WorkIntakePage() {
       const agentData = await agentRes.json().catch(() => ({ agents: [] }));
       const taskData = await taskRes.json().catch(() => ({ tasks: [] }));
       setWorkItems(Array.isArray(workItemsData.workItems) ? workItemsData.workItems : []);
+      setOptimizationSummary(workItemsData.optimizationSummary ?? null);
       setOrganizationControl(controlData.ok && controlData.control ? controlData.control : null);
       setAgents(Array.isArray(agentData.agents) ? agentData.agents as RuntimeAgentRecord[] : []);
       setTasks(Array.isArray(taskData.tasks) ? taskData.tasks as RuntimeTaskRecord[] : []);
@@ -906,6 +914,39 @@ export default function WorkIntakePage() {
                 <code className="text-xs text-amber-200">{selectedSource.templateId}</code>
               </div>
             </div>
+            {optimizationSummary && (
+              <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Optimization summary</div>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {[
+                    { label: "Prompt suggestions", value: optimizationSummary.pendingPromptSuggestions },
+                    { label: "Strategies", value: optimizationSummary.pendingStrategies },
+                    { label: "Opportunities", value: optimizationSummary.pendingOpportunities }
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                      <div className="text-lg font-semibold text-white">{item.value}</div>
+                      <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{item.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {optimizationSummary.recentCycles.length > 0 && (
+                  <div className="mt-4 space-y-2">
+                    {optimizationSummary.recentCycles.slice(0, 3).map((cycle) => (
+                      <Link
+                        key={`${cycle.workItemId}:${cycle.cycleId}`}
+                        href={`/work/${cycle.workItemId}?workspace=${encodeURIComponent(activeWorkspace?.id ?? "")}`}
+                        className="block rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 transition-colors hover:border-slate-700"
+                      >
+                        <div className="text-sm font-medium text-white">{cycle.title}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Cycle {cycle.sequence} · {cycle.sourceStatus.replace(/_/g, " ")} · {new Date(cycle.createdAt).toLocaleString()}
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {sourceType === "pbi" && (
               <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
                 <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sprint / PBI preview</div>

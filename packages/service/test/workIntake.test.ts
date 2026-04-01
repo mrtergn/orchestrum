@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import express from "express";
-import { ensureWorkspaceManifest, type StateIndex } from "@orchestrum/core";
+import { ensureWorkspaceManifest, type StateIndex, type WorkItemPlanningDetail } from "@orchestrum/core";
 import { registerWorkIntakeRoutes } from "../src/routes/workIntake.js";
 
 type Fixture = Awaited<ReturnType<typeof createFixture>>;
@@ -87,6 +87,113 @@ test("work intake supports create, detail, start, send back, and relaunch", asyn
   assert.equal(secondStart.body.workItem?.status, "running");
   assert.equal(secondStart.body.workItem?.cycles?.length, 2);
   assert.equal(secondStart.body.workItem?.cycles?.[1]?.trigger, "review_send_back");
+
+  const remediatedDetail = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
+  assert.equal(remediatedDetail.response.status, 200);
+  assert.equal(remediatedDetail.body.optimization?.cycles?.length, 1);
+  assert.equal(remediatedDetail.body.optimization?.cycles?.[0]?.strategyRecommendation?.status, "pending");
+});
+
+test("task graph work items require the browser scenario gate before review", async () => {
+  assert.ok(fixture);
+
+  const created = await requestJson(fixture.baseUrl, "/api/work-items", {
+    method: "POST",
+    body: {
+      workspaceId: "demo",
+      sourceType: "pbi",
+      title: "ABC · backlog item",
+      request: "Implement the backlog item and prove it in the browser.",
+      sourceRef: "sprint5.md :: ABC"
+    }
+  });
+  assert.equal(created.response.status, 201);
+  const workItemId = String(created.body.workItem?.id ?? "");
+  assert.ok(workItemId);
+
+  const firstStart = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/start`, {
+    method: "POST",
+    body: { workspaceId: "demo" }
+  });
+  assert.equal(firstStart.response.status, 200);
+  assert.equal(firstStart.body.workItem?.executionMode, "task_graph");
+  fixture.updateQueuedTaskStatuses(workItemId, (task) => task.qaMode === "scenario" ? "queued" : "succeeded");
+
+  const blockedDetail = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
+  assert.equal(blockedDetail.response.status, 200);
+  assert.equal(blockedDetail.body.teamRuntime?.lanes?.length > 0, true);
+  assert.equal(blockedDetail.body.review?.gate, "not_ready");
+  assert.equal(
+    blockedDetail.body.review?.signals?.some((signal: { label: string; status: string }) => signal.label === "Browser Scenario" && signal.status === "pending"),
+    true
+  );
+
+  fixture.updateQueuedTaskStatuses(workItemId, () => "succeeded");
+  const readyDetail = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
+  assert.equal(readyDetail.response.status, 200);
+  assert.equal(readyDetail.body.review?.gate, "ready");
+  assert.equal(
+    readyDetail.body.review?.signals?.some((signal: { label: string; status: string }) => signal.label === "Browser Scenario" && signal.status === "passed"),
+    true
+  );
+});
+
+test("optimization opportunities can be converted into draft work items", async () => {
+  assert.ok(fixture);
+
+  const created = await requestJson(fixture.baseUrl, "/api/work-items", {
+    method: "POST",
+    body: {
+      workspaceId: "demo",
+      sourceType: "feature",
+      title: "Harden runtime evidence",
+      request: "Capture stronger review follow-ups and keep the audit trail local."
+    }
+  });
+  const workItemId = String(created.body.workItem?.id ?? "");
+  assert.ok(workItemId);
+
+  const start = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/start`, {
+    method: "POST",
+    body: { workspaceId: "demo" }
+  });
+  const runId = String(start.body.workItem?.linkedRunId ?? "");
+  fixture.setWorkspaceRuns("demo", [{
+    workspaceId: "demo",
+    runId,
+    status: "completed",
+    verdict: "ready_for_review"
+  }]);
+
+  const sendBack = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/review`, {
+    method: "POST",
+    body: {
+      workspaceId: "demo",
+      decision: "send_back",
+      note: "Create a reliability follow-up."
+    }
+  });
+  assert.equal(sendBack.response.status, 200);
+
+  const detail = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/detail?workspace=demo`);
+  const optimizationCycle = detail.body.optimization?.cycles?.[0];
+  assert.ok(optimizationCycle);
+  const opportunityId = optimizationCycle.opportunities?.[0]?.id;
+  assert.ok(opportunityId);
+
+  const convert = await requestJson(fixture.baseUrl, `/api/work-items/${workItemId}/optimization`, {
+    method: "POST",
+    body: {
+      workspaceId: "demo",
+      kind: "opportunity",
+      action: "convert",
+      cycleId: optimizationCycle.id,
+      itemId: opportunityId
+    }
+  });
+  assert.equal(convert.response.status, 200);
+  assert.equal(convert.body.createdWorkItem?.status, "draft");
+  assert.equal(convert.body.createdWorkItem?.brief.sourceRef?.startsWith("opportunity:"), true);
 });
 
 async function createFixture() {
@@ -99,6 +206,7 @@ async function createFixture() {
   await ensureWorkspaceManifest(repoPath, { id: "demo", name: "Demo" });
 
   const runsByWorkspace = new Map<string, Array<{ workspaceId: string; runId: string; status: string; verdict: string | null }>>();
+  const queuedTasks: Array<Record<string, unknown>> = [];
   const agentPlatform = {
     async startMission(options: {
       runsDir: string;
@@ -116,11 +224,58 @@ async function createFixture() {
       ]);
       return { ok: true, runId };
     },
-    listTasks() {
-      return [];
+    listTasks(options?: { workspaceId?: string; workItemId?: string }) {
+      return queuedTasks.filter((task) => {
+        if (options?.workspaceId && task.workspaceId !== options.workspaceId) return false;
+        if (options?.workItemId && task.linkedWorkItemId !== options.workItemId) return false;
+        return true;
+      });
     },
-    async queueWorkItemExecution() {
-      return { taskIds: ["task-1"] };
+    async queueWorkItemExecution(options: {
+      workspaceId: string;
+      workItem: { id: string; brief: { title: string } };
+      detail: WorkItemPlanningDetail;
+    }) {
+      const plannerTaskToTaskId = new Map<string, string>();
+      for (const plannerTask of options.detail.tasks) {
+        plannerTaskToTaskId.set(plannerTask.id, `task-${plannerTask.id}`);
+      }
+      const createdTasks = options.detail.tasks.map((plannerTask) => ({
+        id: plannerTaskToTaskId.get(plannerTask.id)!,
+        workspaceId: options.workspaceId,
+        linkedWorkItemId: options.workItem.id,
+        linkedWorkItemTitle: options.workItem.brief.title,
+        title: plannerTask.title,
+        type:
+          plannerTask.kind === "planning"
+            ? "spec"
+            : plannerTask.kind === "validation"
+              ? "validate"
+              : plannerTask.kind === "qa"
+                ? "qa"
+                : plannerTask.kind === "review"
+                  ? "audit"
+                  : "implement",
+        status: "queued",
+        assignedToAgentId: `${plannerTask.laneId}-agent`,
+        plannerTaskId: plannerTask.id,
+        workstreamId: plannerTask.workstreamId ?? null,
+        workstreamType: plannerTask.workstreamType ?? null,
+        qaMode: plannerTask.qaMode ?? null,
+        laneId: plannerTask.laneId,
+        laneLabel: plannerTask.laneLabel,
+        dependsOnTaskIds: plannerTask.dependsOn.map((dependency) => plannerTaskToTaskId.get(dependency)).filter(Boolean),
+        waitingOnTaskIds: [],
+        blockedByTaskIds: [],
+        resultSummary: undefined
+      }));
+      for (let index = queuedTasks.length - 1; index >= 0; index -= 1) {
+        if (queuedTasks[index]?.linkedWorkItemId === options.workItem.id) {
+          queuedTasks.splice(index, 1);
+        }
+      }
+      queuedTasks.push(...createdTasks);
+      return { taskIds: createdTasks.map((task) => String(task.id)) };
     }
   };
   const stateIndex: Pick<StateIndex, "rebuild" | "queryRuns"> = {
@@ -161,6 +316,19 @@ async function createFixture() {
     baseUrl: `http://127.0.0.1:${address.port}`,
     setWorkspaceRuns(workspaceId: string, runs: Array<{ workspaceId: string; runId: string; status: string; verdict: string | null }>) {
       runsByWorkspace.set(workspaceId, runs);
+    },
+    updateQueuedTaskStatuses(workItemId: string, resolveStatus: (task: Record<string, unknown>) => string) {
+      for (const task of queuedTasks) {
+        if (task.linkedWorkItemId !== workItemId) continue;
+        const status = resolveStatus(task);
+        task.status = status;
+        task.resultSummary =
+          status === "succeeded"
+            ? `${String(task.title ?? "Task")} succeeded.`
+            : status === "queued"
+              ? `${String(task.title ?? "Task")} is still queued.`
+              : `${String(task.title ?? "Task")} ${status}.`;
+      }
     }
   };
 }

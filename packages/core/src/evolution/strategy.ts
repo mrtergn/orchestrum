@@ -20,6 +20,8 @@ export type StrategyProfile = {
 
 export type StrategyState = {
   auditStrictness?: "normal" | "high" | "low";
+  recommendedMode?: string;
+  recommendedAt?: string;
   notes?: string[];
 };
 

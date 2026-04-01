@@ -6,17 +6,15 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   WorkItemDetailResponse,
   WorkItemCyclePlan,
+  WorkItemOptimizationSummary,
   WorkItemPlanningDetail,
   WorkItemRecord,
   WorkItemReviewSummary,
+  WorkItemTeamRuntime,
   WorkPlanTask
 } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
-import {
-  buildWorkItemTeamRuntime,
-  type RuntimeAgentRecord,
-  type WorkItemLaneRuntimeStatus
-} from "@/lib/workRuntime";
+import { type RuntimeAgentRecord } from "@/lib/workRuntime";
 
 function statusClassName(status: string) {
   switch (status) {
@@ -152,26 +150,58 @@ function cyclePlanSourceLabel(source: string) {
   return source === "remediation" ? "Remediation cycle" : "Baseline cycle";
 }
 
-function laneRuntimeClassName(status: WorkItemLaneRuntimeStatus) {
+function laneRuntimeClassName(status: string) {
   switch (status) {
     case "running":
       return "border-amber-400/30 bg-amber-400/10 text-amber-200";
     case "blocked":
       return "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-200";
-    case "waiting":
+    case "queued":
+    case "planned":
       return "border-cyan-400/30 bg-cyan-400/10 text-cyan-200";
-    case "completed":
+    case "succeeded":
       return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
     case "missing":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+    case "failed":
+    case "cancelled":
       return "border-rose-400/30 bg-rose-400/10 text-rose-200";
     default:
       return "border-slate-700 bg-slate-900/60 text-slate-300";
   }
 }
 
-function laneRuntimeLabel(status: WorkItemLaneRuntimeStatus) {
+function laneRuntimeLabel(status: string) {
   if (status === "missing") return "Missing coverage";
+  if (status === "succeeded") return "Completed";
   return status.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function optimizationStatusClassName(status: string) {
+  switch (status) {
+    case "approved":
+    case "converted":
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+    case "rejected":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+    default:
+      return "border-amber-400/30 bg-amber-400/10 text-amber-200";
+  }
+}
+
+function gateStatusClassName(status: string) {
+  switch (status) {
+    case "passed":
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+    case "failed":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+    case "blocked":
+      return "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-200";
+    case "pending":
+      return "border-amber-400/30 bg-amber-400/10 text-amber-200";
+    default:
+      return "border-slate-700 bg-slate-900/60 text-slate-300";
+  }
 }
 
 type DetailState = {
@@ -179,6 +209,8 @@ type DetailState = {
   detail: WorkItemPlanningDetail;
   currentPlan: WorkItemCyclePlan | null;
   review: WorkItemReviewSummary;
+  optimization: WorkItemOptimizationSummary | null;
+  teamRuntime: WorkItemTeamRuntime | null;
 };
 
 type RelatedTask = {
@@ -244,7 +276,9 @@ export default function WorkItemDetailPage() {
             workItem: payload.workItem,
             detail: payload.detail,
             currentPlan: payload.currentPlan ?? null,
-            review: payload.review
+            review: payload.review,
+            optimization: payload.optimization ?? null,
+            teamRuntime: payload.teamRuntime ?? null
           });
           setRelatedTasks(Array.isArray(tasksPayload.tasks) ? tasksPayload.tasks as RelatedTask[] : []);
           const loadedAgents = Array.isArray(agentsPayload.agents) ? agentsPayload.agents as RuntimeAgentRecord[] : [];
@@ -310,23 +344,6 @@ export default function WorkItemDetailPage() {
     () => relatedTasks.slice().sort((left, right) => left.title.localeCompare(right.title)),
     [relatedTasks]
   );
-
-  const teamRuntime = useMemo(() => {
-    if (!state) return null;
-    const activePlan = state.currentPlan ?? {
-      lanes: state.detail.lanes,
-      tasks: state.detail.tasks,
-      teamAssignments: state.detail.teamAssignments
-    };
-    return buildWorkItemTeamRuntime({
-      lanes: activePlan.lanes,
-      assignments: activePlan.teamAssignments,
-      plannedTasks: activePlan.tasks,
-      tasks: relatedTasks,
-      agents,
-      review: state.review
-    });
-  }, [agents, relatedTasks, state]);
 
   const submitReviewDecision = async (decision: "approve" | "send_back") => {
     if (!state) return;
@@ -409,6 +426,49 @@ export default function WorkItemDetailPage() {
     }
   };
 
+  const submitOptimizationAction = async (options: {
+    kind: "prompt" | "strategy" | "opportunity";
+    action: "approve" | "reject" | "convert";
+    cycleId: string;
+    itemId: string;
+    successTitle: string;
+  }) => {
+    if (!state) return;
+    try {
+      const res = await fetch(`/api/work-items/${encodeURIComponent(state.workItem.id)}/optimization`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: state.workItem.workspaceId,
+          kind: options.kind,
+          action: options.action,
+          cycleId: options.cycleId,
+          itemId: options.itemId
+        })
+      });
+      const payload = await res.json().catch(() => ({})) as {
+        ok?: boolean;
+        error?: string;
+        createdWorkItem?: WorkItemRecord;
+      };
+      if (!res.ok || !payload.ok) {
+        throw new Error(payload.error ?? "Optimization action failed");
+      }
+      pushToast({
+        tone: options.action === "reject" ? "warning" : "success",
+        title: options.successTitle,
+        message: payload.createdWorkItem?.brief.title ?? state.workItem.brief.title
+      });
+      setRefreshKey((value) => value + 1);
+    } catch (error) {
+      pushToast({
+        tone: "danger",
+        title: "Optimization action failed",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  };
+
   if (loading && !state) {
     return (
       <main className="space-y-6">
@@ -436,7 +496,7 @@ export default function WorkItemDetailPage() {
     );
   }
 
-  const { workItem, detail, currentPlan, review } = state;
+  const { workItem, detail, currentPlan, review, optimization, teamRuntime } = state;
 
   return (
     <main className="space-y-6">
@@ -697,6 +757,85 @@ export default function WorkItemDetailPage() {
                   </div>
                 </div>
               )}
+
+              {(currentPlan.workstreams.length > 0 || currentPlan.gates.length > 0) && (
+                <div className="mt-4 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Cycle workstreams</div>
+                    <div className="mt-3 space-y-2">
+                      {currentPlan.workstreams.map((workstream) => (
+                        <div key={workstream.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-medium text-white">{workstream.title}</div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                {workstream.laneLabel} · {workstream.type.replace(/_/g, " ")}
+                              </div>
+                            </div>
+                            {workstream.preferredAgentName && (
+                              <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                                {workstream.preferredAgentName}
+                              </span>
+                            )}
+                          </div>
+                          {workstream.description && (
+                            <div className="mt-2 text-xs leading-5 text-slate-400">{workstream.description}</div>
+                          )}
+                          <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
+                            <span>{workstream.taskIds.length} tasks</span>
+                            {workstream.dependsOn.length > 0 && <span>Depends on {workstream.dependsOn.join(", ")}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Cycle gates</div>
+                    <div className="mt-3 space-y-2">
+                      {currentPlan.gates.length > 0 ? currentPlan.gates.map((gate) => {
+                        const reviewSignal = review.signals.find((signal) => {
+                          if (gate.type === "validation") return signal.label === "Validation";
+                          if (gate.type === "qa_scenario") return signal.label === "Browser Scenario";
+                          if (gate.type === "audit") return signal.label === "Audit";
+                          return false;
+                        });
+                        return (
+                          <div key={gate.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <div className="text-sm font-medium text-white">{gate.label}</div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  {gate.type.replace(/_/g, " ")} · {gate.required ? "required" : "optional"}
+                                </div>
+                              </div>
+                              <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${gateStatusClassName(
+                                reviewSignal?.status === "passed"
+                                  ? "passed"
+                                  : reviewSignal?.status === "failed"
+                                    ? "failed"
+                                    : reviewSignal?.status === "blocked"
+                                      ? "blocked"
+                                      : reviewSignal?.status === "pending"
+                                        ? "pending"
+                                        : "missing"
+                              )}`}>
+                                {reviewSignal?.status ?? "missing"}
+                              </span>
+                            </div>
+                            <div className="mt-2 text-xs leading-5 text-slate-400">
+                              {reviewSignal?.summary ?? "No gate evidence has been recorded yet."}
+                            </div>
+                          </div>
+                        );
+                      }) : (
+                        <div className="rounded-xl border border-dashed border-slate-700 px-3 py-4 text-xs text-slate-500">
+                          No explicit cycle gates were planned.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -792,13 +931,8 @@ export default function WorkItemDetailPage() {
                       <div>
                         <div className="text-sm font-medium text-white">{lane.laneLabel}</div>
                         <div className="mt-1 text-xs text-slate-500">
-                          {lane.owner?.name ?? lane.ownerMatch?.name ?? "No agent matched"}
-                          {(lane.owner?.profile?.specialization ?? lane.ownerMatch?.specialization)
-                            ? ` · ${lane.owner?.profile?.specialization ?? lane.ownerMatch?.specialization}`
-                            : ""}
-                          {(lane.owner?.profile?.seniority ?? lane.ownerMatch?.seniority)
-                            ? ` · ${lane.owner?.profile?.seniority ?? lane.ownerMatch?.seniority}`
-                            : ""}
+                          {lane.ownerAgentName ?? "No specialist matched"}
+                          {lane.ownerAgentId ? ` · ${lane.ownerAgentId}` : ""}
                         </div>
                       </div>
                       <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${laneRuntimeClassName(lane.status)}`}>
@@ -806,28 +940,12 @@ export default function WorkItemDetailPage() {
                       </span>
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                      <span>{lane.plannedTaskCount} planned</span>
-                      <span>{lane.runtimeTaskCount} queued</span>
-                      <span>{lane.succeededTaskCount} done</span>
+                      <span>{lane.workstreamIds.length} workstreams</span>
+                      {lane.activeWorkstreamId && <span>Active {lane.activeWorkstreamId}</span>}
                     </div>
-                    {lane.activeTaskTitle && (
+                    {lane.activeWorkstreamId && (
                       <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 text-sm text-slate-200">
-                        Focus: {lane.activeTaskTitle}
-                      </div>
-                    )}
-                    {lane.dependsOnLanes.length > 0 && (
-                      <div className="mt-3 text-xs text-slate-500">
-                        Depends on {lane.dependsOnLanes.join(", ")}
-                      </div>
-                    )}
-                    {lane.waitingOn && lane.waitingOn.length > 0 && (
-                      <div className="mt-3 rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs text-cyan-100">
-                        Waiting on {lane.waitingOn.join(", ")}
-                      </div>
-                    )}
-                    {lane.blockedBy && lane.blockedBy.length > 0 && (
-                      <div className="mt-3 rounded-xl border border-fuchsia-400/20 bg-fuchsia-400/10 px-3 py-2 text-xs text-fuchsia-100">
-                        Blocked by {lane.blockedBy.join(", ")}
+                        Focus: {lane.activeWorkstreamId}
                       </div>
                     )}
                     {lane.summary && (
@@ -1005,6 +1123,209 @@ export default function WorkItemDetailPage() {
                     </div>
                   ))}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {optimization && optimization.cycles.length > 0 && (
+            <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Optimization</div>
+                  <div className="mt-2 text-lg font-medium text-white">Execution-backed prompt, strategy, and follow-up suggestions</div>
+                  <div className="mt-2 text-sm leading-6 text-slate-400">
+                    Generated only from completed cycle evidence, review signals, and browser / validation outcomes.
+                  </div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {[
+                    { label: "Prompt suggestions", value: optimization.cycles.reduce((total, cycle) => total + cycle.promptSuggestions.filter((entry) => entry.status === "pending").length, 0) },
+                    { label: "Strategies", value: optimization.cycles.reduce((total, cycle) => total + (cycle.strategyRecommendation?.status === "pending" ? 1 : 0), 0) },
+                    { label: "Opportunities", value: optimization.cycles.reduce((total, cycle) => total + cycle.opportunities.filter((entry) => entry.status === "pending").length, 0) }
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-3 text-center">
+                      <div className="text-lg font-semibold text-white">{item.value}</div>
+                      <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-slate-500">{item.label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-4">
+                {optimization.cycles.map((cycle) => (
+                  <div key={cycle.id} className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-white">
+                          Cycle {cycle.sequence} · {cycle.sourceStatus.replace(/_/g, " ")}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          Generated {new Date(cycle.createdAt).toLocaleString()}
+                        </div>
+                      </div>
+                      <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${optimizationStatusClassName(cycle.sourceStatus === "approved" ? "approved" : "pending")}`}>
+                        {cycle.sourceStatus}
+                      </span>
+                    </div>
+
+                    {cycle.promptSuggestions.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Prompt suggestions</div>
+                        {cycle.promptSuggestions.map((suggestion) => (
+                          <div key={suggestion.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <div className="text-sm font-medium text-white">{suggestion.label}</div>
+                                <div className="mt-1 text-xs text-slate-500">{suggestion.promptPath}</div>
+                              </div>
+                              <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${optimizationStatusClassName(suggestion.status)}`}>
+                                {suggestion.status}
+                              </span>
+                            </div>
+                            <div className="mt-3 space-y-1 text-xs leading-5 text-slate-400">
+                              {suggestion.rationale.map((item) => (
+                                <div key={item}>• {item}</div>
+                              ))}
+                            </div>
+                            {suggestion.status === "pending" && (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => void submitOptimizationAction({
+                                    kind: "prompt",
+                                    action: "approve",
+                                    cycleId: cycle.id,
+                                    itemId: suggestion.id,
+                                    successTitle: "Prompt suggestion approved"
+                                  })}
+                                  className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-emerald-200"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => void submitOptimizationAction({
+                                    kind: "prompt",
+                                    action: "reject",
+                                    cycleId: cycle.id,
+                                    itemId: suggestion.id,
+                                    successTitle: "Prompt suggestion rejected"
+                                  })}
+                                  className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-200"
+                                >
+                                  Reject
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {cycle.strategyRecommendation && (
+                      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Strategy recommendation</div>
+                            <div className="mt-2 text-sm font-medium text-white">{cycle.strategyRecommendation.mode}</div>
+                          </div>
+                          <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${optimizationStatusClassName(cycle.strategyRecommendation.status)}`}>
+                            {cycle.strategyRecommendation.status}
+                          </span>
+                        </div>
+                        <div className="mt-3 space-y-1 text-xs leading-5 text-slate-400">
+                          {cycle.strategyRecommendation.rationale.map((item) => (
+                            <div key={item}>• {item}</div>
+                          ))}
+                        </div>
+                        {cycle.strategyRecommendation.status === "pending" && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              onClick={() => void submitOptimizationAction({
+                                kind: "strategy",
+                                action: "approve",
+                                cycleId: cycle.id,
+                                itemId: cycle.strategyRecommendation!.id,
+                                successTitle: "Workspace strategy updated"
+                              })}
+                              className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-emerald-200"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={() => void submitOptimizationAction({
+                                kind: "strategy",
+                                action: "reject",
+                                cycleId: cycle.id,
+                                itemId: cycle.strategyRecommendation!.id,
+                                successTitle: "Strategy recommendation rejected"
+                              })}
+                              className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-200"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {cycle.opportunities.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Follow-up opportunities</div>
+                        {cycle.opportunities.map((opportunity) => (
+                          <div key={opportunity.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <div className="text-sm font-medium text-white">{opportunity.title}</div>
+                                <div className="mt-1 text-xs text-slate-400">{opportunity.description}</div>
+                              </div>
+                              <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${optimizationStatusClassName(opportunity.status)}`}>
+                                {opportunity.status}
+                              </span>
+                            </div>
+                            <div className="mt-3 text-xs text-slate-500">Risk score {opportunity.riskScore.toFixed(2)}</div>
+                            {opportunity.status === "pending" && (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => void submitOptimizationAction({
+                                    kind: "opportunity",
+                                    action: "convert",
+                                    cycleId: cycle.id,
+                                    itemId: opportunity.id,
+                                    successTitle: "Draft work item created"
+                                  })}
+                                  className="rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-cyan-200"
+                                >
+                                  Convert to draft
+                                </button>
+                                <button
+                                  onClick={() => void submitOptimizationAction({
+                                    kind: "opportunity",
+                                    action: "reject",
+                                    cycleId: cycle.id,
+                                    itemId: opportunity.id,
+                                    successTitle: "Opportunity rejected"
+                                  })}
+                                  className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-200"
+                                >
+                                  Reject
+                                </button>
+                              </div>
+                            )}
+                            {opportunity.convertedWorkItemId && (
+                              <div className="mt-3">
+                                <Link
+                                  href={`/work/${opportunity.convertedWorkItemId}?workspace=${encodeURIComponent(workItem.workspaceId)}`}
+                                  className="inline-flex rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-200"
+                                >
+                                  Open derived work item
+                                </Link>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           )}

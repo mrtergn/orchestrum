@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type express from "express";
 import {
+  approvePromptSuggestion,
+  loadStrategyState,
+  rejectPromptSuggestion,
+  saveStrategyState,
   loadWorkspaces,
   normalizeWorkItemStatus,
   readJsonIfExists,
@@ -13,7 +17,14 @@ import {
   type WorkItemCycleRecord,
   type WorkItemCyclePlan,
   type WorkItemExecutionMode,
+  type WorkItemGate,
+  type WorkItemGateRuntime,
   type WorkItemImportSkip,
+  type WorkItemOptimizationCycle,
+  type WorkItemOptimizationOpportunity,
+  type WorkItemOptimizationPromptSuggestion,
+  type WorkItemOptimizationStrategyRecommendation,
+  type WorkItemOptimizationSummary,
   type WorkSprintBurndownPoint,
   type WorkSprintControl,
   type WorkSprintControlAction,
@@ -51,8 +62,17 @@ import {
   type WorkItemReviewSummary,
   type WorkItemSourceType,
   type WorkItemStatus,
+  type WorkItemTeamRuntime,
+  type WorkItemWorkstream,
+  type WorkItemWorkstreamStatus,
+  type WorkWorkspaceOptimizationSummary,
   type WorkPlanTask
 } from "@orchestrum/core";
+import {
+  buildWorkspaceOptimizationSummary,
+  generateWorkItemOptimizationCycle,
+  upsertWorkItemOptimizationSummary
+} from "../work/optimization.js";
 import {
   applyRemediationPlanToPlanningDetail,
   buildWorkItemPlanningDetail,
@@ -90,6 +110,11 @@ type WorkAgentPlatform = {
     linkedRunId?: string;
     verdict?: string | null;
     resultSummary?: string;
+    plannerTaskId?: string;
+    assignedToAgentId?: string;
+    workstreamId?: string | null;
+    workstreamType?: string | null;
+    qaMode?: "smoke" | "scenario" | null;
     waitingOnTaskIds?: string[];
     blockedByTaskIds?: string[];
   }>;
@@ -113,8 +138,13 @@ type IndexedTaskLike = {
   linkedWorkItemId?: string;
   status: string;
   type?: string;
+  plannerTaskId?: string;
+  assignedToAgentId?: string;
   laneId?: string;
   laneLabel?: string;
+  workstreamId?: string | null;
+  workstreamType?: string | null;
+  qaMode?: "smoke" | "scenario" | null;
   linkedRunId?: string;
   verdict?: string | null;
   resultSummary?: string;
@@ -200,7 +230,10 @@ export function registerWorkIntakeRoutes(
       stateIndex: options.stateIndex,
       agentPlatform: options.agentPlatform
     });
-    return res.json({ workItems });
+    return res.json({
+      workItems,
+      optimizationSummary: buildWorkspaceOptimizationSummary(workItems)
+    });
   };
 
   const createWorkItemHandler = async (req: express.Request, res: express.Response) => {
@@ -248,6 +281,7 @@ export function registerWorkIntakeRoutes(
       currentCycleId: null,
       cycles: [],
       remediationPlan: null,
+      optimization: null,
       createdAt: now,
       updatedAt: now,
       lastStartedAt: null
@@ -819,11 +853,19 @@ export function registerWorkIntakeRoutes(
       runByKey
     });
     const currentPlan = resolveCurrentCyclePlan(found.workItem, detail);
+    const teamRuntime = buildWorkItemTeamRuntime({
+      workItem: found.workItem,
+      detail,
+      currentPlan,
+      relatedTasks
+    });
     return res.json({
       workItem: found.workItem,
       detail,
       currentPlan,
-      review
+      review,
+      optimization: found.workItem.optimization ?? null,
+      teamRuntime
     });
   };
 
@@ -970,6 +1012,18 @@ export function registerWorkIntakeRoutes(
       remediationPlan,
       updatedAt: now
     };
+    const optimizationCycle = await generateWorkItemOptimizationCycle({
+      workspacePath: found.workspacePath,
+      runsDir: options.runsDir,
+      workItem: updatedWorkItem,
+      detail,
+      review: reviewBeforeDecision,
+      relatedTasks,
+      sourceStatus: decision === "approve" ? "approved" : "changes_requested"
+    }).catch(() => null);
+    if (optimizationCycle) {
+      updatedWorkItem.optimization = upsertWorkItemOptimizationSummary(updatedWorkItem.optimization, optimizationCycle);
+    }
     found.workItems[found.index] = updatedWorkItem;
     await saveWorkItemsForWorkspacePath(found.workspacePath, found.workItems);
     rebuildStateIndex();
@@ -1002,6 +1056,137 @@ export function registerWorkIntakeRoutes(
       ok: true,
       workItem: hydratedUpdated,
       review
+    });
+  };
+
+  const optimizeWorkItemHandler = async (req: express.Request, res: express.Response) => {
+    const workspaceId = typeof req.body?.workspaceId === "string"
+      ? req.body.workspaceId
+      : typeof req.query.workspace === "string"
+        ? req.query.workspace
+        : undefined;
+    const found = await findRawWorkItemById({
+      id: String(req.params.id ?? ""),
+      rootDir: options.rootDir,
+      listWorkspacePaths: options.listWorkspacePaths,
+      workspaceId,
+      resolveWorkspacePath: options.resolveWorkspacePath
+    });
+    if (!found) return res.status(404).json({ ok: false, error: "Work item not found" });
+
+    const workspacePath = await options.resolveWorkspacePath(found.workItem.workspaceId);
+    if (!workspacePath) return res.status(404).json({ ok: false, error: "Workspace not found" });
+
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+    const kind = typeof body.kind === "string" ? body.kind.trim().toLowerCase() : "";
+    const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
+    const cycleId = typeof body.cycleId === "string" && body.cycleId.trim() ? body.cycleId.trim() : "";
+    const itemId = typeof body.itemId === "string" && body.itemId.trim() ? body.itemId.trim() : "";
+
+    const optimization = found.workItem.optimization;
+    if (!optimization) {
+      return res.status(404).json({ ok: false, error: "No optimization history is recorded for this work item yet." });
+    }
+
+    const cycle = optimization.cycles.find((entry) => entry.id === cycleId || entry.cycleId === cycleId) ?? null;
+    if (!cycle) {
+      return res.status(404).json({ ok: false, error: "Optimization cycle not found" });
+    }
+
+    const now = new Date().toISOString();
+    let createdWorkItem: WorkItemRecord | null = null;
+    const updatedCurrentWorkItem: WorkItemRecord = {
+      ...found.workItem,
+      optimization,
+      updatedAt: now
+    };
+
+    if (kind === "prompt") {
+      const suggestion = cycle.promptSuggestions.find((entry) => entry.id === itemId) ?? null;
+      if (!suggestion || !suggestion.suggestionId) {
+        return res.status(404).json({ ok: false, error: "Prompt suggestion not found" });
+      }
+      if (action === "approve") {
+        await approvePromptSuggestion({
+          workspacePath,
+          promptPath: suggestion.promptPath,
+          suggestionId: suggestion.suggestionId
+        });
+        suggestion.status = "approved";
+      } else if (action === "reject") {
+        await rejectPromptSuggestion({
+          workspacePath,
+          promptPath: suggestion.promptPath,
+          suggestionId: suggestion.suggestionId
+        });
+        suggestion.status = "rejected";
+      } else {
+        return res.status(400).json({ ok: false, error: "Unsupported prompt optimization action" });
+      }
+    } else if (kind === "strategy") {
+      const recommendation = cycle.strategyRecommendation;
+      if (!recommendation || recommendation.id !== itemId) {
+        return res.status(404).json({ ok: false, error: "Strategy recommendation not found" });
+      }
+      if (action === "approve") {
+        const state = await loadStrategyState(workspacePath).catch(() => ({}));
+        await saveStrategyState(workspacePath, {
+          ...state,
+          recommendedMode: recommendation.mode,
+          recommendedAt: now
+        });
+        recommendation.status = "approved";
+      } else if (action === "reject") {
+        recommendation.status = "rejected";
+      } else {
+        return res.status(400).json({ ok: false, error: "Unsupported strategy optimization action" });
+      }
+    } else if (kind === "opportunity") {
+      const opportunity = cycle.opportunities.find((entry) => entry.id === itemId) ?? null;
+      if (!opportunity) {
+        return res.status(404).json({ ok: false, error: "Opportunity not found" });
+      }
+      if (action === "convert") {
+        createdWorkItem = createDerivedOpportunityWorkItem({
+          sourceWorkItem: found.workItem,
+          opportunity,
+          now
+        });
+        opportunity.status = "converted";
+        opportunity.convertedWorkItemId = createdWorkItem.id;
+      } else if (action === "reject") {
+        opportunity.status = "rejected";
+      } else {
+        return res.status(400).json({ ok: false, error: "Unsupported opportunity optimization action" });
+      }
+    } else {
+      return res.status(400).json({ ok: false, error: "Optimization kind must be prompt, strategy, or opportunity" });
+    }
+
+    found.workItems[found.index] = updatedCurrentWorkItem;
+    if (createdWorkItem) {
+      found.workItems.unshift(createdWorkItem);
+    }
+    await saveWorkItemsForWorkspacePath(found.workspacePath, found.workItems);
+    rebuildStateIndex();
+    await appendWorkspaceSignal(found.workspacePath, {
+      workspaceId: found.workItem.workspaceId,
+      source: "work",
+      type: `work-item.optimization.${kind}.${action}`,
+      entityId: found.workItem.id,
+      status: "completed",
+      summary: `Optimization ${kind} ${action} recorded`,
+      payload: {
+        workItemId: found.workItem.id,
+        cycleId: cycle.id,
+        itemId,
+        createdWorkItemId: createdWorkItem?.id ?? null
+      }
+    }).catch(() => undefined);
+    return res.json({
+      ok: true,
+      workItem: updatedCurrentWorkItem,
+      createdWorkItem
     });
   };
 
@@ -1047,6 +1232,9 @@ export function registerWorkIntakeRoutes(
   }
   for (const route of ["/work-items/:id/review", "/api/work-items/:id/review"] as const) {
     app.post(route, reviewWorkItemHandler);
+  }
+  for (const route of ["/work-items/:id/optimization", "/api/work-items/:id/optimization"] as const) {
+    app.post(route, optimizeWorkItemHandler);
   }
 }
 
@@ -2292,6 +2480,7 @@ async function importSprintPreviewPbis(options: {
       currentCycleId: null,
       cycles: [],
       remediationPlan: null,
+      optimization: null,
       createdAt: now,
       updatedAt: now,
       lastStartedAt: null
@@ -2494,6 +2683,12 @@ async function startRawWorkItemExecution(options: {
           remediationPlan: options.found.workItem.remediationPlan
         })
       : planningDetail;
+  const strategyState = await loadStrategyState(workspacePath).catch(() => null);
+  const resolvedStrategyMode =
+    options.startOptions?.strategyMode ??
+    (typeof strategyState?.recommendedMode === "string" && strategyState.recommendedMode.trim()
+      ? strategyState.recommendedMode.trim()
+      : undefined);
   const nextCycleSequence = Math.max(1, (options.found.workItem.cycles?.length ?? 0) + 1);
   const cyclePlan = createWorkItemCyclePlan({
     detail: executionDetail,
@@ -2530,7 +2725,7 @@ async function startRawWorkItemExecution(options: {
       runOptions: {
         concurrency: options.startOptions?.concurrency,
         modelOverrides: options.startOptions?.modelOverrides,
-        strategyMode: options.startOptions?.strategyMode
+        strategyMode: resolvedStrategyMode
       }
     });
     result = {
@@ -2724,6 +2919,7 @@ function normalizeWorkItemRecord(value: unknown): WorkItemRecord {
     currentCycleId: typeof raw.currentCycleId === "string" && raw.currentCycleId.trim() ? raw.currentCycleId : null,
     cycles: normalizeWorkItemCycles(raw.cycles),
     remediationPlan: normalizeRemediationPlan(raw.remediationPlan),
+    optimization: normalizeOptimizationSummary(raw.optimization),
     createdAt: typeof raw.createdAt === "string" && raw.createdAt ? raw.createdAt : new Date(0).toISOString(),
     updatedAt: typeof raw.updatedAt === "string" && raw.updatedAt ? raw.updatedAt : new Date(0).toISOString(),
     lastStartedAt: typeof raw.lastStartedAt === "string" && raw.lastStartedAt.trim() ? raw.lastStartedAt : null
@@ -2745,7 +2941,7 @@ function hydrateWorkItem(
     ? relatedTasks.map((task) => task.id)
     : workItem.linkedTaskIds ?? [];
   const linkedTaskStatus = deriveLinkedTaskStatus(relatedTasks, workItem.linkedTaskStatus ?? null);
-  const derivedStatus = deriveWorkItemStatus(workItem, linkedRunStatus, linkedTaskStatus, relatedTasks.length);
+  const derivedStatus = deriveWorkItemStatus(workItem, linkedRunStatus, linkedTaskStatus, relatedTasks);
   return {
     ...workItem,
     status: derivedStatus,
@@ -2761,29 +2957,32 @@ function deriveWorkItemStatus(
   workItem: WorkItemRecord,
   linkedRunStatus: string | null,
   linkedTaskStatus: string | null,
-  linkedTaskCount: number
+  relatedTasks: IndexedTaskLike[]
 ): WorkItemStatus {
   if (workItem.reviewStatus === "approved") return "completed";
   if (workItem.reviewStatus === "changes_requested") return "blocked";
   if (workItem.status === "completed") return "completed";
-  if ((workItem.executionMode === "task_graph" || linkedTaskCount > 0) && linkedTaskStatus) {
-    switch (linkedTaskStatus) {
-      case "running":
-      case "queued":
-      case "active":
-        return "running";
-      case "paused":
-      case "blocked":
-        return "blocked";
-      case "succeeded":
-      case "completed":
+  if ((workItem.executionMode === "task_graph" || relatedTasks.length > 0) && linkedTaskStatus) {
+    const currentPlan = resolveStoredCyclePlan(workItem);
+    const gateRuntime = currentPlan ? buildGateRuntime(currentPlan, relatedTasks) : [];
+    if (linkedTaskStatus === "failed" || linkedTaskStatus === "cancelled" || linkedTaskStatus === "canceled") {
+      return "failed";
+    }
+    if (linkedTaskStatus === "paused" || linkedTaskStatus === "blocked") {
+      return "blocked";
+    }
+    if (linkedTaskStatus === "running" || linkedTaskStatus === "queued" || linkedTaskStatus === "active") {
+      return "running";
+    }
+    if (linkedTaskStatus === "succeeded" || linkedTaskStatus === "completed") {
+      const requiredGates = gateRuntime.filter((gate) => gate.required);
+      if (requiredGates.length === 0 || requiredGates.every((gate) => gate.status === "passed" || gate.status === "skipped")) {
         return "ready_for_review";
-      case "failed":
-      case "cancelled":
-      case "canceled":
+      }
+      if (requiredGates.some((gate) => gate.status === "failed")) {
         return "failed";
-      default:
-        break;
+      }
+      return "blocked";
     }
   }
   const normalized = (linkedRunStatus ?? "").trim().toLowerCase();
@@ -2994,13 +3193,15 @@ function normalizeRemediationPlan(value: unknown): WorkItemRemediationPlan | nul
       source: "remediation",
       sourceCycleId: typeof raw.sourceCycleId === "string" && raw.sourceCycleId.trim() ? raw.sourceCycleId : null,
       sourceRemediationPlanId: typeof raw.id === "string" && raw.id.trim() ? raw.id : null,
-      acceptanceCriteria: normalizeStringArray(raw.acceptanceDelta),
-      constraints: normalizeStringArray(raw.constraintDelta),
-      lanes: derivePlanLanesFromTasks(tasks),
-      tasks,
-      teamAssignments: [],
-      executionSteps: normalizeExecutionSteps(raw.executionSteps)
-    }
+    acceptanceCriteria: normalizeStringArray(raw.acceptanceDelta),
+    constraints: normalizeStringArray(raw.constraintDelta),
+    lanes: derivePlanLanesFromTasks(tasks),
+    tasks,
+    workstreams: [],
+    gates: [],
+    teamAssignments: [],
+    executionSteps: normalizeExecutionSteps(raw.executionSteps)
+  }
   };
 }
 
@@ -3027,6 +3228,8 @@ function normalizeCyclePlan(value: unknown): WorkItemCyclePlan | null {
     constraints: normalizeStringArray(raw.constraints),
     lanes: normalizePlanningLanes(raw.lanes, tasks),
     tasks,
+    workstreams: normalizeWorkstreams(raw.workstreams),
+    gates: normalizeGates(raw.gates),
     teamAssignments: normalizeLaneAssignments(raw.teamAssignments),
     executionSteps: normalizeExecutionSteps(raw.executionSteps)
   };
@@ -3059,8 +3262,222 @@ function normalizePlanningTask(value: unknown): WorkPlanTask | null {
     kind,
     source,
     dependsOn: normalizeStringArray(raw.dependsOn),
-    sourceLine: typeof raw.sourceLine === "number" ? raw.sourceLine : null
+    sourceLine: typeof raw.sourceLine === "number" ? raw.sourceLine : null,
+    workstreamId: typeof raw.workstreamId === "string" && raw.workstreamId.trim() ? raw.workstreamId.trim() : null,
+    workstreamType: normalizeWorkstreamType(raw.workstreamType),
+    gateIds: normalizeStringArray(raw.gateIds),
+    qaMode:
+      typeof raw.qaMode === "string" && (raw.qaMode === "smoke" || raw.qaMode === "scenario")
+        ? raw.qaMode
+        : null
   };
+}
+
+function normalizeWorkstreamType(value: unknown): WorkItemWorkstream["type"] | null {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  switch (normalized) {
+    case "plan":
+    case "implement":
+    case "integrate":
+    case "validate":
+    case "qa_smoke":
+    case "qa_scenario":
+    case "audit":
+      return normalized;
+    default:
+      return null;
+  }
+}
+
+function normalizeGateType(value: unknown): WorkItemGate["type"] | null {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  switch (normalized) {
+    case "validation":
+    case "qa_scenario":
+    case "audit":
+    case "delivery":
+      return normalized;
+    default:
+      return null;
+  }
+}
+
+function normalizeOptimizationSummary(value: unknown): WorkItemOptimizationSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.cycles)) return { cycles: [] };
+  const cycles = raw.cycles
+    .map((entry) => normalizeOptimizationCycle(entry))
+    .filter((entry): entry is WorkItemOptimizationCycle => entry !== null);
+  return { cycles };
+}
+
+function normalizeOptimizationCycle(value: unknown): WorkItemOptimizationCycle | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const sourceStatus =
+    raw.sourceStatus === "approved" || raw.sourceStatus === "changes_requested" || raw.sourceStatus === "failed"
+      ? raw.sourceStatus
+      : "approved";
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : crypto.randomUUID(),
+    cycleId: typeof raw.cycleId === "string" && raw.cycleId.trim() ? raw.cycleId.trim() : "",
+    sequence: typeof raw.sequence === "number" && raw.sequence > 0 ? Math.floor(raw.sequence) : 1,
+    sourceStatus,
+    createdAt: typeof raw.createdAt === "string" && raw.createdAt.trim() ? raw.createdAt : new Date(0).toISOString(),
+    promptSuggestions: Array.isArray(raw.promptSuggestions)
+      ? raw.promptSuggestions
+          .map((entry) => normalizeOptimizationPromptSuggestion(entry))
+          .filter((entry): entry is WorkItemOptimizationPromptSuggestion => entry !== null)
+      : [],
+    strategyRecommendation: normalizeOptimizationStrategyRecommendation(raw.strategyRecommendation),
+    opportunities: Array.isArray(raw.opportunities)
+      ? raw.opportunities
+          .map((entry) => normalizeOptimizationOpportunity(entry))
+          .filter((entry): entry is WorkItemOptimizationOpportunity => entry !== null)
+      : []
+  };
+}
+
+function normalizeOptimizationPromptSuggestion(value: unknown): WorkItemOptimizationPromptSuggestion | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const promptPath = typeof raw.promptPath === "string" && raw.promptPath.trim() ? raw.promptPath.trim() : "";
+  if (!promptPath) return null;
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : crypto.randomUUID(),
+    promptPath,
+    label: typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : path.basename(promptPath),
+    status: normalizeOptimizationStatus(raw.status),
+    createdAt: typeof raw.createdAt === "string" && raw.createdAt.trim() ? raw.createdAt : new Date(0).toISOString(),
+    score: typeof raw.score === "number" ? raw.score : 0,
+    rationale: normalizeStringArray(raw.rationale),
+    suggestionId:
+      typeof raw.suggestionId === "string" && raw.suggestionId.trim()
+        ? raw.suggestionId.trim()
+        : null
+  };
+}
+
+function normalizeOptimizationStrategyRecommendation(value: unknown): WorkItemOptimizationStrategyRecommendation | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const mode = typeof raw.mode === "string" && raw.mode.trim() ? raw.mode.trim() : "";
+  if (!mode) return null;
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : crypto.randomUUID(),
+    mode,
+    status: normalizeOptimizationStatus(raw.status),
+    createdAt: typeof raw.createdAt === "string" && raw.createdAt.trim() ? raw.createdAt : new Date(0).toISOString(),
+    rationale: normalizeStringArray(raw.rationale)
+  };
+}
+
+function normalizeOptimizationOpportunity(value: unknown): WorkItemOptimizationOpportunity | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : "";
+  const description = typeof raw.description === "string" && raw.description.trim() ? raw.description.trim() : "";
+  if (!title || !description) return null;
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : crypto.randomUUID(),
+    title,
+    description,
+    status: normalizeOptimizationStatus(raw.status),
+    createdAt: typeof raw.createdAt === "string" && raw.createdAt.trim() ? raw.createdAt : new Date(0).toISOString(),
+    rationale: normalizeStringArray(raw.rationale),
+    riskScore: typeof raw.riskScore === "number" ? raw.riskScore : 0,
+    convertedWorkItemId:
+      typeof raw.convertedWorkItemId === "string" && raw.convertedWorkItemId.trim()
+        ? raw.convertedWorkItemId.trim()
+        : null
+  };
+}
+
+function normalizeOptimizationStatus(value: unknown): "pending" | "approved" | "rejected" | "converted" {
+  switch (typeof value === "string" ? value.trim().toLowerCase() : "") {
+    case "approved":
+      return "approved";
+    case "rejected":
+      return "rejected";
+    case "converted":
+      return "converted";
+    default:
+      return "pending";
+  }
+}
+
+function normalizeWorkstreams(value: unknown): Array<{
+  id: string;
+  type: NonNullable<WorkItemCyclePlan["workstreams"]>[number]["type"];
+  title: string;
+  description?: string | null;
+  laneId: string;
+  laneLabel: string;
+  taskIds: string[];
+  dependsOn: string[];
+  gateIds: string[];
+  preferredAgentId?: string | null;
+  preferredAgentName?: string | null;
+}> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const raw = entry as Record<string, unknown>;
+      const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "";
+      const laneId = typeof raw.laneId === "string" && raw.laneId.trim() ? raw.laneId.trim() : "";
+      const laneLabel = typeof raw.laneLabel === "string" && raw.laneLabel.trim() ? raw.laneLabel.trim() : laneId;
+      const type = normalizeWorkstreamType(raw.type);
+      if (!id || !laneId || !laneLabel || !type) return null;
+      return {
+        id,
+        type,
+        title: typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : id,
+        description: typeof raw.description === "string" && raw.description.trim() ? raw.description.trim() : null,
+        laneId,
+        laneLabel,
+        taskIds: normalizeStringArray(raw.taskIds),
+        dependsOn: normalizeStringArray(raw.dependsOn),
+        gateIds: normalizeStringArray(raw.gateIds),
+        preferredAgentId:
+          typeof raw.preferredAgentId === "string" && raw.preferredAgentId.trim()
+            ? raw.preferredAgentId.trim()
+            : null,
+        preferredAgentName:
+          typeof raw.preferredAgentName === "string" && raw.preferredAgentName.trim()
+            ? raw.preferredAgentName.trim()
+            : null
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+}
+
+function normalizeGates(value: unknown): Array<{
+  id: string;
+  type: NonNullable<WorkItemCyclePlan["gates"]>[number]["type"];
+  label: string;
+  required: boolean;
+  workstreamIds: string[];
+}> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const raw = entry as Record<string, unknown>;
+      const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "";
+      const type = normalizeGateType(raw.type);
+      const label = typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : "";
+      if (!id || !type || !label) return null;
+      return {
+        id,
+        type,
+        label,
+        required: raw.required !== false,
+        workstreamIds: normalizeStringArray(raw.workstreamIds)
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 }
 
 function normalizePlanningLanes(value: unknown, tasks: WorkPlanTask[]): Array<{ id: string; label: string; description?: string }> {
@@ -3270,6 +3687,48 @@ function createWorkItemCycle(options: {
   };
 }
 
+function createDerivedOpportunityWorkItem(options: {
+  sourceWorkItem: WorkItemRecord;
+  opportunity: WorkItemOptimizationOpportunity;
+  now: string;
+}): WorkItemRecord {
+  return {
+    id: crypto.randomUUID(),
+    workspaceId: options.sourceWorkItem.workspaceId,
+    brief: {
+      workspaceId: options.sourceWorkItem.workspaceId,
+      sourceType: "feature",
+      title: options.opportunity.title,
+      request: [
+        options.opportunity.description.trim(),
+        "",
+        `Derived from work item ${options.sourceWorkItem.id} (${options.sourceWorkItem.brief.title}).`
+      ].join("\n"),
+      sourceRef: `opportunity:${options.sourceWorkItem.id}:${options.opportunity.id}`,
+      acceptanceCriteria: [],
+      constraints: []
+    },
+    status: "draft",
+    recommendedTemplateId: "feature-dev",
+    executionMode: null,
+    linkedRunId: null,
+    linkedRunStatus: null,
+    linkedRunVerdict: null,
+    linkedTaskIds: [],
+    linkedTaskStatus: null,
+    reviewStatus: "pending",
+    reviewNote: null,
+    reviewedAt: null,
+    currentCycleId: null,
+    cycles: [],
+    remediationPlan: null,
+    optimization: null,
+    createdAt: options.now,
+    updatedAt: options.now,
+    lastStartedAt: null
+  };
+}
+
 function closeCurrentCycle(workItem: WorkItemRecord, currentStatus: WorkItemStatus, at: string): WorkItemRecord {
   if (!workItem.currentCycleId || !Array.isArray(workItem.cycles) || workItem.cycles.length === 0) {
     return workItem;
@@ -3362,12 +3821,218 @@ function resolveCurrentCyclePlan(
   });
 }
 
+function resolveStoredCyclePlan(workItem: WorkItemRecord): WorkItemCyclePlan | null {
+  const activeCycle = (workItem.cycles ?? []).find((cycle) => cycle.id === workItem.currentCycleId);
+  if (activeCycle?.plan) return activeCycle.plan;
+  if (workItem.reviewStatus === "changes_requested" && workItem.remediationPlan?.cyclePlan) {
+    return workItem.remediationPlan.cyclePlan;
+  }
+  return null;
+}
+
+function buildWorkstreamRuntime(
+  plan: WorkItemCyclePlan | null,
+  relatedTasks: IndexedTaskLike[]
+): Array<{
+  workstream: WorkItemWorkstream;
+  status: WorkItemWorkstreamStatus;
+  tasks: IndexedTaskLike[];
+}> {
+  if (!plan) return [];
+  const taskIdsByWorkstream = new Map<string, string[]>(plan.workstreams.map((stream) => [stream.id, stream.taskIds]));
+  const runtimeByWorkstream = new Map<string, IndexedTaskLike[]>();
+  const plannerTaskById = new Map(plan.tasks.map((task) => [task.id, task]));
+  for (const task of relatedTasks) {
+    const runtimeWorkstreamId =
+      task.workstreamId ??
+      (task.plannerTaskId ? plannerTaskById.get(task.plannerTaskId)?.workstreamId ?? null : null);
+    if (!runtimeWorkstreamId) continue;
+    const bucket = runtimeByWorkstream.get(runtimeWorkstreamId) ?? [];
+    bucket.push(task);
+    runtimeByWorkstream.set(runtimeWorkstreamId, bucket);
+  }
+
+  return plan.workstreams.map((workstream) => {
+    const tasks = runtimeByWorkstream.get(workstream.id) ?? [];
+    let status: WorkItemWorkstreamStatus = "planned";
+    if (tasks.some((task) => {
+      const normalized = task.status.trim().toLowerCase();
+      return normalized === "failed" || normalized === "cancelled" || normalized === "canceled";
+    })) {
+      status = "failed";
+    } else if (tasks.some((task) => {
+      const normalized = task.status.trim().toLowerCase();
+      return normalized === "blocked" || normalized === "paused";
+    })) {
+      status = "blocked";
+    } else if (tasks.some((task) => {
+      const normalized = task.status.trim().toLowerCase();
+      return normalized === "running" || normalized === "active";
+    })) {
+      status = "running";
+    } else if (tasks.some((task) => task.status.trim().toLowerCase() === "queued")) {
+      status = "queued";
+    } else if (
+      tasks.length > 0 &&
+      tasks.every((task) => {
+        const normalized = task.status.trim().toLowerCase();
+        return normalized === "succeeded" || normalized === "completed";
+      })
+    ) {
+      status = "succeeded";
+    } else if ((taskIdsByWorkstream.get(workstream.id) ?? []).length > 0) {
+      status = "planned";
+    }
+    return {
+      workstream,
+      status,
+      tasks
+    };
+  });
+}
+
+function buildGateRuntime(plan: WorkItemCyclePlan | null, relatedTasks: IndexedTaskLike[]): WorkItemGateRuntime[] {
+  if (!plan) return [];
+  const workstreamRuntime = buildWorkstreamRuntime(plan, relatedTasks);
+  const runtimeByWorkstream = new Map(workstreamRuntime.map((entry) => [entry.workstream.id, entry]));
+  return plan.gates.map((gate) => {
+    const streams = gate.workstreamIds
+      .map((id) => runtimeByWorkstream.get(id))
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+    const gateTasks = streams.flatMap((entry) => entry.tasks);
+    let status: WorkItemGateRuntime["status"] = "pending";
+    if (streams.length === 0 || gateTasks.length === 0) {
+      status = "pending";
+    } else if (streams.some((entry) => entry.status === "failed")) {
+      status = "failed";
+    } else if (streams.some((entry) => entry.status === "blocked")) {
+      status = "blocked";
+    } else if (streams.every((entry) => entry.status === "succeeded")) {
+      status = "passed";
+    }
+    return {
+      ...gate,
+      status,
+      summary:
+        status === "passed"
+          ? `${gate.label} passed.`
+          : status === "failed"
+            ? `${gate.label} failed.`
+          : status === "blocked"
+              ? `${gate.label} is blocked by upstream execution.`
+              : `${gate.label} is still pending evidence.`
+    };
+  });
+}
+
+function buildWorkItemTeamRuntime(options: {
+  workItem: WorkItemRecord;
+  detail: Awaited<ReturnType<typeof buildWorkItemPlanningDetail>>;
+  currentPlan: WorkItemCyclePlan | null;
+  relatedTasks: IndexedTaskLike[];
+}): WorkItemTeamRuntime | null {
+  const plan = options.currentPlan ?? resolveStoredCyclePlan(options.workItem);
+  if (!plan) return null;
+  const assignmentsByLane = new Map(options.detail.teamAssignments.map((assignment) => [assignment.laneId, assignment]));
+  const workstreamRuntime = buildWorkstreamRuntime(plan, options.relatedTasks);
+  if (workstreamRuntime.length === 0) return null;
+
+  const lanes = Array.from(new Set(plan.workstreams.map((stream) => stream.laneId))).map((laneId) => {
+    const workstreams = workstreamRuntime.filter((entry) => entry.workstream.laneId === laneId);
+    const assignment = assignmentsByLane.get(laneId);
+    const active = workstreams.find((entry) => entry.status === "running")
+      ?? workstreams.find((entry) => entry.status === "blocked")
+      ?? workstreams.find((entry) => entry.status === "queued")
+      ?? workstreams.find((entry) => entry.status === "planned")
+      ?? workstreams[0]
+      ?? null;
+    const status: WorkItemTeamRuntime["lanes"][number]["status"] =
+      assignment?.coverage === "missing"
+        ? "missing"
+        : workstreams.some((entry) => entry.status === "blocked" || entry.status === "failed")
+          ? "blocked"
+          : workstreams.some((entry) => entry.status === "running")
+            ? "running"
+            : workstreams.every((entry) => entry.status === "succeeded")
+              ? "succeeded"
+              : workstreams.some((entry) => entry.status === "queued")
+                ? "queued"
+                : "planned";
+    const preferredMatch = assignment?.matches[0] ?? null;
+    return {
+      laneId,
+      laneLabel: active?.workstream.laneLabel ?? assignment?.laneLabel ?? laneId,
+      workstreamIds: workstreams.map((entry) => entry.workstream.id),
+      activeWorkstreamId: active?.workstream.id ?? null,
+      status,
+      ownerAgentId: active?.workstream.preferredAgentId ?? preferredMatch?.id ?? null,
+      ownerAgentName: active?.workstream.preferredAgentName ?? preferredMatch?.name ?? null,
+      summary:
+        status === "running"
+          ? `${active?.workstream.title ?? "Workstream"} is executing now.`
+          : status === "blocked"
+            ? `${active?.workstream.title ?? "Workstream"} is blocked.`
+            : status === "succeeded"
+              ? `${active?.workstream.title ?? "Lane"} completed its current workstreams.`
+              : status === "queued"
+                ? `${active?.workstream.title ?? "Workstream"} is queued behind upstream dependencies.`
+                : assignment?.note ?? "Lane is planned but not active yet."
+    };
+  });
+
+  const blockedLanes = lanes.filter((lane) => lane.status === "blocked").length;
+  const completedLanes = lanes.filter((lane) => lane.status === "succeeded").length;
+  const missingCoverage = lanes.filter((lane) => lane.status === "missing").length;
+  const activeAgents = new Set(lanes.map((lane) => lane.ownerAgentId).filter(Boolean)).size;
+  const runningLane = lanes.find((lane) => lane.status === "running");
+  const blockedLane = lanes.find((lane) => lane.status === "blocked");
+  const queuedLane = lanes.find((lane) => lane.status === "queued");
+  const nextLane = lanes.find((lane) => lane.status === "planned" || lane.status === "queued");
+
+  return {
+    headline:
+      options.workItem.reviewStatus === "approved"
+        ? "Team runtime completed this cycle."
+        : blockedLane
+          ? `${blockedLane.laneLabel} is blocked.`
+          : runningLane
+            ? `${runningLane.laneLabel} currently owns the live handoff.`
+            : options.workItem.status === "ready_for_review"
+              ? "Execution finished and is waiting for operator review."
+              : "Team runtime is staged for the next supervised cycle.",
+    currentStage:
+      blockedLane
+        ? blockedLane.summary
+        : runningLane
+          ? runningLane.summary
+          : queuedLane
+            ? queuedLane.summary
+            : options.workItem.status === "ready_for_review"
+              ? "All required execution lanes have passed their current gate."
+              : "The planner has prepared workstreams and gates for launch.",
+    nextHandoff:
+      options.workItem.reviewStatus === "approved"
+        ? null
+        : blockedLane
+          ? blockedLane.laneLabel
+          : nextLane?.laneLabel ?? (options.workItem.status === "ready_for_review" ? "Operator review" : null),
+    activeAgents,
+    blockedLanes,
+    completedLanes,
+    missingCoverage,
+    lanes
+  };
+}
+
 function buildWorkItemReviewSummary(options: {
   workItem: WorkItemRecord;
   detail: Awaited<ReturnType<typeof buildWorkItemPlanningDetail>>;
   relatedTasks: IndexedTaskLike[];
   runByKey: Map<string, IndexedRunLike>;
 }): WorkItemReviewSummary {
+  const currentPlan = resolveCurrentCyclePlan(options.workItem, options.detail);
+  const gateRuntime = buildGateRuntime(currentPlan, options.relatedTasks);
+  const runtimeByGateType = new Map(gateRuntime.map((gate) => [gate.type, gate]));
   const totals = {
     total: options.relatedTasks.length,
     queued: 0,
@@ -3392,15 +4057,18 @@ function buildWorkItemReviewSummary(options: {
       : null;
     signals.push({
       label: "Mission execution",
-      status: reviewSignalStatusForExecution(run?.status ?? options.workItem.linkedRunStatus ?? null),
+        status: reviewSignalStatusForExecution(run?.status ?? options.workItem.linkedRunStatus ?? null),
       summary: summarizeMissionReviewSignal(run?.status ?? options.workItem.linkedRunStatus ?? null, run?.verdict ?? options.workItem.linkedRunVerdict ?? null)
     });
   } else {
     signals.push(buildTaskGroupSignal("Execution graph", options.relatedTasks));
   }
-  signals.push(buildTaskGroupSignal("Validation", options.relatedTasks.filter((task) => task.type === "validate")));
-  signals.push(buildTaskGroupSignal("Browser Smoke", options.relatedTasks.filter((task) => task.type === "qa")));
-  signals.push(buildTaskGroupSignal("Audit", options.relatedTasks.filter((task) => task.type === "audit")));
+  signals.push(buildGateSignal("Validation", runtimeByGateType.get("validation") ?? null));
+  signals.push(buildTaskGroupSignal("Browser Smoke", options.relatedTasks.filter((task) => task.type === "qa" && (task.qaMode ?? "smoke") === "smoke")));
+  if (options.detail.qaCoverage === "scenario" || runtimeByGateType.has("qa_scenario")) {
+    signals.push(buildGateSignal("Browser Scenario", runtimeByGateType.get("qa_scenario") ?? null));
+  }
+  signals.push(buildGateSignal("Audit", runtimeByGateType.get("audit") ?? null));
 
   const openRisks: string[] = [];
   if (options.detail.sourceSnapshot.warnings.length > 0) {
@@ -3415,22 +4083,32 @@ function buildWorkItemReviewSummary(options: {
   if (options.relatedTasks.length > 0 && totals.succeeded !== options.relatedTasks.length) {
     openRisks.push("Not every execution task completed successfully.");
   }
-  if (!signals.some((signal) => signal.label === "Validation" && signal.status === "passed")) {
+  if ((runtimeByGateType.get("validation")?.required ?? true) && runtimeByGateType.get("validation")?.status !== "passed") {
     openRisks.push("Validation evidence is incomplete or failed.");
   }
-  if (options.workItem.executionMode === "task_graph" && !signals.some((signal) => signal.label === "Browser Smoke" && signal.status === "passed")) {
-    openRisks.push("Browser smoke evidence has not produced a passing result yet.");
+  if (options.detail.qaCoverage === "scenario" && runtimeByGateType.get("qa_scenario")?.status !== "passed") {
+    openRisks.push("Browser scenario gate has not produced a passing verdict yet.");
   }
-  if (!signals.some((signal) => signal.label === "Audit" && signal.status === "passed")) {
+  if ((runtimeByGateType.get("audit")?.required ?? true) && runtimeByGateType.get("audit")?.status !== "passed") {
     openRisks.push("No successful audit/review signal is recorded yet.");
   }
 
+  const requiredGates = gateRuntime.filter((gate) => gate.required);
+  const isGateReady =
+    options.workItem.executionMode === "mission"
+      ? options.workItem.status === "ready_for_review" || options.workItem.status === "completed"
+      : requiredGates.length > 0 &&
+        requiredGates.every((gate) => gate.status === "passed" || gate.status === "skipped") &&
+        totals.failed === 0 &&
+        totals.blocked === 0 &&
+        options.relatedTasks.length > 0 &&
+        totals.succeeded === options.relatedTasks.length;
   const gate =
     options.workItem.reviewStatus === "approved"
       ? "approved"
       : options.workItem.reviewStatus === "changes_requested"
         ? "changes_requested"
-        : options.workItem.status === "ready_for_review"
+        : isGateReady
           ? "ready"
           : "not_ready";
 
@@ -3498,6 +4176,30 @@ function buildTaskGroupSignal(label: string, tasks: IndexedTaskLike[]): WorkItem
     label,
     status: "pending",
     summary: firstSummary ?? `${tasks.length} task(s) are still queued or running.`
+  };
+}
+
+function buildGateSignal(label: string, gate: WorkItemGateRuntime | null): WorkItemReviewSummary["signals"][number] {
+  if (!gate) {
+    return {
+      label,
+      status: "missing",
+      summary: "No gate evidence recorded yet."
+    };
+  }
+  return {
+    label,
+    status:
+      gate.status === "passed"
+        ? "passed"
+        : gate.status === "failed"
+          ? "failed"
+          : gate.status === "blocked"
+            ? "blocked"
+            : gate.status === "skipped"
+              ? "missing"
+              : "pending",
+    summary: gate.summary
   };
 }
 

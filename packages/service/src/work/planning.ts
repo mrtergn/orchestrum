@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   getWorkspaceAgentsPath,
   loadMissionTemplate,
+  type WorkItemGate,
   type MissionTemplate,
   type WorkItemCyclePlan,
   type WorkItemExecutionStep,
@@ -10,6 +11,7 @@ import {
   type WorkItemRemediationPlan,
   type WorkItemRecord,
   type WorkItemReviewSummary,
+  type WorkItemWorkstream,
   type WorkPlanLane,
   type WorkPlanLaneAssignment,
   type WorkPlanTask,
@@ -78,6 +80,39 @@ const LANE_DEFINITIONS: WorkPlanLane[] = [
   { id: "audit", label: "Audit", description: "Review, hardening, and sign-off work." }
 ];
 
+async function composePlanningDetail(options: {
+  workspacePath: string;
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  tasks: WorkPlanTask[];
+  template: ReturnType<typeof templateSummary>;
+  sourceSnapshot: WorkItemPlanningDetail["sourceSnapshot"];
+}): Promise<WorkItemPlanningDetail> {
+  const tasks = ensureExecutionLifecycleTasks(options.tasks, options.sourceType);
+  const lanes = lanesFromTasks(tasks);
+  const teamAssignments = await buildTeamAssignments(options.workspacePath, lanes);
+  const { workstreams, gates, qaCoverage, tasks: annotatedTasks } = buildWorkstreamPlan({
+    tasks,
+    teamAssignments
+  });
+  return {
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints,
+    lanes,
+    tasks: annotatedTasks,
+    workstreams,
+    gates,
+    qaCoverage,
+    teamAssignments,
+    executionSteps: executionStepsFromTasks(annotatedTasks),
+    template: options.template,
+    sourceSnapshot: options.sourceSnapshot
+  };
+}
+
 export async function buildWorkItemPlanningDetail(options: {
   workspacePath: string;
   workItem: WorkItemRecord;
@@ -95,23 +130,16 @@ export async function buildWorkItemPlanningDetail(options: {
         parsed.acceptanceCriteria,
         options.workItem.brief.acceptanceCriteria
       );
-      const tasks = ensureExecutionLifecycleTasks(
-        parsed.tasks.length > 0 ? parsed.tasks : templatePlanningTasks(template),
-        options.workItem.brief.sourceType
-      );
-      const lanes = lanesFromTasks(tasks);
       const warnings = [...parsed.warnings];
       if (parsed.tasks.length === 0) {
         warnings.push("No explicit PBI task list was found, so the mission template stages are shown instead.");
       }
-      return {
+      return composePlanningDetail({
+        workspacePath: options.workspacePath,
+        sourceType: options.workItem.brief.sourceType,
         summary: parsed.summary ?? options.workItem.brief.request,
         acceptanceCriteria,
         constraints: options.workItem.brief.constraints,
-        lanes,
-        tasks,
-        teamAssignments: await buildTeamAssignments(options.workspacePath, lanes),
-        executionSteps: executionStepsFromTasks(tasks),
         template: templateInfo,
         sourceSnapshot: {
           kind: "pbi_markdown",
@@ -123,21 +151,16 @@ export async function buildWorkItemPlanningDetail(options: {
           summary: parsed.summary,
           warnings
         }
-      };
+        ,
+        tasks: parsed.tasks.length > 0 ? parsed.tasks : templatePlanningTasks(template)
+      });
     } catch (error) {
-      const fallbackTasks = ensureExecutionLifecycleTasks(
-        templatePlanningTasks(template),
-        options.workItem.brief.sourceType
-      );
-      const fallbackLanes = lanesFromTasks(fallbackTasks);
-      return {
+      return composePlanningDetail({
+        workspacePath: options.workspacePath,
+        sourceType: options.workItem.brief.sourceType,
         summary: options.workItem.brief.request,
         acceptanceCriteria: options.workItem.brief.acceptanceCriteria,
         constraints: options.workItem.brief.constraints,
-        lanes: fallbackLanes,
-        tasks: fallbackTasks,
-        teamAssignments: await buildTeamAssignments(options.workspacePath, fallbackLanes),
-        executionSteps: executionStepsFromTasks(fallbackTasks),
         template: templateInfo,
         sourceSnapshot: {
           kind: "pbi_markdown",
@@ -148,20 +171,20 @@ export async function buildWorkItemPlanningDetail(options: {
           summary: null,
           warnings: [error instanceof Error ? error.message : String(error)]
         }
-      };
+        ,
+        tasks: templatePlanningTasks(template)
+      });
     }
   }
 
   const tasks = buildBriefDrivenLifecycleTasks(options.workItem, template);
-  const lanes = lanesFromTasks(tasks);
-  return {
+  return composePlanningDetail({
+    workspacePath: options.workspacePath,
+    sourceType: options.workItem.brief.sourceType,
     summary: options.workItem.brief.request,
     acceptanceCriteria: options.workItem.brief.acceptanceCriteria,
     constraints: options.workItem.brief.constraints,
-    lanes,
     tasks,
-    teamAssignments: await buildTeamAssignments(options.workspacePath, lanes),
-    executionSteps: executionStepsFromTasks(tasks),
     template: templateInfo,
     sourceSnapshot: {
       kind: "mission_template",
@@ -173,7 +196,7 @@ export async function buildWorkItemPlanningDetail(options: {
       summary: `Derived from ${template.name}.`,
       warnings: []
     }
-  };
+  });
 }
 
 export async function previewPbiPlanning(options: {
@@ -186,23 +209,16 @@ export async function previewPbiPlanning(options: {
     workspacePath: options.workspacePath,
     sourceRef: options.sourceRef
   });
-  const tasks = ensureExecutionLifecycleTasks(
-    parsed.tasks.length > 0 ? parsed.tasks : templatePlanningTasks(template),
-    "pbi"
-  );
-  const lanes = lanesFromTasks(tasks);
   const warnings = [...parsed.warnings];
   if (parsed.tasks.length === 0) {
     warnings.push("No explicit PBI task list was found, so the mission template stages are shown instead.");
   }
-  return {
+  return composePlanningDetail({
+    workspacePath: options.workspacePath,
+    sourceType: "pbi",
     summary: parsed.summary ?? `${parsed.pbiId} ${parsed.pbiTitle}`.trim(),
     acceptanceCriteria: parsed.acceptanceCriteria,
     constraints: [],
-    lanes,
-    tasks,
-    teamAssignments: await buildTeamAssignments(options.workspacePath, lanes),
-    executionSteps: executionStepsFromTasks(tasks),
     template: templateSummary(template),
     sourceSnapshot: {
       kind: "pbi_markdown",
@@ -214,7 +230,9 @@ export async function previewPbiPlanning(options: {
       summary: parsed.summary,
       warnings
     }
-  };
+    ,
+    tasks: parsed.tasks.length > 0 ? parsed.tasks : templatePlanningTasks(template)
+  });
 }
 
 export async function previewSprintBacklog(options: {
@@ -375,6 +393,9 @@ export function applyRemediationPlanToPlanningDetail(options: {
     constraints: [...options.remediationPlan.cyclePlan.constraints],
     lanes: [...options.remediationPlan.cyclePlan.lanes],
     tasks: [...options.remediationPlan.cyclePlan.tasks],
+    workstreams: [...options.remediationPlan.cyclePlan.workstreams],
+    gates: [...options.remediationPlan.cyclePlan.gates],
+    qaCoverage: options.remediationPlan.cyclePlan.gates.some((gate) => gate.type === "qa_scenario") ? "scenario" : "none",
     teamAssignments: [...options.remediationPlan.cyclePlan.teamAssignments],
     executionSteps: [...options.remediationPlan.cyclePlan.executionSteps]
   };
@@ -398,7 +419,18 @@ export function createWorkItemCyclePlan(options: {
     lanes: options.detail.lanes.map((lane) => ({ ...lane })),
     tasks: options.detail.tasks.map((task) => ({
       ...task,
-      dependsOn: [...task.dependsOn]
+      dependsOn: [...task.dependsOn],
+      gateIds: [...(task.gateIds ?? [])]
+    })),
+    workstreams: options.detail.workstreams.map((workstream) => ({
+      ...workstream,
+      taskIds: [...workstream.taskIds],
+      dependsOn: [...workstream.dependsOn],
+      gateIds: [...workstream.gateIds]
+    })),
+    gates: options.detail.gates.map((gate) => ({
+      ...gate,
+      workstreamIds: [...gate.workstreamIds]
     })),
     teamAssignments: options.detail.teamAssignments.map((assignment) => ({
       ...assignment,
@@ -933,9 +965,10 @@ function ensureExecutionLifecycleTasks(
   tasks: WorkPlanTask[],
   sourceType: WorkItemRecord["brief"]["sourceType"]
 ): WorkPlanTask[] {
-  const nextTasks = tasks.map((task) => ({
+  const nextTasks: WorkPlanTask[] = tasks.map((task): WorkPlanTask => ({
     ...task,
-    dependsOn: [...task.dependsOn]
+    dependsOn: [...task.dependsOn],
+    gateIds: [...(task.gateIds ?? [])]
   }));
 
   const planningTasks = nextTasks.filter((task) => task.kind === "planning" || task.laneId === "pm");
@@ -966,15 +999,45 @@ function ensureExecutionLifecycleTasks(
     nextTasks.unshift(planTask);
   }
 
-  const implementationTaskIds = nextTasks
-    .filter((task) =>
-      task.kind === "implementation" &&
-      task.laneId !== "pm" &&
-      task.laneId !== "tester" &&
-      task.laneId !== "qa" &&
-      task.laneId !== "audit"
-    )
+  const implementationTasks = nextTasks.filter((task) =>
+    task.kind === "implementation" &&
+    task.laneId !== "pm" &&
+    task.laneId !== "tester" &&
+    task.laneId !== "qa" &&
+    task.laneId !== "audit"
+  );
+
+  const integrationTaskIds = implementationTasks
+    .filter((task) => isIntegrationTask(task))
     .map((task) => task.id);
+
+  const implementationTaskIds =
+    integrationTaskIds.length > 0
+      ? integrationTaskIds
+      : implementationTasks.map((task) => task.id);
+
+  const implementationLanes = new Set(
+    implementationTasks
+      .filter((task) => !isIntegrationTask(task))
+      .map((task) => task.laneId)
+  );
+
+  if (implementationLanes.size > 1 && integrationTaskIds.length === 0) {
+    const integrateTaskId = uniquePlannerTaskId(nextTasks, "integrate_workstreams");
+    nextTasks.push({
+      id: integrateTaskId,
+      title: integrationTaskTitleForSourceType(sourceType),
+      description: "Merge the parallel implementation tracks into one reviewable delivery slice before validation.",
+      laneId: "developer",
+      laneLabel: laneById("developer").label,
+      roleHint: "dev",
+      kind: "implementation",
+      source: "template",
+      dependsOn: implementationTasks.filter((task) => !isIntegrationTask(task)).map((task) => task.id),
+      sourceLine: null
+    });
+    implementationTaskIds.splice(0, implementationTaskIds.length, integrateTaskId);
+  }
 
   let validationTaskIds = nextTasks
     .filter((task) => task.kind === "validation" || task.laneId === "tester")
@@ -996,11 +1059,11 @@ function ensureExecutionLifecycleTasks(
     validationTaskIds = [validationTaskId];
   }
 
-  let qaTaskIds = nextTasks
-    .filter((task) => task.kind === "qa" || task.laneId === "qa")
+  let qaSmokeTaskIds = nextTasks
+    .filter((task) => (task.kind === "qa" || task.laneId === "qa") && (task.qaMode ?? "smoke") === "smoke")
     .map((task) => task.id);
-  if (qaTaskIds.length === 0 && (validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
-    const qaTaskId = uniquePlannerTaskId(nextTasks, "browser_qa");
+  if (qaSmokeTaskIds.length === 0 && (validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
+    const qaTaskId = uniquePlannerTaskId(nextTasks, "browser_smoke");
     const reviewInsertIndex = nextTasks.findIndex((task) => task.kind === "review" || task.laneId === "audit");
     const qaTask: WorkPlanTask = {
       id: qaTaskId,
@@ -1012,20 +1075,52 @@ function ensureExecutionLifecycleTasks(
       kind: "qa",
       source: "template",
       dependsOn: validationTaskIds.length > 0 ? [...validationTaskIds] : [...implementationTaskIds],
-      sourceLine: null
+      sourceLine: null,
+      qaMode: "smoke"
     };
     if (reviewInsertIndex < 0) {
       nextTasks.push(qaTask);
     } else {
       nextTasks.splice(reviewInsertIndex, 0, qaTask);
     }
-    qaTaskIds = [qaTaskId];
+    qaSmokeTaskIds = [qaTaskId];
+  }
+
+  let qaScenarioTaskIds = nextTasks
+    .filter((task) => (task.kind === "qa" || task.laneId === "qa") && task.qaMode === "scenario")
+    .map((task) => task.id);
+  if (qaScenarioTaskIds.length === 0 && (qaSmokeTaskIds.length > 0 || validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
+    const qaScenarioTaskId = uniquePlannerTaskId(nextTasks, "browser_scenario");
+    const reviewInsertIndex = nextTasks.findIndex((task) => task.kind === "review" || task.laneId === "audit");
+    const qaScenarioTask: WorkPlanTask = {
+      id: qaScenarioTaskId,
+      title: qaScenarioTaskTitleForSourceType(sourceType),
+      description: "Run an assertion-driven browser scenario and produce an explicit gate verdict before audit.",
+      laneId: "qa",
+      laneLabel: laneById("qa").label,
+      roleHint: "qa",
+      kind: "qa",
+      source: "template",
+      dependsOn: qaSmokeTaskIds.length > 0
+        ? [...qaSmokeTaskIds]
+        : validationTaskIds.length > 0
+          ? [...validationTaskIds]
+          : [...implementationTaskIds],
+      sourceLine: null,
+      qaMode: "scenario"
+    };
+    if (reviewInsertIndex < 0) {
+      nextTasks.push(qaScenarioTask);
+    } else {
+      nextTasks.splice(reviewInsertIndex, 0, qaScenarioTask);
+    }
+    qaScenarioTaskIds = [qaScenarioTaskId];
   }
 
   const reviewTaskIds = nextTasks
     .filter((task) => task.kind === "review" || task.laneId === "audit")
     .map((task) => task.id);
-  if (reviewTaskIds.length === 0 && (qaTaskIds.length > 0 || validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
+  if (reviewTaskIds.length === 0 && (qaScenarioTaskIds.length > 0 || qaSmokeTaskIds.length > 0 || validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
     nextTasks.push({
       id: uniquePlannerTaskId(nextTasks, "final_audit"),
       title: auditTaskTitleForSourceType(sourceType),
@@ -1035,17 +1130,25 @@ function ensureExecutionLifecycleTasks(
       roleHint: "audit",
       kind: "review",
       source: "template",
-      dependsOn: qaTaskIds.length > 0 ? [...qaTaskIds] : validationTaskIds.length > 0 ? [...validationTaskIds] : [...implementationTaskIds],
+      dependsOn:
+        qaScenarioTaskIds.length > 0
+          ? [...qaScenarioTaskIds]
+          : qaSmokeTaskIds.length > 0
+            ? [...qaSmokeTaskIds]
+            : validationTaskIds.length > 0
+              ? [...validationTaskIds]
+              : [...implementationTaskIds],
       sourceLine: null
     });
-  } else if (qaTaskIds.length > 0) {
+  } else if (qaScenarioTaskIds.length > 0 || qaSmokeTaskIds.length > 0) {
     const reviewTaskIdSet = new Set(reviewTaskIds);
+    const upstreamQaTaskIds = qaScenarioTaskIds.length > 0 ? qaScenarioTaskIds : qaSmokeTaskIds;
     for (let index = 0; index < nextTasks.length; index += 1) {
       const task = nextTasks[index]!;
       if (!reviewTaskIdSet.has(task.id)) continue;
       nextTasks[index] = {
         ...task,
-        dependsOn: mergeUnique(task.dependsOn, qaTaskIds)
+        dependsOn: mergeUnique(task.dependsOn, upstreamQaTaskIds)
       };
     }
   }
@@ -1090,6 +1193,233 @@ function qaTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceTyp
     default:
       return "Run browser smoke";
   }
+}
+
+function qaScenarioTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
+  switch (sourceType) {
+    case "bug":
+      return "Run browser scenario regression gate";
+    case "pr_hardening":
+      return "Run release candidate browser scenario";
+    case "pbi":
+      return "Run backlog browser scenario gate";
+    default:
+      return "Run browser scenario gate";
+  }
+}
+
+function isIntegrationTask(task: WorkPlanTask): boolean {
+  const normalized = `${task.id} ${task.title}`.trim().toLowerCase();
+  return /\bintegrat(e|ion)\b/.test(normalized) || normalized.includes("integrate_workstreams");
+}
+
+function buildWorkstreamPlan(options: {
+  tasks: WorkPlanTask[];
+  teamAssignments: WorkPlanLaneAssignment[];
+}): {
+  tasks: WorkPlanTask[];
+  workstreams: WorkItemWorkstream[];
+  gates: WorkItemGate[];
+  qaCoverage: "none" | "scenario";
+} {
+  const streams: Array<{
+    id: string;
+    type: WorkItemWorkstream["type"];
+    title: string;
+    description?: string | null;
+    laneId: string;
+    laneLabel: string;
+    taskIds: string[];
+  }> = [];
+
+  const planningTasks = options.tasks.filter((task) => task.kind === "planning" || task.laneId === "pm");
+  if (planningTasks.length > 0) {
+    streams.push({
+      id: "stream-plan",
+      type: "plan",
+      title: "Planner workstream",
+      description: "Scope, ordering, and execution framing before implementation.",
+      laneId: "pm",
+      laneLabel: laneById("pm").label,
+      taskIds: planningTasks.map((task) => task.id)
+    });
+  }
+
+  const implementationGroups = new Map<string, WorkPlanTask[]>();
+  for (const task of options.tasks) {
+    if (task.kind !== "implementation") continue;
+    if (task.laneId === "pm" || task.laneId === "tester" || task.laneId === "qa" || task.laneId === "audit") continue;
+    const streamType = isIntegrationTask(task) ? "integrate" : "implement";
+    const groupKey = streamType === "integrate" ? "integrate" : `${streamType}:${task.laneId}`;
+    const bucket = implementationGroups.get(groupKey) ?? [];
+    bucket.push(task);
+    implementationGroups.set(groupKey, bucket);
+  }
+
+  for (const [groupKey, groupTasks] of implementationGroups.entries()) {
+    const first = groupTasks[0]!;
+    const type = groupKey === "integrate" ? "integrate" : "implement";
+    const laneId = groupKey === "integrate" ? "developer" : first.laneId;
+    const laneLabel = laneById(laneId).label;
+    streams.push({
+      id: `stream-${slugifyIdentifier(groupKey)}`,
+      type,
+      title:
+        type === "integrate"
+          ? "Integration workstream"
+          : `${laneLabel} workstream`,
+      description:
+        type === "integrate"
+          ? "Join the parallel implementation work into one coherent delivery slice."
+          : `Own the ${laneLabel.toLowerCase()} implementation slice for this cycle.`,
+      laneId,
+      laneLabel,
+      taskIds: groupTasks.map((task) => task.id)
+    });
+  }
+
+  const validationTasks = options.tasks.filter((task) => task.kind === "validation" || task.laneId === "tester");
+  if (validationTasks.length > 0) {
+    streams.push({
+      id: "stream-validate",
+      type: "validate",
+      title: "Validation workstream",
+      description: "Run the required verification commands and capture explicit outcomes.",
+      laneId: "tester",
+      laneLabel: laneById("tester").label,
+      taskIds: validationTasks.map((task) => task.id)
+    });
+  }
+
+  const qaSmokeTasks = options.tasks.filter((task) => (task.kind === "qa" || task.laneId === "qa") && (task.qaMode ?? "smoke") === "smoke");
+  if (qaSmokeTasks.length > 0) {
+    streams.push({
+      id: "stream-qa-smoke",
+      type: "qa_smoke",
+      title: "Browser Smoke workstream",
+      description: "Capture fast browser evidence before the scenario gate.",
+      laneId: "qa",
+      laneLabel: laneById("qa").label,
+      taskIds: qaSmokeTasks.map((task) => task.id)
+    });
+  }
+
+  const qaScenarioTasks = options.tasks.filter((task) => (task.kind === "qa" || task.laneId === "qa") && task.qaMode === "scenario");
+  if (qaScenarioTasks.length > 0) {
+    streams.push({
+      id: "stream-qa-scenario",
+      type: "qa_scenario",
+      title: "Browser Scenario gate",
+      description: "Run assertion-driven browser steps and produce a review gate verdict.",
+      laneId: "qa",
+      laneLabel: laneById("qa").label,
+      taskIds: qaScenarioTasks.map((task) => task.id)
+    });
+  }
+
+  const auditTasks = options.tasks.filter((task) => task.kind === "review" || task.laneId === "audit");
+  if (auditTasks.length > 0) {
+    streams.push({
+      id: "stream-audit",
+      type: "audit",
+      title: "Audit workstream",
+      description: "Review readiness, residual risk, and evidence before human approval.",
+      laneId: "audit",
+      laneLabel: laneById("audit").label,
+      taskIds: auditTasks.map((task) => task.id)
+    });
+  }
+
+  const taskToStreamId = new Map<string, string>();
+  for (const stream of streams) {
+    for (const taskId of stream.taskIds) {
+      taskToStreamId.set(taskId, stream.id);
+    }
+  }
+
+  const gates: WorkItemGate[] = [];
+  if (streams.some((stream) => stream.type === "validate")) {
+    gates.push({
+      id: "gate-validation",
+      type: "validation",
+      label: "Validation",
+      required: true,
+      workstreamIds: streams.filter((stream) => stream.type === "validate").map((stream) => stream.id)
+    });
+  }
+  if (streams.some((stream) => stream.type === "qa_scenario")) {
+    gates.push({
+      id: "gate-qa-scenario",
+      type: "qa_scenario",
+      label: "Browser Scenario",
+      required: true,
+      workstreamIds: streams.filter((stream) => stream.type === "qa_scenario").map((stream) => stream.id)
+    });
+  }
+  if (streams.some((stream) => stream.type === "audit")) {
+    gates.push({
+      id: "gate-audit",
+      type: "audit",
+      label: "Audit",
+      required: true,
+      workstreamIds: streams.filter((stream) => stream.type === "audit").map((stream) => stream.id)
+    });
+  }
+
+  const gateIdsByStreamId = new Map<string, string[]>();
+  for (const gate of gates) {
+    for (const streamId of gate.workstreamIds) {
+      const bucket = gateIdsByStreamId.get(streamId) ?? [];
+      bucket.push(gate.id);
+      gateIdsByStreamId.set(streamId, bucket);
+    }
+  }
+
+  const streamRecords: WorkItemWorkstream[] = streams.map((stream) => {
+    const dependencyIds = new Set<string>();
+    for (const taskId of stream.taskIds) {
+      const task = options.tasks.find((candidate) => candidate.id === taskId);
+      for (const dependency of task?.dependsOn ?? []) {
+        const dependencyStreamId = taskToStreamId.get(dependency);
+        if (dependencyStreamId && dependencyStreamId !== stream.id) {
+          dependencyIds.add(dependencyStreamId);
+        }
+      }
+    }
+    const assignment = options.teamAssignments.find((candidate) => candidate.laneId === stream.laneId);
+    return {
+      id: stream.id,
+      type: stream.type,
+      title: stream.title,
+      description: stream.description ?? null,
+      laneId: stream.laneId,
+      laneLabel: stream.laneLabel,
+      taskIds: [...stream.taskIds],
+      dependsOn: Array.from(dependencyIds),
+      gateIds: [...(gateIdsByStreamId.get(stream.id) ?? [])],
+      preferredAgentId: assignment?.matches[0]?.id ?? null,
+      preferredAgentName: assignment?.matches[0]?.name ?? null
+    };
+  });
+
+  const annotatedTasks = options.tasks.map((task) => {
+    const workstreamId = taskToStreamId.get(task.id) ?? null;
+    const workstream = workstreamId ? streamRecords.find((candidate) => candidate.id === workstreamId) ?? null : null;
+    return {
+      ...task,
+      workstreamId,
+      workstreamType: workstream?.type ?? null,
+      gateIds: workstream?.gateIds ?? [],
+      qaMode: task.kind === "qa" || task.laneId === "qa" ? task.qaMode ?? "smoke" : null
+    };
+  });
+
+  return {
+    tasks: annotatedTasks,
+    workstreams: streamRecords,
+    gates,
+    qaCoverage: streamRecords.some((stream) => stream.type === "qa_scenario") ? "scenario" : "none"
+  };
 }
 
 function auditTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {

@@ -18,6 +18,7 @@ import {
   type MissionAgent,
   type MissionRun,
   type MissionProviderSpec,
+  type BrowserScenarioStep,
   type ChangeState,
   type PauseReason,
   type RunStartOptions,
@@ -106,6 +107,9 @@ type TaskRecord = {
   linkedWorkItemId?: string;
   linkedWorkItemTitle?: string;
   plannerTaskId?: string;
+  workstreamId?: string;
+  workstreamType?: string;
+  qaMode?: "smoke" | "scenario";
   laneId?: string;
   laneLabel?: string;
   waitingOnTaskIds: string[];
@@ -717,6 +721,9 @@ export class AgentPlatform {
           constraints: options.detail.constraints,
           plannerTaskId: plannedTask.id,
           plannerTaskKind: plannedTask.kind,
+          workstreamId: plannedTask.workstreamId ?? null,
+          workstreamType: plannedTask.workstreamType ?? null,
+          qaMode: plannedTask.qaMode ?? null,
           laneId: plannedTask.laneId,
           laneLabel: plannedTask.laneLabel,
           roleHint: plannedTask.roleHint ?? null,
@@ -733,6 +740,9 @@ export class AgentPlatform {
         linkedWorkItemId: options.workItem.id,
         linkedWorkItemTitle: options.workItem.brief.title,
         plannerTaskId: plannedTask.id,
+        workstreamId: plannedTask.workstreamId ?? undefined,
+        workstreamType: plannedTask.workstreamType ?? undefined,
+        qaMode: plannedTask.qaMode ?? undefined,
         laneId: plannedTask.laneId,
         laneLabel: plannedTask.laneLabel,
         maxAttempts: plannedTask.kind === "qa" ? 1 : 2
@@ -1003,11 +1013,13 @@ export class AgentPlatform {
     const runId = `task-${task.id.slice(0, 8)}-${Date.now()}`;
     task.linkedRunId = runId;
     task.linkedTemplateId = "browser:qa";
-    task.resultSummary = "Browser smoke run launched.";
+    task.resultSummary = task.qaMode === "scenario"
+      ? "Browser scenario run launched."
+      : "Browser smoke run launched.";
     task.waitingOnTaskIds = [];
     task.blockedByTaskIds = [];
     await this.persistTasks();
-    await this.appendLog(task, `Launching browser smoke in ${workspacePath}`);
+    await this.appendLog(task, `Launching browser ${task.qaMode === "scenario" ? "scenario" : "smoke"} in ${workspacePath}`);
 
     const targetPath =
       typeof task.payload.targetPath === "string" && task.payload.targetPath.trim()
@@ -1017,6 +1029,11 @@ export class AgentPlatform {
       typeof task.payload.baseUrl === "string" && task.payload.baseUrl.trim()
         ? task.payload.baseUrl.trim()
         : undefined;
+    const scenario = Array.isArray(task.payload.scenario)
+      ? task.payload.scenario as BrowserScenarioStep[]
+      : task.qaMode === "scenario"
+        ? this.buildDefaultBrowserScenario(task)
+        : undefined;
 
     const result = await runBrowserRunDetailed({
       kind: "qa",
@@ -1025,7 +1042,8 @@ export class AgentPlatform {
       workspaceId,
       runId,
       baseUrl,
-      targetPath
+      targetPath,
+      options: scenario ? { scenario, targetPath } : { targetPath }
     });
 
     task.finishedAt = new Date().toISOString();
@@ -1034,8 +1052,12 @@ export class AgentPlatform {
     task.waitingOnTaskIds = [];
     task.blockedByTaskIds = [];
     task.resultSummary = result.ok
-      ? "Browser smoke run completed successfully."
-      : "Browser smoke run failed. Inspect browser run artifacts for details.";
+      ? task.qaMode === "scenario"
+        ? "Browser scenario gate passed."
+        : "Browser smoke run completed successfully."
+      : task.qaMode === "scenario"
+        ? "Browser scenario gate failed. Inspect browser run artifacts for step verdicts."
+        : "Browser smoke run failed. Inspect browser run artifacts for details.";
     await this.persistTasks();
     await this.writeTaskArtifact(task, "browser-run.json", {
       runId: result.runId,
@@ -1046,6 +1068,19 @@ export class AgentPlatform {
     });
     await this.emitTaskStateEvent(task);
     await this.reconcileDependencyStates();
+  }
+
+  private buildDefaultBrowserScenario(task: TaskRecord): BrowserScenarioStep[] {
+    const targetPath =
+      typeof task.payload.targetPath === "string" && task.payload.targetPath.trim()
+        ? task.payload.targetPath.trim()
+        : "/";
+    return [
+      { action: "goto", targetPath, waitUntil: "networkidle" },
+      { action: "waitFor", selector: "body", timeoutMs: 10000 },
+      { action: "assertVisible", selector: "body" },
+      { action: "screenshot", name: "scenario-gate", fullPage: true }
+    ];
   }
 
   private async buildTaskMissionAgents(templateId: string, assignedAgent: AgentRecord, workspacePath: string): Promise<MissionAgent[]> {
@@ -1146,6 +1181,9 @@ export class AgentPlatform {
     linkedWorkItemId?: string;
     linkedWorkItemTitle?: string;
     plannerTaskId?: string;
+    workstreamId?: string;
+    workstreamType?: string;
+    qaMode?: "smoke" | "scenario";
     laneId?: string;
     laneLabel?: string;
     maxAttempts?: number;
@@ -1173,6 +1211,9 @@ export class AgentPlatform {
       linkedWorkItemId: input.linkedWorkItemId,
       linkedWorkItemTitle: input.linkedWorkItemTitle,
       plannerTaskId: input.plannerTaskId,
+      workstreamId: input.workstreamId,
+      workstreamType: input.workstreamType,
+      qaMode: input.qaMode,
       laneId: input.laneId,
       laneLabel: input.laneLabel,
       waitingOnTaskIds: [],
@@ -1783,6 +1824,9 @@ export class AgentPlatform {
       linkedWorkItemId: typeof record.linkedWorkItemId === "string" && record.linkedWorkItemId.trim() ? record.linkedWorkItemId : undefined,
       linkedWorkItemTitle: typeof record.linkedWorkItemTitle === "string" && record.linkedWorkItemTitle.trim() ? record.linkedWorkItemTitle : undefined,
       plannerTaskId: typeof record.plannerTaskId === "string" && record.plannerTaskId.trim() ? record.plannerTaskId : undefined,
+      workstreamId: typeof record.workstreamId === "string" && record.workstreamId.trim() ? record.workstreamId : undefined,
+      workstreamType: typeof record.workstreamType === "string" && record.workstreamType.trim() ? record.workstreamType : undefined,
+      qaMode: record.qaMode === "scenario" ? "scenario" : record.qaMode === "smoke" ? "smoke" : undefined,
       laneId: typeof record.laneId === "string" && record.laneId.trim() ? record.laneId : undefined,
       laneLabel: typeof record.laneLabel === "string" && record.laneLabel.trim() ? record.laneLabel : undefined,
       waitingOnTaskIds: this.normalizeStringArray(record.waitingOnTaskIds),
