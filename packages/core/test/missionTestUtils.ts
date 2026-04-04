@@ -258,13 +258,44 @@ if (vendor === "cursor" && args[0] === "agent" && args[1] === "status") {
   process.exit(0);
 }
 if (vendor === "cursor" && args[0] === "agent" && args[1] === "models") {
-  console.log("sonnet-4\\ngpt-5");
+  console.log("\\u001b[2K\\u001b[GLoading models…");
+  console.log("Available models");
+  console.log("auto - Auto");
+  console.log("sonnet-4");
+  console.log("gpt-5 - GPT-5");
+  console.log("Tip: use --model <id> to switch.");
   process.exit(0);
 }
 
 if (vendor === "codex" && args[0] === "exec") {
   if (!authenticated) {
     console.error("Not logged in");
+    process.exit(1);
+  }
+  if (process.env.MOCK_CODEX_FAIL_MESSAGE) {
+    console.error(process.env.MOCK_CODEX_FAIL_MESSAGE);
+    process.exit(1);
+  }
+  if (process.env.MOCK_CODEX_ARGS_LOG) {
+    fs.appendFileSync(process.env.MOCK_CODEX_ARGS_LOG, JSON.stringify(args) + "\\n", "utf8");
+  }
+  const configArg = args.find((arg) => typeof arg === "string" && arg.includes("reasoning.effort=")) || "";
+  const effortMatch = String(configArg).match(/reasoning\\.effort=\"?([a-z]+)\"?/i);
+  const effort = effortMatch ? String(effortMatch[1] || "").toLowerCase() : "";
+  if (process.env.MOCK_CODEX_REJECT_EFFORT && effort === process.env.MOCK_CODEX_REJECT_EFFORT) {
+    const receivedSuffix = process.env.MOCK_CODEX_INCLUDE_RECEIVED_EFFORT === "1"
+      ? " Received '" + effort + "'."
+      : "";
+    console.log(JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "unsupported_value",
+        message: "Unsupported value: '" + effort + "' is not supported with the selected model. Supported values are: 'minimal', 'low', 'medium', and 'high'." + receivedSuffix,
+        param: "reasoning.effort"
+      },
+      status: 400
+    }));
     process.exit(1);
   }
   const outputIndex = args.indexOf("-o");
@@ -283,6 +314,24 @@ if (vendor === "codex" && args[0] === "exec") {
 if (vendor === "copilot" && args.includes("-p")) {
   if (!authenticated) {
     console.log(JSON.stringify({ type: "session.error", data: { message: "Authentication failed." } }));
+    process.exit(1);
+  }
+  const effortIndex = args.indexOf("--reasoning-effort");
+  const effort = effortIndex >= 0 ? String(args[effortIndex + 1] || "") : "";
+  if (process.env.MOCK_COPILOT_REJECT_EFFORT && effort === process.env.MOCK_COPILOT_REJECT_EFFORT) {
+    const receivedSuffix = process.env.MOCK_COPILOT_INCLUDE_RECEIVED_EFFORT === "1"
+      ? " Received '" + effort + "'."
+      : "";
+    console.log(JSON.stringify({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "unsupported_value",
+        message: "Unsupported value: '" + effort + "' is not supported with the selected model. Supported values are: 'minimal', 'low', 'medium', and 'high'." + receivedSuffix,
+        param: "reasoning.effort"
+      },
+      status: 400
+    }));
     process.exit(1);
   }
   const toolsIndex = args.indexOf("--available-tools");

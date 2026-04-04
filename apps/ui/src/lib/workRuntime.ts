@@ -12,6 +12,13 @@ export type RuntimeAgentRecord = {
   id: string;
   name: string;
   role: string;
+  provider?: {
+    vendor?: string;
+    transport?: string;
+    profileId?: string;
+    modelOverride?: string;
+    effort?: string;
+  };
   profile?: {
     specialization: string;
     seniority: string;
@@ -23,6 +30,24 @@ export type RuntimeAgentRecord = {
     currentTaskIds?: string[];
     activeLoad?: number;
     lastHeartbeatAt?: string;
+  };
+  runtime?: {
+    providerSummary?: string;
+    currentModel?: string | null;
+    providerReadiness?: "usable_now" | "detected_needs_setup" | "fallback_default";
+    providerReadinessReason?: string | null;
+    promptCount?: number;
+    exchangeCount?: number;
+    estimatedCostUsd?: number | null;
+    assignedWorkItems?: string[];
+    activeWorkstreams?: Array<{
+      workstreamId: string;
+      laneLabel?: string;
+      status: string;
+      workItemId?: string;
+      taskTitle?: string;
+    }>;
+    recentAssignmentSummary?: string | null;
   };
 };
 

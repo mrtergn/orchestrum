@@ -1,22 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { z } from "zod";
 import { useAppUi } from "@/components/AppUiProvider";
+import { WorkspaceSelector } from "@/components/WorkspaceSelector";
 import { ProviderDiscoveryGrid } from "@/components/providers/ProviderDiscoveryGrid";
 import { ProviderDiscoveryLoadingState } from "@/components/providers/ProviderDiscoveryLoadingState";
 import { ProviderDiscoveryStatusSummary } from "@/components/providers/ProviderDiscoveryStatusSummary";
+import { PageHeader, SegmentedTabs } from "@/components/ui/PagePrimitives";
 import {
   type DeliveryBinding,
   type DeliveryCapability,
   type TeamPresetDraft,
+  type TeamPresetDraftRole,
   normalizeTeamPresetDraft,
   serializeTeamPresetDraft,
   targetOptionsForMode,
   toolLabel
 } from "@/lib/delivery";
+import {
+  transportLabel,
+  vendorLabel,
+  type ProviderEffort,
+  type ProviderDiscoveryRecord
+} from "@/lib/providers";
 import { useProviderDiscovery } from "@/lib/queries/useProviderDiscovery";
+import { useWorkspaces } from "@/lib/queries/useWorkspaces";
 
 type CapabilityDiscovery = {
   capabilities?: DeliveryCapability[];
@@ -51,6 +62,7 @@ const ConfigSchema = z.object({
     })
     .optional(),
   models: z.record(z.string()).optional(),
+  efforts: z.record(z.enum(["minimal", "low", "medium", "high", "max"])).optional(),
   shell_allowlist: z.array(z.string()).optional(),
   telemetry: z
     .object({
@@ -61,26 +73,231 @@ const ConfigSchema = z.object({
 });
 
 type Scope = "workspace" | "global";
-const tabs = ["Providers", "Runtime", "Profile", "Advanced"] as const;
-type Tab = (typeof tabs)[number];
+const advancedTabs = ["Runtime", "Profile", "Advanced"] as const;
+type Tab = (typeof advancedTabs)[number];
+type SettingsMode = "basic" | "advanced";
 
-const PM_MODEL_OPTIONS = [
+type ModelOption = {
+  value: string;
+  label: string;
+  hint: string;
+};
+
+type EffortOption = {
+  value: "" | ProviderEffort;
+  label: string;
+  hint: string;
+};
+
+const PM_MODEL_FALLBACK_OPTIONS: ModelOption[] = [
   { value: "gpt-5", label: "GPT-5", hint: "broader planning and reasoning" },
   { value: "gpt-4.1", label: "GPT-4.1", hint: "balanced fallback" },
   { value: "o4-mini", label: "o4-mini", hint: "lighter and cheaper" }
 ] as const;
 
-const DEV_MODEL_OPTIONS = [
+const DEV_MODEL_FALLBACK_OPTIONS: ModelOption[] = [
   { value: "codex", label: "Codex", hint: "code-focused default" },
   { value: "gpt-5", label: "GPT-5", hint: "general implementation fallback" },
   { value: "gpt-4.1", label: "GPT-4.1", hint: "balanced fallback" }
 ] as const;
 
-const AUDIT_MODEL_OPTIONS = [
+const AUDIT_MODEL_FALLBACK_OPTIONS: ModelOption[] = [
   { value: "gpt-5", label: "GPT-5", hint: "review and risk analysis" },
   { value: "gpt-4.1", label: "GPT-4.1", hint: "balanced fallback" },
   { value: "o4-mini", label: "o4-mini", hint: "lighter verification passes" }
 ] as const;
+
+const ROLE_EFFORT_OPTIONS: EffortOption[] = [
+  { value: "", label: "Provider default", hint: "let the selected provider choose" },
+  { value: "minimal", label: "Minimal", hint: "lowest reasoning budget" },
+  { value: "low", label: "Low", hint: "faster, lighter reasoning" },
+  { value: "medium", label: "Medium", hint: "balanced default" },
+  { value: "high", label: "High", hint: "deeper reasoning" },
+  { value: "max", label: "Max", hint: "highest reasoning budget when supported" }
+] as const;
+
+const QUICK_TEAM_PRESETS = [
+  {
+    id: "solo_audit",
+    label: "Solo Audit",
+    description: "Planner plus auditor only. Best when you want a focused repo review without a delivery team.",
+    name: "Solo Audit",
+    runMode: "manual_supervised" as const,
+    roles: {
+      planner: { mode: "manual_browser" as const, preferredTargets: ["chatgpt", "claude"] },
+      developer: { mode: "disabled" as const, preferredTargets: [] },
+      tester: { mode: "disabled" as const, preferredTargets: [] },
+      auditor: { mode: "manual_browser" as const, preferredTargets: ["claude", "chatgpt"] },
+    },
+  },
+  {
+    id: "backend_build",
+    label: "Backend Build",
+    description: "Planner, developer, tester, and auditor. Good default for API and server-heavy work.",
+    name: "Backend Build",
+    runMode: "max_auto_supervised_hybrid" as const,
+    roles: {
+      planner: { mode: "manual_browser" as const, preferredTargets: ["chatgpt", "claude"] },
+      developer: { mode: "manual_ide" as const, preferredTargets: ["codex", "cursor", "copilot"] },
+      tester: { mode: "auto_cli" as const, preferredTargets: ["local-shell"] },
+      auditor: { mode: "manual_browser" as const, preferredTargets: ["claude", "chatgpt"] },
+    },
+  },
+  {
+    id: "ui_change",
+    label: "UI Change",
+    description: "Planner, developer, tester, and auditor with a UI-first implementation target.",
+    name: "UI Change",
+    runMode: "manual_supervised" as const,
+    roles: {
+      planner: { mode: "manual_browser" as const, preferredTargets: ["chatgpt", "claude"] },
+      developer: { mode: "manual_ide" as const, preferredTargets: ["cursor", "codex", "copilot"] },
+      tester: { mode: "manual_ide" as const, preferredTargets: ["cursor", "codex", "copilot"] },
+      auditor: { mode: "manual_browser" as const, preferredTargets: ["claude", "chatgpt"] },
+    },
+  },
+  {
+    id: "cross_stack_delivery",
+    label: "Cross-stack Delivery",
+    description: "Full delivery preset with implementation, validation, and audit all active.",
+    name: "Cross-stack Delivery",
+    runMode: "max_auto_supervised_hybrid" as const,
+    roles: {
+      planner: { mode: "manual_browser" as const, preferredTargets: ["chatgpt", "claude"] },
+      developer: { mode: "manual_ide" as const, preferredTargets: ["cursor", "codex", "copilot"] },
+      tester: { mode: "auto_cli" as const, preferredTargets: ["local-shell"] },
+      auditor: { mode: "manual_browser" as const, preferredTargets: ["claude", "chatgpt"] },
+    },
+  },
+] as const;
+
+function fallbackTargetForMode(
+  mode: TeamPresetDraftRole["mode"],
+  capabilities: DeliveryCapability[],
+  preferredTargets: readonly string[]
+) {
+  const options = targetOptionsForMode(mode, capabilities);
+  return preferredTargets.find((target) => options.includes(target)) ?? options[0] ?? (mode === "auto_cli" ? "local-shell" : "chatgpt");
+}
+
+function defaultDraftRole(
+  id: "planner" | "developer" | "tester" | "auditor",
+  mode: TeamPresetDraftRole["mode"],
+  target: string
+): TeamPresetDraftRole {
+  if (id === "planner") {
+    return {
+      id,
+      label: "Planner",
+      description: "Clarifies scope, acceptance, and risks before implementation or review.",
+      mode,
+      target,
+      objective: "Plan the requested work before execution begins.",
+      acceptanceCriteria: ["Keep the plan grounded in the current repo context."],
+      expectedOutput: ["Execution plan", "Risks and blockers"],
+    };
+  }
+  if (id === "developer") {
+    return {
+      id,
+      label: "Developer",
+      description: "Implements the requested repo changes.",
+      mode,
+      target,
+      objective: "Implement only the scoped change and avoid widening the patch.",
+      acceptanceCriteria: ["Preserve existing patterns unless the request calls for change."],
+      expectedOutput: ["Patch summary", "Changed files", "Validation notes"],
+    };
+  }
+  if (id === "tester") {
+    return {
+      id,
+      label: "Tester",
+      description: "Runs the safest validation path available in the repo.",
+      mode,
+      target,
+      objective: "Validate the branch with the safest available local commands.",
+      acceptanceCriteria: ["Record failing commands with evidence when validation does not pass."],
+      expectedOutput: ["Validation command list", "Pass/fail evidence"],
+    };
+  }
+  return {
+    id,
+    label: "Auditor",
+    description: "Reviews correctness, regressions, and readiness before a human decision.",
+    mode,
+    target,
+    objective: "Review the current change set critically and surface concrete findings.",
+    acceptanceCriteria: ["Lead with concrete regressions or missing validation."],
+    expectedOutput: ["Audit findings", "Readiness signal"],
+  };
+}
+
+function buildQuickTeamPresetDraft(
+  presetId: (typeof QUICK_TEAM_PRESETS)[number]["id"],
+  capabilities: DeliveryCapability[]
+): TeamPresetDraft {
+  const preset = QUICK_TEAM_PRESETS.find((entry) => entry.id === presetId) ?? QUICK_TEAM_PRESETS[0];
+  return {
+    version: 1,
+    name: preset.name,
+    defaultRunMode: preset.runMode,
+    roles: (["planner", "developer", "tester", "auditor"] as const).map((roleId) => {
+      const config = preset.roles[roleId];
+      const target =
+        config.mode === "disabled"
+          ? "disabled"
+          : fallbackTargetForMode(config.mode, capabilities, config.preferredTargets);
+      return defaultDraftRole(roleId, config.mode, target);
+    }),
+  };
+}
+
+function buildRoleModelOptions(
+  providers: ProviderDiscoveryRecord[],
+  role: "pm" | "dev" | "audit",
+  fallbackOptions: ModelOption[],
+  currentValue: string
+): ModelOption[] {
+  const options = new Map<string, ModelOption>();
+  const addOption = (model: string, label: string, hint: string) => {
+    const normalized = model.trim();
+    if (!normalized || options.has(normalized)) return;
+    options.set(normalized, { value: normalized, label, hint });
+  };
+
+  for (const record of providers) {
+    for (const transport of record.transports) {
+      for (const profile of transport.profiles) {
+        const matchesRole =
+          !profile.roleHints?.length ||
+          profile.roleHints.includes(role) ||
+          (role === "pm" && profile.roleHints.includes("plan"));
+        if (!matchesRole) continue;
+        addOption(
+          profile.model,
+          profile.label,
+          profile.description || `${vendorLabel(record.vendor)} ${transportLabel(transport.transport)} profile`
+        );
+      }
+      for (const model of transport.models ?? []) {
+        addOption(
+          model,
+          model,
+          `Discovered from ${vendorLabel(record.vendor)} ${transportLabel(transport.transport).toLowerCase()}.`
+        );
+      }
+    }
+  }
+
+  for (const option of fallbackOptions) {
+    addOption(option.value, option.label, option.hint);
+  }
+  if (currentValue.trim()) {
+    addOption(currentValue, currentValue, "Currently selected model.");
+  }
+  return Array.from(options.values());
+}
 
 function deliveryRunModeLabel(value: string) {
   if (value === "manual_supervised") return "Manual and supervised";
@@ -150,9 +367,17 @@ export default function SettingsPage() {
   const [pmModelDefault, setPmModelDefault] = useState("gpt-5");
   const [devModelDefault, setDevModelDefault] = useState("codex");
   const [auditModelDefault, setAuditModelDefault] = useState("gpt-5");
+  const [pmEffortDefault, setPmEffortDefault] = useState<"" | ProviderEffort>("");
+  const [devEffortDefault, setDevEffortDefault] = useState<"" | ProviderEffort>("");
+  const [auditEffortDefault, setAuditEffortDefault] = useState<"" | ProviderEffort>("");
   const seededFromQueryRef = useRef(false);
-  const effectiveScope: Scope = scope === "workspace" && !workspaceId ? "global" : scope;
-  const [activeTab, setActiveTab] = useState("Providers" as Tab);
+  const { data: workspaces = [] } = useWorkspaces();
+  const [settingsMode, setSettingsMode] = useState<SettingsMode>("basic");
+  const [activeTab, setActiveTab] = useState<Tab>("Runtime");
+  const resolvedWorkspace = workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const hasResolvedWorkspace = Boolean(resolvedWorkspace);
+  const resolvedWorkspaceId = resolvedWorkspace?.id ?? "";
+  const effectiveScope: Scope = scope === "workspace" && hasResolvedWorkspace ? "workspace" : "global";
   const {
     providers: providerDiscovery,
     isLoading: providerDiscoveryLoading,
@@ -160,8 +385,20 @@ export default function SettingsPage() {
   } = useProviderDiscovery({
     scope: effectiveScope,
     workspaceId,
-    enabled: activeTab === "Providers"
+    enabled: settingsMode === "basic"
   });
+  const pmModelOptions = useMemo(
+    () => buildRoleModelOptions(providerDiscovery, "pm", PM_MODEL_FALLBACK_OPTIONS, pmModelDefault),
+    [pmModelDefault, providerDiscovery]
+  );
+  const devModelOptions = useMemo(
+    () => buildRoleModelOptions(providerDiscovery, "dev", DEV_MODEL_FALLBACK_OPTIONS, devModelDefault),
+    [devModelDefault, providerDiscovery]
+  );
+  const auditModelOptions = useMemo(
+    () => buildRoleModelOptions(providerDiscovery, "audit", AUDIT_MODEL_FALLBACK_OPTIONS, auditModelDefault),
+    [auditModelDefault, providerDiscovery]
+  );
 
   useEffect(() => {
     if (seededFromQueryRef.current) return;
@@ -169,7 +406,10 @@ export default function SettingsPage() {
     const scopeParam = searchParams.get("scope");
     const workspaceParam = searchParams.get("workspace");
 
-    if (tabParam && tabs.includes(tabParam as Tab)) {
+    if (tabParam === "Providers") {
+      setSettingsMode("basic");
+    } else if (tabParam && advancedTabs.includes(tabParam as Tab)) {
+      setSettingsMode("advanced");
       setActiveTab(tabParam as Tab);
     }
     if (scopeParam === "workspace" || scopeParam === "global") {
@@ -191,7 +431,28 @@ export default function SettingsPage() {
   }, [searchParams, selectedWorkspaceId]);
 
   useEffect(() => {
-    if (activeTab !== "Providers") return;
+    if (scope !== "workspace") return;
+    if (workspaceId) {
+      if (workspaces.length === 0) return;
+      if (workspaces.some((workspace) => workspace.id === workspaceId)) return;
+      setWorkspaceId("");
+      if (selectedWorkspaceId === workspaceId) {
+        setSelectedWorkspaceId("");
+      }
+      return;
+    }
+    if (workspaces.length === 1) {
+      const onlyWorkspaceId = workspaces[0]?.id ?? "";
+      if (!onlyWorkspaceId) return;
+      setWorkspaceId(onlyWorkspaceId);
+      if (selectedWorkspaceId !== onlyWorkspaceId) {
+        setSelectedWorkspaceId(onlyWorkspaceId);
+      }
+    }
+  }, [scope, workspaceId, workspaces, selectedWorkspaceId, setSelectedWorkspaceId]);
+
+  useEffect(() => {
+    if (settingsMode !== "basic") return;
     let cancelled = false;
 
     const loadSecrets = async () => {
@@ -208,7 +469,7 @@ export default function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, effectiveScope, workspaceId]);
+  }, [settingsMode, effectiveScope, workspaceId]);
 
   useEffect(() => {
     setShowApiFallbacks(false);
@@ -234,6 +495,9 @@ export default function SettingsPage() {
       setPmModelDefault(config.models?.pm ?? "gpt-5");
       setDevModelDefault(config.models?.dev ?? "codex");
       setAuditModelDefault(config.models?.audit ?? "gpt-5");
+      setPmEffortDefault(config.efforts?.pm ?? "");
+      setDevEffortDefault(config.efforts?.dev ?? "");
+      setAuditEffortDefault(config.efforts?.audit ?? "");
       setShellAllowlistText((config.shell_allowlist ?? []).join("\n"));
       setTelemetryEnabled(Boolean(config.telemetry?.enabled));
       setTelemetryEndpoint(config.telemetry?.endpoint ?? "");
@@ -242,9 +506,9 @@ export default function SettingsPage() {
   }, [effectiveScope, workspaceId]);
 
   useEffect(() => {
-    if (scope !== "workspace" || !workspaceId) return;
+    if (scope !== "workspace" || !resolvedWorkspaceId) return;
     const loadProfile = async () => {
-      const res = await fetch(`/api/profile?workspace=${encodeURIComponent(workspaceId)}`);
+      const res = await fetch(`/api/profile?workspace=${encodeURIComponent(resolvedWorkspaceId)}`);
       if (!res.ok) return;
       const data = await res.json();
       const profile = data.profile ?? {};
@@ -260,10 +524,10 @@ export default function SettingsPage() {
       setGovernanceQualityGate(Boolean(profile.governance?.quality_gate));
     };
     void loadProfile();
-  }, [scope, workspaceId]);
+  }, [scope, resolvedWorkspaceId]);
 
   useEffect(() => {
-    if (scope !== "workspace" || !workspaceId) {
+    if (scope !== "workspace" || !resolvedWorkspaceId) {
       setTeamPresetText("");
       setCapabilities([]);
       setSuggestedBindings([]);
@@ -271,8 +535,8 @@ export default function SettingsPage() {
     }
     const loadDeliverySetup = async () => {
       const [presetRes, capabilityRes] = await Promise.all([
-        fetch(`/api/team-preset?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" }),
-        fetch(`/api/capabilities?workspace=${encodeURIComponent(workspaceId)}`, { cache: "no-store" })
+        fetch(`/api/team-preset?workspace=${encodeURIComponent(resolvedWorkspaceId)}`, { cache: "no-store" }),
+        fetch(`/api/capabilities?workspace=${encodeURIComponent(resolvedWorkspaceId)}`, { cache: "no-store" })
       ]);
       const presetPayload = presetRes.ok ? ((await presetRes.json()) as TeamPresetPayload) : {};
       const capabilityPayload = capabilityRes.ok ? ((await capabilityRes.json()) as CapabilityDiscovery) : {};
@@ -284,13 +548,13 @@ export default function SettingsPage() {
       setTeamPresetDraft(normalizeTeamPresetDraft(presetSource, nextBindings));
     };
     void loadDeliverySetup();
-  }, [scope, workspaceId]);
+  }, [scope, resolvedWorkspaceId]);
 
   const handleSave = async () => {
     setErrors([]);
     setSaved(false);
-    if (scope === "workspace" && !workspaceId) {
-      setErrors(["Select a workspace first, or switch to Global scope."]);
+    if (scope === "workspace" && !resolvedWorkspaceId) {
+      setErrors(["Choose a valid workspace first, or switch to Global scope."]);
       return;
     }
     let models: Record<string, string> | undefined;
@@ -306,6 +570,11 @@ export default function SettingsPage() {
       dev: devModelDefault,
       audit: auditModelDefault
     };
+    const efforts = {
+      ...(pmEffortDefault ? { pm: pmEffortDefault } : {}),
+      ...(devEffortDefault ? { dev: devEffortDefault } : {}),
+      ...(auditEffortDefault ? { audit: auditEffortDefault } : {})
+    };
     const shell_allowlist = shellAllowlistText
       .split("\n")
       .map((line) => line.trim())
@@ -315,6 +584,7 @@ export default function SettingsPage() {
       sandbox: { enabled: sandboxEnabled, image: sandboxImage, network: sandboxNetwork },
       arbitration: { mode: arbMode, min_models: arbMin },
       models,
+      efforts: Object.keys(efforts).length > 0 ? efforts : undefined,
       shell_allowlist: shell_allowlist.length > 0 ? shell_allowlist : undefined,
       telemetry: { enabled: telemetryEnabled, endpoint: telemetryEndpoint || undefined }
     };
@@ -328,7 +598,7 @@ export default function SettingsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         scope,
-        workspaceId: scope === "workspace" ? workspaceId : undefined,
+        workspaceId: scope === "workspace" ? resolvedWorkspaceId : undefined,
         config: parsed.data
       })
     });
@@ -414,8 +684,8 @@ export default function SettingsPage() {
 
   const handleSaveProfile = async () => {
     setProfileMessage("");
-    if (!workspaceId) {
-      setProfileMessage("Select a workspace to save profile.");
+    if (scope !== "workspace" || !hasResolvedWorkspace) {
+      setProfileMessage("Switch to Workspace scope and select a valid workspace first.");
       return;
     }
     const maxCost = profileMaxCost ? Number(profileMaxCost) : undefined;
@@ -440,7 +710,7 @@ export default function SettingsPage() {
     const res = await fetch("/api/profile", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId, profile })
+      body: JSON.stringify({ workspaceId: resolvedWorkspaceId, profile })
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -451,15 +721,15 @@ export default function SettingsPage() {
   };
 
   const handleScaffoldPreset = async () => {
-    if (!workspaceId) {
-      setTeamPresetMessage("Select a workspace first.");
+    if (scope !== "workspace" || !hasResolvedWorkspace) {
+      setTeamPresetMessage("Switch to Workspace scope and select a valid workspace first.");
       return;
     }
     const res = await fetch("/api/team-preset/init", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        workspaceId,
+        workspaceId: resolvedWorkspaceId,
         force: true
       })
     });
@@ -477,10 +747,22 @@ export default function SettingsPage() {
     setTeamPresetMessage("Scaffolded team preset created.");
   };
 
+  const handleUseQuickPreset = async (presetId: (typeof QUICK_TEAM_PRESETS)[number]["id"]) => {
+    if (scope !== "workspace" || !hasResolvedWorkspace) {
+      setTeamPresetMessage("Choose one workspace first, then apply a team preset.");
+      return;
+    }
+    const draft = buildQuickTeamPresetDraft(presetId, capabilities);
+    setTeamPresetDraft(draft);
+    setTeamPresetText(JSON.stringify(serializeTeamPresetDraft(draft), null, 2));
+    setTeamPresetEditor("confirm");
+    await handleSaveTeamPresetPayload(serializeTeamPresetDraft(draft));
+  };
+
   const handleSaveTeamPreset = async () => {
     setTeamPresetMessage("");
-    if (!workspaceId) {
-      setTeamPresetMessage("Select a workspace first.");
+    if (scope !== "workspace" || !hasResolvedWorkspace) {
+      setTeamPresetMessage("Switch to Workspace scope and select a valid workspace first.");
       return;
     }
     let preset: unknown;
@@ -505,15 +787,15 @@ export default function SettingsPage() {
 
   const handleSaveTeamPresetPayload = async (preset: unknown) => {
     setTeamPresetMessage("");
-    if (!workspaceId) {
-      setTeamPresetMessage("Select a workspace first.");
+    if (scope !== "workspace" || !hasResolvedWorkspace) {
+      setTeamPresetMessage("Switch to Workspace scope and select a valid workspace first.");
       return;
     }
     const res = await fetch("/api/team-preset", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        workspaceId,
+        workspaceId: resolvedWorkspaceId,
         preset
       })
     });
@@ -532,49 +814,112 @@ export default function SettingsPage() {
   };
 
   return (
-    <main className="space-y-6">
-      {/* Header */}
-      <section className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-semibold text-white">Settings</h2>
-          <p className="text-sm text-slate-400">Configure providers, runtime, and workspace profile.</p>
-        </div>
-        <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/40 p-0.5">
-          <button
-            onClick={() => setScope("workspace")}
-            className={`rounded-md px-3 py-1.5 text-xs transition-colors ${scope === "workspace" ? "bg-slate-800 text-white" : "text-slate-400 hover:text-slate-300"}`}
-          >
-            Workspace
-          </button>
-          <button
-            onClick={() => setScope("global")}
-            className={`rounded-md px-3 py-1.5 text-xs transition-colors ${scope === "global" ? "bg-slate-800 text-white" : "text-slate-400 hover:text-slate-300"}`}
-          >
-            Global
-          </button>
-        </div>
-      </section>
+    <main className="page-shell">
+      <PageHeader
+        eyebrow="Settings"
+        title="Connect a provider, then pick a team preset"
+        description="Basic mode now stays narrow on purpose: workspace scope, provider setup, and one understandable team preset. Runtime tuning and raw configuration remain in Advanced."
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <SegmentedTabs
+              value={scope}
+              onChange={(value) => setScope(value)}
+              options={[
+                { value: "workspace", label: "Workspace" },
+                { value: "global", label: "Global" }
+              ]}
+            />
+            {scope === "workspace" && (
+              <WorkspaceSelector
+                includeAll={false}
+                className="min-w-[14rem] rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-200"
+              />
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                if (settingsMode === "advanced") {
+                  setSettingsMode("basic");
+                  return;
+                }
+                setSettingsMode("advanced");
+                if (!advancedTabs.includes(activeTab)) {
+                  setActiveTab("Runtime");
+                }
+              }}
+              className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+            >
+              {settingsMode === "advanced" ? "Hide Advanced" : "Show Advanced"}
+            </button>
+            <Link
+              href="/workspaces"
+              className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+            >
+              Manage Workspaces
+            </Link>
+          </div>
+        }
+      />
 
-      {/* Tab bar */}
-      <nav className="flex gap-1 border-b border-slate-800 pb-px">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2 text-xs font-medium transition-colors ${
-              activeTab === tab
-                ? "border-b-2 border-amber-400 text-amber-200"
-                : "border-b-2 border-transparent text-slate-500 hover:text-slate-300"
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-      </nav>
+      {settingsMode === "advanced" && (
+        <section className="space-y-3 rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-white">Advanced tuning</div>
+              <div className="mt-1 text-xs text-slate-500">
+                Provider connection and team preset stay above. Open these sections only when you really need runtime tuning or raw preset editing.
+              </div>
+            </div>
+          </div>
+          <nav className="flex flex-wrap gap-2">
+            {advancedTabs.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`rounded-xl border px-4 py-2 text-sm transition-colors ${
+                  activeTab === tab
+                    ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                    : "border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
+          </nav>
+        </section>
+      )}
 
-      {/* ── Providers Tab ── */}
-      {activeTab === "Providers" && (
+      {settingsMode === "basic" && (
         <section className="space-y-6">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-white">Workspace</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Settings follows the currently selected workspace. Register or switch repos here only when Work cannot proceed yet.
+                </p>
+              </div>
+              <Link
+                href="/workspaces"
+                className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+              >
+                Open workspace registry
+              </Link>
+            </div>
+            <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/30 px-4 py-4 text-sm text-slate-300">
+              {resolvedWorkspace ? (
+                <div className="space-y-1">
+                  <div className="font-medium text-white">{resolvedWorkspace.name ?? resolvedWorkspace.id}</div>
+                  <div className="text-xs text-slate-500">{resolvedWorkspace.path}</div>
+                </div>
+              ) : workspaces.length > 0 ? (
+                "Choose a workspace above so provider setup and team presets are scoped to the right repo."
+              ) : (
+                "No workspace is registered yet. Add one from Work first or open the workspace registry here."
+              )}
+            </div>
+          </div>
+
           <div>
             <div className="mb-3 flex items-center justify-between gap-4">
               <div>
@@ -742,66 +1087,124 @@ export default function SettingsPage() {
           )}
 
           <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-            <h3 className="text-sm font-semibold text-white">Role Default Models</h3>
+            <h3 className="text-sm font-semibold text-white">Team presets</h3>
             <p className="mt-1 text-xs text-slate-500">
-              These are default model preferences by role. They are not provider accounts. The provider above decides which tool runs; this section only sets the model family that role should prefer when the provider supports it.
+              Start from a preset instead of creating individual specialists. Advanced still lets you tune role models, workspace behavior, and raw preset JSON later.
             </p>
-            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3 text-[11px] text-slate-400">
-              Example: a Developer agent may still run through Copilot CLI, Cursor CLI, or Codex CLI, while this setting tells Orchestrum which model family to ask for by default.
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              {QUICK_TEAM_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => void handleUseQuickPreset(preset.id)}
+                  className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 text-left transition hover:border-slate-700 hover:bg-slate-900/55"
+                >
+                  <div className="text-sm font-semibold text-white">{preset.label}</div>
+                  <div className="mt-1 text-sm leading-6 text-slate-400">{preset.description}</div>
+                </button>
+              ))}
             </div>
-            <div className="mt-4 grid gap-4 sm:grid-cols-3 max-w-4xl">
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">PM</label>
-                <div className="mt-1 text-[11px] text-slate-500">Used for planning, scoping, and task breakdown.</div>
-                <select
-                  value={pmModelDefault}
-                  onChange={(event) => setPmModelDefault(event.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
-                >
-                  {PM_MODEL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label} · {option.hint}
-                    </option>
-                  ))}
-                </select>
+                <h3 className="text-sm font-semibold text-white">Current team preset</h3>
+                <p className="mt-1 text-xs text-slate-500">Set the preset name and run mode here. Use Advanced if you want full role routing, role model defaults, or raw JSON editing.</p>
               </div>
-              <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Developer</label>
-                <div className="mt-1 text-[11px] text-slate-500">Used for implementation, patch generation, and code edits.</div>
-                <select
-                  value={devModelDefault}
-                  onChange={(event) => setDevModelDefault(event.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleScaffoldPreset}
+                  className="rounded-xl border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs font-medium text-slate-200"
                 >
-                  {DEV_MODEL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label} · {option.hint}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Auditor</label>
-                <div className="mt-1 text-[11px] text-slate-500">Used for review, regression checks, and risk analysis.</div>
-                <select
-                  value={auditModelDefault}
-                  onChange={(event) => setAuditModelDefault(event.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                  Load starter preset
+                </button>
+                <button
+                  onClick={() => void handleSaveTeamPresetFromForm()}
+                  disabled={!teamPresetDraft}
+                  className="rounded-xl border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs font-medium text-emerald-200 disabled:opacity-40"
                 >
-                  {AUDIT_MODEL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label} · {option.hint}
-                    </option>
-                  ))}
-                </select>
+                  Save preset
+                </button>
               </div>
             </div>
+            {scope !== "workspace" ? (
+              <div className="mt-4 rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                Delivery presets are workspace-only. Switch to Workspace scope to edit them.
+              </div>
+            ) : !hasResolvedWorkspace ? (
+              <div className="mt-4 rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                {workspaces.length === 0
+                  ? "No workspace is registered yet. Add one from Work or open the workspace registry."
+                  : "Choose a workspace above to edit or scaffold its delivery preset."}
+              </div>
+            ) : !teamPresetDraft ? (
+              <div className="mt-4 rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                No preset draft loaded yet. Generate a starter preset first.
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Preset name</label>
+                    <input
+                      value={teamPresetDraft.name}
+                      onChange={(event) => setTeamPresetDraft((prev) => prev ? { ...prev, name: event.target.value } : prev)}
+                      className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Run mode</label>
+                    <select
+                      value={teamPresetDraft.defaultRunMode}
+                      onChange={(event) =>
+                        setTeamPresetDraft((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                defaultRunMode:
+                                  event.target.value === "manual_supervised"
+                                    ? "manual_supervised"
+                                    : "max_auto_supervised_hybrid"
+                              }
+                            : prev
+                        )
+                      }
+                      className="mt-2 w-full rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="max_auto_supervised_hybrid">{deliveryRunModeLabel("max_auto_supervised_hybrid")}</option>
+                      <option value="manual_supervised">{deliveryRunModeLabel("manual_supervised")}</option>
+                    </select>
+                    <div className="mt-2 text-[11px] text-slate-500">
+                      {deliveryRunModeHint(teamPresetDraft.defaultRunMode)}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {teamPresetDraft.roles.map((role) => (
+                    <div key={role.id} className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
+                      <div className="text-sm font-medium text-white">{role.label}</div>
+                      <div className="mt-1 text-xs text-slate-500">{role.description ?? role.id}</div>
+                      <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-400">
+                        <span className="rounded-full border border-slate-700 px-2.5 py-1">
+                          {deliveryRoleModeLabel(role.mode)}
+                        </span>
+                        <span className="rounded-full border border-slate-700 px-2.5 py-1">
+                          {role.mode === "disabled" ? "Disabled" : toolLabel(role.target)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {teamPresetMessage && <div className="mt-4 text-xs text-slate-400">{teamPresetMessage}</div>}
           </div>
         </section>
       )}
 
       {/* ── Runtime Tab ── */}
-      {activeTab === "Runtime" && (
+      {settingsMode === "advanced" && activeTab === "Runtime" && (
         <section className="space-y-6">
           <div className="rounded-2xl border border-slate-800 bg-slate-900/20 p-5">
             <h3 className="text-sm font-semibold text-white">What this tab controls</h3>
@@ -888,6 +1291,111 @@ export default function SettingsPage() {
             </div>
           </div>
 
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+            <h3 className="text-sm font-semibold text-white">Role model defaults</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              These stay in Advanced because they are role-level preferences, not provider accounts. The provider picks the tool; this section picks the model family that role should ask for by default.
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-3 max-w-4xl">
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">PM</label>
+                <select
+                  value={pmModelDefault}
+                  onChange={(event) => setPmModelDefault(event.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                >
+                  {pmModelOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Developer</label>
+                <select
+                  value={devModelDefault}
+                  onChange={(event) => setDevModelDefault(event.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                >
+                  {devModelOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Auditor</label>
+                <select
+                  value={auditModelDefault}
+                  onChange={(event) => setAuditModelDefault(event.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                >
+                  {auditModelOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
+            <h3 className="text-sm font-semibold text-white">Role reasoning defaults</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Set reasoning effort separately per role. Leave a role on provider default when you only want model separation, or pin it when PM, developer, and auditor should reason at different depths.
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-3 max-w-4xl">
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">PM</label>
+                <select
+                  value={pmEffortDefault}
+                  onChange={(event) => setPmEffortDefault(event.target.value as "" | ProviderEffort)}
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                >
+                  {ROLE_EFFORT_OPTIONS.map((option) => (
+                    <option key={`pm-${option.value || "default"}`} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Developer</label>
+                <select
+                  value={devEffortDefault}
+                  onChange={(event) => setDevEffortDefault(event.target.value as "" | ProviderEffort)}
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                >
+                  {ROLE_EFFORT_OPTIONS.map((option) => (
+                    <option key={`dev-${option.value || "default"}`} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Auditor</label>
+                <select
+                  value={auditEffortDefault}
+                  onChange={(event) => setAuditEffortDefault(event.target.value as "" | ProviderEffort)}
+                  className="mt-2 w-full rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                >
+                  {ROLE_EFFORT_OPTIONS.map((option) => (
+                    <option key={`audit-${option.value || "default"}`} value={option.value}>
+                      {option.label} · {option.hint}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="mt-4 text-[11px] text-slate-500">
+              Some CLI/model pairs still reject `max`. Orchestrum now steps down to the highest supported effort instead of hard-failing the run.
+            </div>
+          </div>
+
           {errors.length > 0 && (
             <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-xs text-rose-200">
               {errors.map((err) => <div key={err}>{err}</div>)}
@@ -905,7 +1413,7 @@ export default function SettingsPage() {
       )}
 
       {/* ── Profile Tab ── */}
-      {activeTab === "Profile" && (
+      {settingsMode === "advanced" && activeTab === "Profile" && (
         <section className="space-y-6">
           {scope === "workspace" && !workspaceId ? (
             <div className="rounded-2xl border border-dashed border-slate-700 p-8 text-center">
@@ -1213,7 +1721,7 @@ export default function SettingsPage() {
       )}
 
       {/* ── Advanced Tab ── */}
-      {activeTab === "Advanced" && (
+      {settingsMode === "advanced" && activeTab === "Advanced" && (
         <section className="space-y-6">
           <div className="rounded-2xl border border-slate-800 bg-slate-900/20 p-5">
             <h3 className="text-sm font-semibold text-white">What this tab controls</h3>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useAppUi } from "@/components/AppUiProvider";
 import { ModalFrame } from "@/components/ModalFrame";
 
@@ -15,43 +15,42 @@ type ActionItem = {
 
 export function CommandPalette() {
   const router = useRouter();
-  const pathname = usePathname();
-  const { commandPaletteOpen, closeCommandPalette, openRunConfig } = useAppUi();
+  const { commandPaletteOpen, closeCommandPalette } = useAppUi();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const actions = useMemo<ActionItem[]>(
+  const coreActions = useMemo<ActionItem[]>(
     () => [
-      { id: "new-run", label: "New Run", section: "Actions", shortcut: "⌘N", run: () => openRunConfig() },
-      { id: "nav-dashboard", label: "Go to Dashboard", section: "Navigation", run: () => router.push("/") },
+      { id: "launch-feature", label: "Launch Feature Work", section: "Launch", shortcut: "⌘N", run: () => router.push("/work?launch=feature") },
+      { id: "launch-audit", label: "Launch Audit", section: "Launch", run: () => router.push("/work?launch=audit") },
+      { id: "launch-browser", label: "Launch Browser Smoke", section: "Launch", run: () => router.push("/work?launch=browser") },
       { id: "nav-work", label: "Go to Work", section: "Navigation", run: () => router.push("/work") },
-      { id: "nav-agents", label: "Go to Specialists", section: "Navigation", run: () => router.push("/agents") },
-      { id: "nav-org", label: "Go to Team Map", section: "Navigation", run: () => router.push("/org") },
-      { id: "nav-browser", label: "Go to Browser Smoke", section: "Navigation", run: () => router.push("/browser") },
-      { id: "nav-workspaces", label: "Go to Workspaces", section: "Navigation", run: () => router.push("/workspaces") },
-      { id: "nav-templates", label: "Go to Mission Templates", section: "Navigation", run: () => router.push("/templates") },
-      { id: "nav-plugins", label: "Go to Plugins", section: "Navigation", run: () => router.push("/plugins") },
       { id: "nav-runs", label: "Go to Runs", section: "Navigation", run: () => router.push("/runs") },
-      { id: "nav-mission", label: "Go to Execution Feed", section: "Navigation", run: () => router.push("/mission") },
-      { id: "nav-metrics", label: "Go to Metrics", section: "Navigation", run: () => router.push("/metrics") },
-      { id: "nav-settings", label: "Open Settings", section: "Navigation", run: () => router.push("/settings") },
       { id: "nav-diagnostics", label: "Go to Diagnostics", section: "Navigation", run: () => router.push("/diagnostics") },
-      { id: "nav-help", label: "Open Help & Docs", section: "Navigation", run: () => router.push("/help") },
-      { id: "nav-about", label: "About Orchestrum", section: "Navigation", run: () => router.push("/about") },
-      { id: "nav-changelog", label: "View Changelog", section: "Navigation", run: () => router.push("/changelog") },
+      { id: "nav-workspaces", label: "Go to Workspaces", section: "Navigation", run: () => router.push("/workspaces") },
+      { id: "nav-settings", label: "Open Settings", section: "Navigation", run: () => router.push("/settings") },
     ],
-    [openRunConfig, router]
+    [router]
+  );
+
+  const supportActions = useMemo<ActionItem[]>(
+    () => [
+      { id: "nav-help", label: "Open Help & Docs", section: "Support", run: () => router.push("/help") },
+      { id: "nav-about", label: "About Orchestrum", section: "Support", run: () => router.push("/about") },
+    ],
+    [router]
   );
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return actions;
+    const combined = query.trim() ? [...coreActions, ...supportActions] : coreActions;
+    if (!query.trim()) return combined;
     const needle = query.trim().toLowerCase();
-    return actions.filter(
+    return combined.filter(
       (a) => a.label.toLowerCase().includes(needle) || a.section.toLowerCase().includes(needle)
     );
-  }, [actions, query]);
+  }, [coreActions, query, supportActions]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, ActionItem[]>();

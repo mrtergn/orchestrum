@@ -19,6 +19,53 @@ body {
   background: radial-gradient(circle at top, #1f2937 0%, #0f172a 45%, #0b1120 100%);
   min-height: 100vh;
   font-family: "Space Grotesk", sans-serif;
+  overflow-x: hidden;
+}
+
+html {
+  overflow-x: hidden;
+}
+
+@layer components {
+  .page-shell {
+    @apply space-y-6 min-w-0;
+  }
+
+  .page-header {
+    @apply flex flex-wrap items-start justify-between gap-4 min-w-0;
+  }
+
+  .page-eyebrow {
+    @apply text-[11px] font-medium uppercase tracking-[0.22em] text-slate-500;
+  }
+
+  .surface-panel {
+    @apply min-w-0 rounded-3xl border border-slate-800/90 bg-slate-950/45 p-5 shadow-[0_12px_36px_rgba(2,6,23,0.16)];
+  }
+
+  .metric-strip {
+    @apply grid gap-3 sm:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .inspect-surface {
+    @apply min-w-0 overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70;
+  }
+
+  .inspect-scroll {
+    @apply min-w-0 overflow-auto rounded-2xl border border-slate-800 bg-slate-950/75 p-4;
+  }
+
+  .page-columns {
+    @apply grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)] min-w-0;
+  }
+
+  .summary-stack {
+    @apply space-y-4 min-w-0;
+  }
+
+  .bounded-copy {
+    @apply max-w-3xl text-sm leading-6 text-slate-400;
+  }
 }
 
 /* ── Animations ── */
@@ -68,6 +115,13 @@ main > *:nth-child(5) { animation-delay: 160ms; }
 main > *:nth-child(6) { animation-delay: 200ms; }
 main > *:nth-child(7) { animation-delay: 240ms; }
 main > *:nth-child(8) { animation-delay: 280ms; }
+
+main,
+section,
+article,
+div {
+  min-width: 0;
+}
 
 /* ── Smooth transitions on interactive elements ── */
 button, a, select, input, textarea {

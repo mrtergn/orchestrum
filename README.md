@@ -17,16 +17,16 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 
 # Orchestrum
 
-### **The Local-First AI Engineering Control Plane**
+### **The Local-First AI Repo Work Runtime**
 
-*Mission orchestration, delivery handoff, and browser smoke evidence for teams that want AI leverage without surrendering the repo.*
+*Work-first supervised repo execution, delivery handoff, and browser smoke evidence for teams that want AI leverage without surrendering the repo.*
 
 [![Local-First](https://img.shields.io/badge/Local--First-runs%20on%20your%20machine-0f766e?style=for-the-badge)](docs/ARCHITECTURE.md)
 [![MIT License](https://img.shields.io/badge/license-MIT-10b981?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-5fa04e?style=for-the-badge&logo=node.js&logoColor=white)](package.json)
 [![Electron Shell](https://img.shields.io/badge/Electron-Shell-47848f?style=for-the-badge&logo=electron&logoColor=white)](apps/desktop/package.json)
 
-<sub>TypeScript strict | Next.js UI | local service | mission/browser plugin hooks | filesystem-backed runs</sub>
+<sub>TypeScript strict | Next.js UI | local service | work-first runtime | filesystem-backed runs</sub>
 
 <p>
   <a href="#showcase">Showcase</a> |
@@ -51,10 +51,10 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 <tr>
 <td width="33%" valign="top" align="center">
 
-<img alt="Mission Control panel" src=".github/assets/readme/panel-mission.svg" width="100%">
+<img alt="Work panel" src=".github/assets/readme/panel-mission.svg" width="100%">
 
-<p><strong>Mission Control</strong></p>
-<sub>Live feed, queue pressure, active missions, and an event tape that feels operational.</sub>
+<p><strong>Work</strong></p>
+<sub>Start feature work, audits, and browser evidence from one operator surface backed by real runtime state.</sub>
 
 </td>
 <td width="33%" valign="top" align="center">
@@ -88,13 +88,13 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 <tr>
 <td width="33%" valign="top" align="center">
 
-<img alt="Mission icon" src=".github/assets/readme/icon-mission.svg" width="56">
+<img alt="Work icon" src=".github/assets/readme/icon-mission.svg" width="56">
 
-<p><strong><code>mission</code></strong></p>
+<p><strong><code>work</code></strong></p>
 
-<p>Built-in execution graphs for supervised engineering work with explicit patch, validation, and evidence truth.</p>
+<p>The primary product surface. Start feature work, findings-only audits, or browser evidence and review the result from one work-first flow.</p>
 
-<p><code>orchestrum mission start --template feature-dev ...</code></p>
+<p><code>/work</code> in the UI</p>
 
 </td>
 <td width="33%" valign="top" align="center">
@@ -122,7 +122,7 @@ Update claims for accuracy, but keep the presentation structure and narrative fl
 </tr>
 </table>
 
-Supporting pages such as Mission Control, Diagnostics, Templates, Runs, and Workspaces reinforce that core loop without replacing it.
+Supporting pages such as Runs, Diagnostics, and Workspaces reinforce that core loop without replacing it.
 
 Legacy YAML workflow execution has been removed from the project.
 
@@ -135,11 +135,11 @@ Legacy YAML workflow execution has been removed from the project.
 <td width="50%" valign="top">
 
 <img alt="Mission icon" src=".github/assets/readme/icon-mission.svg" width="34">
-<strong>Built-in Missions</strong>
+<strong>Work-First Runtime</strong>
 <ul>
-  <li>Start from built-in mission templates instead of wiring raw workflows.</li>
-  <li>Track node artifacts, events, and run logs on the local filesystem.</li>
-  <li>Pause for external handoff and continue with mission import flows.</li>
+  <li>Start from one guided Work surface instead of assembling a control room by hand.</li>
+  <li>Track workstreams, gates, evidence, and run logs on the local filesystem.</li>
+  <li>Inspect raw runtime detail only when needed; summary comes first.</li>
 </ul>
 
 </td>
@@ -172,7 +172,7 @@ Legacy YAML workflow execution has been removed from the project.
 <img alt="Orchestrum mark" src="apps/ui/public/favicon.svg" width="30">
 <strong>Local Platform</strong>
 <ul>
-  <li>Operate through the CLI, the Next.js UI, or the experimental Electron shell.</li>
+  <li>Operate through the CLI, the Next.js UI, or the preview Electron desktop shell.</li>
   <li>Use the local service for API access, indexing, recovery, and SSE streaming.</li>
   <li>Install workspace-scoped plugins and keep operational truth under <code>.orchestrum/control/</code>.</li>
   <li>Treat plugins as trusted local JS hooks; they are capability-checked, but not sandboxed.</li>

@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 
+const MAX_ERROR_ARG_CHARS = 160;
+const MAX_ERROR_ARGS = 12;
+
 export type BinaryRunOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -29,6 +32,7 @@ export async function lookupBinary(name: string, env?: NodeJS.ProcessEnv): Promi
 export function runBinary(command: string, args: string[], options: BinaryRunOptions = {}): Promise<BinaryRunResult> {
   return new Promise((resolve, reject) => {
     const invocation = resolveSpawnInvocation(command, args);
+    const invocationSummary = formatSpawnInvocationForError(command, args);
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: options.env,
@@ -62,7 +66,7 @@ export function runBinary(command: string, args: string[], options: BinaryRunOpt
       if (exitCode === 0 || options.allowNonZeroExit) {
         settle(null, { stdout, stderr, exitCode });
       } else {
-        const error = new Error(stderr.trim() || `${command} ${args.join(" ")} failed with code ${exitCode}`);
+        const error = new Error(stderr.trim() || `${invocationSummary} failed with code ${exitCode}`);
         settle(error);
       }
     });
@@ -70,7 +74,7 @@ export function runBinary(command: string, args: string[], options: BinaryRunOpt
     if (options.timeoutMs && options.timeoutMs > 0) {
       timeout = setTimeout(() => {
         child.kill("SIGTERM");
-        settle(new Error(`${command} ${args.join(" ")} timed out after ${options.timeoutMs}ms`));
+        settle(new Error(`${invocationSummary} timed out after ${options.timeoutMs}ms`));
       }, options.timeoutMs);
     }
 
@@ -106,4 +110,20 @@ function resolveSpawnInvocation(
     args,
     shell: false
   };
+}
+
+function formatSpawnInvocationForError(command: string, args: string[]): string {
+  const renderedArgs = args.slice(0, MAX_ERROR_ARGS).map((arg, index) => formatSpawnArgForError(arg, index));
+  if (args.length > MAX_ERROR_ARGS) {
+    renderedArgs.push(`... (${args.length - MAX_ERROR_ARGS} more args omitted)`);
+  }
+  return [command, ...renderedArgs].join(" ");
+}
+
+function formatSpawnArgForError(arg: string, index: number): string {
+  const normalized = String(arg).replace(/\s+/g, " ").trim();
+  if (normalized.length > MAX_ERROR_ARG_CHARS) {
+    return `<arg ${index + 1} omitted: ${normalized.length} chars>`;
+  }
+  return normalized || `""`;
 }

@@ -54,6 +54,7 @@ const ConfigSchema = z.object({
   version: z.literal(1).optional(),
   concurrency: ConcurrencySchema.optional(),
   models: z.record(z.string()).optional(),
+  efforts: z.record(z.enum(["minimal", "low", "medium", "high", "max"])).optional(),
   arbitration: z
     .object({
       mode: z.enum(["vote", "score", "fastest"]).optional(),

@@ -1,6 +1,6 @@
 export type ProviderVendor = "codex" | "copilot" | "claude" | "cursor" | "openai" | "ollama" | "llama.cpp";
 export type ProviderTransport = "cli" | "api" | "local_http";
-export type ProviderEffort = "low" | "medium" | "high" | "max";
+export type ProviderEffort = "minimal" | "low" | "medium" | "high" | "max";
 
 export type ProviderAuthConfig = {
   kind: "cli" | "api_key" | "none";
@@ -46,6 +46,12 @@ export type ProviderDiscoveryTransport = {
   version?: string;
   authSource?: string | null;
   models?: string[];
+  modelEffortSupport?: Array<{
+    model: string;
+    supportedEfforts: string[];
+    updatedAt?: string;
+    source?: string;
+  }>;
   profiles: ProviderProfile[];
   capabilities: ProviderCapabilitySummary;
 };

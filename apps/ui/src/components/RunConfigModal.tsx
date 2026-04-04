@@ -31,6 +31,7 @@ type StartResponse = {
 };
 
 type RunKind = "mission" | "qa" | "benchmark" | "canary";
+type EffortValue = "" | "minimal" | "low" | "medium" | "high" | "max";
 
 type RunConfigState = {
   workspaces: Workspace[];
@@ -48,6 +49,9 @@ type RunConfigState = {
   pmModel: string;
   devModel: string;
   auditModel: string;
+  pmEffort: EffortValue;
+  devEffort: EffortValue;
+  auditEffort: EffortValue;
   starting: boolean;
   error: string;
 };
@@ -68,6 +72,9 @@ type RunConfigAction =
   | { type: "setPmModel"; pmModel: string }
   | { type: "setDevModel"; devModel: string }
   | { type: "setAuditModel"; auditModel: string }
+  | { type: "setPmEffort"; pmEffort: RunConfigState["pmEffort"] }
+  | { type: "setDevEffort"; devEffort: RunConfigState["devEffort"] }
+  | { type: "setAuditEffort"; auditEffort: RunConfigState["auditEffort"] }
   | { type: "setStarting"; starting: boolean }
   | { type: "setError"; error: string };
 
@@ -87,6 +94,9 @@ const INITIAL_STATE: RunConfigState = {
   pmModel: "",
   devModel: "",
   auditModel: "",
+  pmEffort: "",
+  devEffort: "",
+  auditEffort: "",
   starting: false,
   error: ""
 };
@@ -109,6 +119,9 @@ function runConfigReducer(state: RunConfigState, action: RunConfigAction): RunCo
         pmModel: "",
         devModel: "",
         auditModel: "",
+        pmEffort: "",
+        devEffort: "",
+        auditEffort: "",
         starting: false,
         error: ""
       };
@@ -144,6 +157,12 @@ function runConfigReducer(state: RunConfigState, action: RunConfigAction): RunCo
       return { ...state, devModel: action.devModel };
     case "setAuditModel":
       return { ...state, auditModel: action.auditModel };
+    case "setPmEffort":
+      return { ...state, pmEffort: action.pmEffort };
+    case "setDevEffort":
+      return { ...state, devEffort: action.devEffort };
+    case "setAuditEffort":
+      return { ...state, auditEffort: action.auditEffort };
     case "setStarting":
       return { ...state, starting: action.starting };
     case "setError":
@@ -169,6 +188,17 @@ export function RunConfigModal() {
   const [state, dispatch] = useReducer(runConfigReducer, INITIAL_STATE);
   const isMissionRun = state.runKind === "mission";
   const isBrowserRun = state.runKind === "qa" || state.runKind === "benchmark" || state.runKind === "canary";
+  const effortOptions = useMemo(
+    () => [
+      { value: "", label: "Provider default" },
+      { value: "minimal", label: "Minimal" },
+      { value: "low", label: "Low" },
+      { value: "medium", label: "Medium" },
+      { value: "high", label: "High" },
+      { value: "max", label: "Max" }
+    ],
+    []
+  );
 
   useEffect(() => {
     if (!runConfigOpen) return;
@@ -242,6 +272,10 @@ export function RunConfigModal() {
     if (state.pmModel.trim()) modelOverrides.pm = state.pmModel.trim();
     if (state.devModel.trim()) modelOverrides.dev = state.devModel.trim();
     if (state.auditModel.trim()) modelOverrides.audit = state.auditModel.trim();
+    const effortOverrides: Record<string, string> = {};
+    if (state.pmEffort) effortOverrides.pm = state.pmEffort;
+    if (state.devEffort) effortOverrides.dev = state.devEffort;
+    if (state.auditEffort) effortOverrides.audit = state.auditEffort;
 
     const parsedConcurrency = Number(state.concurrency);
     const concurrencyValue = Number.isFinite(parsedConcurrency) && parsedConcurrency > 0
@@ -269,7 +303,8 @@ export function RunConfigModal() {
               userGoal: state.goal.trim(),
               options: {
                 concurrency: concurrencyValue,
-                modelOverrides
+                modelOverrides,
+                effortOverrides
               }
             }
           : {
@@ -319,7 +354,7 @@ export function RunConfigModal() {
     >
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold text-white">New Run</h3>
+            <h3 className="text-lg font-semibold text-white">Direct Run</h3>
             <p className="text-xs text-slate-400">Configure and launch a mission from the UI.</p>
           </div>
           <button
@@ -508,6 +543,35 @@ export function RunConfigModal() {
                     placeholder="AUDIT model override"
                     className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
                   />
+                </div>
+                <div className="grid gap-2 md:grid-cols-3">
+                  <select
+                    value={state.pmEffort}
+                    onChange={(event) => dispatch({ type: "setPmEffort", pmEffort: event.target.value as RunConfigState["pmEffort"] })}
+                    className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                  >
+                    {effortOptions.map((option) => (
+                      <option key={`pm-${option.value || "default"}`} value={option.value}>{option.label} effort</option>
+                    ))}
+                  </select>
+                  <select
+                    value={state.devEffort}
+                    onChange={(event) => dispatch({ type: "setDevEffort", devEffort: event.target.value as RunConfigState["devEffort"] })}
+                    className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                  >
+                    {effortOptions.map((option) => (
+                      <option key={`dev-${option.value || "default"}`} value={option.value}>{option.label} effort</option>
+                    ))}
+                  </select>
+                  <select
+                    value={state.auditEffort}
+                    onChange={(event) => dispatch({ type: "setAuditEffort", auditEffort: event.target.value as RunConfigState["auditEffort"] })}
+                    className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-200"
+                  >
+                    {effortOptions.map((option) => (
+                      <option key={`audit-${option.value || "default"}`} value={option.value}>{option.label} effort</option>
+                    ))}
+                  </select>
                 </div>
               </div>
             )}

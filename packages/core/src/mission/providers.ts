@@ -6,6 +6,7 @@ import { OllamaProvider } from "../runner/providers/ollama.js";
 import { LlamaCppProvider } from "../runner/providers/llamaCpp.js";
 import { ClaudeProvider } from "../runner/providers/claude.js";
 import { lookupBinary, runBinary } from "../runner/bin.js";
+import { getWorkspaceProviderCapabilitiesPath } from "../runner/control.js";
 import type { AgentResult } from "../agents/index.js";
 import type {
   CanonicalProvider,
@@ -61,6 +62,24 @@ type ResolvedProviderExecution = {
   executor?: NodeExecutorKind;
 };
 
+type CliReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+type ProviderCapabilityCacheEntry = {
+  vendor: ProviderVendor;
+  transport: "cli";
+  model: string;
+  supportedEfforts: CliReasoningEffort[];
+  updatedAt: string;
+  source: "error_response" | "probe";
+};
+
+type ProviderCapabilityCache = {
+  version: 1;
+  effortSupport: ProviderCapabilityCacheEntry[];
+};
+
+const CLI_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+
 const CLI_VENDOR_BINARIES: Partial<Record<ProviderVendor, string>> = {
   codex: "codex",
   copilot: "copilot",
@@ -80,7 +99,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderVendor, SupportedTransport[]> = {
     transport: "cli",
     capabilities: {
       supportsTools: true,
-      supportsEffort: false,
+      supportsEffort: true,
       supportsReadOnlyMode: true,
       supportsJsonOutput: true,
       supportsModelDiscovery: false,
@@ -140,7 +159,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderVendor, SupportedTransport[]> = {
       supportsEffort: false,
       supportsReadOnlyMode: false,
       supportsJsonOutput: false,
-      supportsModelDiscovery: false,
+      supportsModelDiscovery: true,
       supportsAuthProbe: false
     }
   }],
@@ -151,7 +170,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderVendor, SupportedTransport[]> = {
       supportsEffort: false,
       supportsReadOnlyMode: false,
       supportsJsonOutput: false,
-      supportsModelDiscovery: false,
+      supportsModelDiscovery: true,
       supportsAuthProbe: false
     }
   }],
@@ -162,7 +181,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderVendor, SupportedTransport[]> = {
       supportsEffort: false,
       supportsReadOnlyMode: false,
       supportsJsonOutput: false,
-      supportsModelDiscovery: false,
+      supportsModelDiscovery: true,
       supportsAuthProbe: false
     }
   }]
@@ -310,6 +329,13 @@ const PROVIDER_PROFILES: ProviderProfile[] = [
 
 const PROFILE_MAP = new Map(PROVIDER_PROFILES.map((profile) => [profile.id, profile]));
 
+function emptyProviderCapabilityCache(): ProviderCapabilityCache {
+  return {
+    version: 1,
+    effortSupport: []
+  };
+}
+
 export function normalizeCanonicalProvider(input: string | null | undefined): CanonicalProvider {
   const normalized = (input ?? "").trim().toLowerCase();
   if (normalized === "codex") return "codex";
@@ -405,15 +431,19 @@ export function normalizeMissionProvider(input: unknown, role?: string): Provide
   const provider = input as Record<string, unknown>;
 
   if (typeof provider.vendor === "string" || typeof provider.transport === "string") {
-    return {
+    return repairNormalizedProviderSpec({
       vendor: normalizeCanonicalProvider(readString(provider.vendor) ?? roleVendorFallback(role)),
       transport: normalizeProviderTransport(readString(provider.transport) ?? inferDefaultTransport(readString(provider.vendor) ?? undefined)),
       profileId: readString(provider.profileId) ?? undefined,
-      modelOverride: readString(provider.modelOverride) ?? undefined,
+      modelOverride: normalizeProviderModelOverride(
+        normalizeCanonicalProvider(readString(provider.vendor) ?? roleVendorFallback(role)),
+        normalizeProviderTransport(readString(provider.transport) ?? inferDefaultTransport(readString(provider.vendor) ?? undefined)),
+        readString(provider.modelOverride) ?? undefined
+      ),
       effort: normalizeEffort(readString(provider.effort)) ?? undefined,
       auth: normalizeAuthConfig(provider.auth, readString(provider.vendor) ?? undefined, readString(provider.transport) ?? undefined),
       fallback: normalizeFallback(provider.fallback)
-    };
+    }, role);
   }
 
   if (
@@ -432,6 +462,7 @@ export async function discoverMissionProviders(options: {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   apiSecrets?: Partial<Record<"openai" | "claude", boolean>>;
+  apiKeys?: Partial<Record<"openai" | "claude", string>>;
 } = {}): Promise<ProviderDiscoveryRecord[]> {
   const env = options.env ?? process.env;
   const cwd = options.cwd;
@@ -443,7 +474,7 @@ export async function discoverMissionProviders(options: {
         return discoverCliTransport(vendor, capabilities, cwd, env);
       }
       if (transport === "api") {
-        return discoverApiTransport(vendor, capabilities, env, options.apiSecrets);
+        return discoverApiTransport(vendor, capabilities, env, options.apiSecrets, options.apiKeys);
       }
       return discoverLocalHttpTransport(vendor, capabilities, env);
     }));
@@ -467,8 +498,60 @@ export async function completeWithProvider(
   env: NodeJS.ProcessEnv,
   options: ProviderExecutionOptions = {}
 ): Promise<ProviderExecutionResult> {
-  const resolved = await resolveProviderExecution(spec, env, options);
+  const normalized = normalizeMissionProvider(spec, options.role);
+  const discovery = await discoverMissionProviders({
+    cwd: options.repoPath,
+    env,
+    apiSecrets: options.apiSecrets
+  });
+  const candidates = buildProviderExecutionCandidates(normalized, options.role);
+  const attemptedExecutions = new Set<string>();
+  const executionErrors: string[] = [];
+  let resolvedAnyCandidate = false;
 
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    if (!candidate) continue;
+    const resolved = await resolveProviderExecutionCandidate(candidate, discovery, options.role, options.executor);
+    if (!resolved) continue;
+    resolvedAnyCandidate = true;
+    const attemptKey = resolvedProviderAttemptKey(resolved);
+    if (attemptedExecutions.has(attemptKey)) continue;
+    attemptedExecutions.add(attemptKey);
+    try {
+      const timeoutMs = resolveExecutionTimeoutMs({
+        requestedTimeoutMs: options.timeoutMs,
+        executor: options.executor,
+        resolved,
+        hasFallbackRemaining: index < candidates.length - 1
+      });
+      return await executeResolvedProvider(resolved, prompt, env, { ...options, timeoutMs });
+    } catch (error) {
+      executionErrors.push(formatProviderExecutionError(resolved, error));
+    }
+  }
+
+  if (!resolvedAnyCandidate) {
+    throw await buildProviderUnavailableError(normalized, discovery);
+  }
+
+  if (executionErrors.length === 1) {
+    throw new Error(executionErrors[0]);
+  }
+
+  if (executionErrors.length > 1) {
+    throw new Error(executionErrors.join(" Fallbacks exhausted. "));
+  }
+
+  throw await buildProviderUnavailableError(normalized, discovery);
+}
+
+async function executeResolvedProvider(
+  resolved: ResolvedProviderExecution,
+  prompt: string,
+  env: NodeJS.ProcessEnv,
+  options: ProviderExecutionOptions = {}
+): Promise<ProviderExecutionResult> {
   if (resolved.transport === "cli") {
     return completeWithCli(resolved, prompt, env, options);
   }
@@ -553,6 +636,124 @@ export async function completeWithProvider(
   };
 }
 
+function buildProviderExecutionCandidates(
+  spec: ProviderSpec,
+  role?: string
+): Array<Omit<ProviderSpec, "fallback">> {
+  const candidates: Array<Omit<ProviderSpec, "fallback">> = [];
+  const seen = new Set<string>();
+  const appendCandidate = (input: ProviderSpec | null | undefined) => {
+    if (!input) return;
+    const repaired = repairNormalizedProviderSpec(input, role);
+    const key = providerSpecCandidateKey(repaired);
+    if (!seen.has(key)) {
+      seen.add(key);
+      const { fallback: _fallback, ...candidate } = repaired;
+      candidates.push(candidate);
+    }
+    if (repaired.fallback) {
+      appendCandidate({ ...repaired.fallback, fallback: null });
+    }
+  };
+
+  appendCandidate(spec);
+  const roleDefault = defaultProviderForRole(role);
+  appendCandidate(roleDefault);
+  return candidates;
+}
+
+function providerSpecCandidateKey(spec: ProviderSpec): string {
+  return [
+    spec.vendor,
+    spec.transport,
+    spec.profileId ?? "",
+    spec.modelOverride ?? "",
+    spec.effort ?? "",
+    spec.auth?.kind ?? "",
+    spec.auth?.secretRef ?? ""
+  ].join("|");
+}
+
+function resolvedProviderAttemptKey(spec: ResolvedProviderExecution): string {
+  return [
+    spec.vendor,
+    spec.transport,
+    spec.profileId ?? "",
+    spec.model,
+    spec.effort ?? "",
+    spec.binaryPath ?? "",
+    spec.authSource ?? ""
+  ].join("|");
+}
+
+async function resolveProviderExecutionCandidate(
+  spec: Omit<ProviderSpec, "fallback">,
+  discovery: ProviderDiscoveryRecord[],
+  role?: string,
+  executor?: NodeExecutorKind
+): Promise<ResolvedProviderExecution | null> {
+  const direct = await resolveCandidate(spec, discovery, role, executor);
+  if (direct) return direct;
+
+  const providerRecord = discovery.find((entry) => entry.vendor === spec.vendor);
+  const preferredTransport = providerRecord?.preferredTransport;
+  if (preferredTransport && preferredTransport !== spec.transport) {
+    return resolveCandidate(
+      repairNormalizedProviderSpec({
+        ...spec,
+        transport: preferredTransport,
+        auth: defaultAuthFor(spec.vendor, preferredTransport),
+        fallback: null
+      }, role),
+      discovery,
+      role,
+      executor
+    );
+  }
+
+  return null;
+}
+
+async function buildProviderUnavailableError(
+  spec: ProviderSpec,
+  discovery: ProviderDiscoveryRecord[]
+): Promise<Error> {
+  const transportSummary = discovery.find((entry) => entry.vendor === spec.vendor)?.transports ?? [];
+  const details = transportSummary.map((entry) => `${entry.transport}:${entry.reason ?? (entry.configured ? "ready" : "unavailable")}`).join(", ");
+  return new Error(`Provider ${spec.vendor}/${spec.transport} is not available. ${details || "No compatible transport found."}`);
+}
+
+function resolveExecutionTimeoutMs(options: {
+  requestedTimeoutMs?: number;
+  executor?: NodeExecutorKind;
+  resolved: ResolvedProviderExecution;
+  hasFallbackRemaining: boolean;
+}): number | undefined {
+  if (typeof options.requestedTimeoutMs === "number" && options.requestedTimeoutMs > 0) {
+    return options.requestedTimeoutMs;
+  }
+  if (!options.hasFallbackRemaining) return undefined;
+  if (options.executor === "audit" && options.resolved.transport === "cli" && options.resolved.vendor === "codex") {
+    return 90_000;
+  }
+  if (options.executor === "audit" && options.resolved.transport === "cli") {
+    return 180_000;
+  }
+  return undefined;
+}
+
+function formatProviderExecutionError(
+  resolved: ResolvedProviderExecution,
+  error: unknown
+): string {
+  const detail = error instanceof Error ? error.message.trim() : String(error);
+  return `${formatProviderLabel(resolved)} failed: ${detail}`;
+}
+
+function formatProviderLabel(resolved: ResolvedProviderExecution): string {
+  return `${PROVIDER_LABELS[resolved.vendor]} ${resolved.transport}${resolved.model ? ` (${resolved.model})` : ""}`;
+}
+
 async function resolveProviderExecution(
   spec: ProviderSpec,
   env: NodeJS.ProcessEnv,
@@ -600,12 +801,13 @@ async function resolveCandidate(
   const providerRecord = discovery.find((entry) => entry.vendor === vendor);
   const transportRecord = providerRecord?.transports.find((entry) => entry.transport === transport);
   if (!transportRecord?.available || !canExecuteTransport(vendor, transportRecord)) return null;
+  const repairedSpec = repairProviderSpecForTransport(spec, transportRecord, role);
 
   const profile =
-    vendor === "copilot" && !spec.profileId && !spec.modelOverride?.trim()
+    vendor === "copilot" && !repairedSpec.profileId && !repairedSpec.modelOverride?.trim()
       ? undefined
-      : resolveProfile(spec, role);
-  const model = spec.modelOverride?.trim() || profile?.model || "";
+      : resolveProfile(repairedSpec, role);
+  const model = repairedSpec.modelOverride?.trim() || profile?.model || "";
   if (!model && vendor !== "copilot") {
     throw new Error(`Provider ${vendor}/${transport} requires a model or profile.`);
   }
@@ -613,10 +815,10 @@ async function resolveCandidate(
   return {
     vendor,
     transport,
-    profileId: spec.profileId ?? profile?.id,
+    profileId: repairedSpec.profileId ?? profile?.id,
     model,
-    effort: transportRecord.capabilities.supportsEffort ? spec.effort : undefined,
-    auth: spec.auth ?? defaultAuthFor(vendor, transport),
+    effort: transportRecord.capabilities.supportsEffort ? repairedSpec.effort : undefined,
+    auth: repairedSpec.auth ?? defaultAuthFor(vendor, transport),
     authSource: transportRecord.authSource ?? null,
     binaryPath: transportRecord.binaryPath,
     nativeWrite: transport === "cli" && shouldUseNativeWrite(role, executor),
@@ -634,34 +836,59 @@ async function completeWithCli(
   if (!spec.binaryPath) {
     throw new Error(`No CLI binary resolved for ${spec.vendor}.`);
   }
+  const binaryPath = spec.binaryPath;
 
   const repoPath = options.repoPath ? path.resolve(options.repoPath) : process.cwd();
   const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
   const artifactDir = options.artifactDir ?? await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-cli-"));
 
   if (spec.vendor === "codex") {
+    const cachedSupportedEfforts = await loadCachedSupportedCliEfforts(repoPath, spec.vendor, spec.model);
+    let reasoningEffort = selectPreferredCliEffort(
+      resolveCodexReasoningEffort(spec.effort),
+      cachedSupportedEfforts
+    );
     const outputPath = path.join(artifactDir, "codex-last-message.txt");
-    const args = [
-      "exec",
-      "--json",
-      "-C",
-      repoPath,
-      "--skip-git-repo-check",
-      "-m",
-      spec.model,
-      "-o",
-      outputPath
-    ];
-    if (spec.nativeWrite) args.push("--full-auto");
-    else args.push("--sandbox", "read-only");
-    args.push("-");
-    const result = await runBinary(spec.binaryPath, args, {
-      cwd: repoPath,
-      env,
-      stdin: prompt,
-      timeoutMs,
-      allowNonZeroExit: true
-    });
+    const runCodexWithEffort = async (effort: CliReasoningEffort) => {
+      const args = [
+        "exec",
+        "--json",
+        "-C",
+        repoPath,
+        "--skip-git-repo-check",
+        "-m",
+        spec.model,
+        "-c",
+        `model_reasoning_effort="${effort}"`,
+        "-c",
+        `reasoning.effort="${effort}"`,
+        "-o",
+        outputPath
+      ];
+      if (spec.nativeWrite) args.push("--full-auto");
+      else args.push("--sandbox", "read-only");
+      args.push("-");
+      return runBinary(binaryPath, args, {
+        cwd: repoPath,
+        env,
+        stdin: prompt,
+        timeoutMs,
+        allowNonZeroExit: true
+      });
+    };
+
+    let result = await runCodexWithEffort(reasoningEffort);
+    if (result.exitCode !== 0) {
+      const supportedEfforts = parseSupportedCliReasoningEfforts(result.stdout, result.stderr);
+      if (supportedEfforts.length > 0) {
+        await persistSupportedCliEfforts(repoPath, spec.vendor, spec.model, supportedEfforts, "error_response");
+        const fallbackEffort = selectCliFallbackEffort(reasoningEffort, supportedEfforts);
+        if (fallbackEffort && fallbackEffort !== reasoningEffort) {
+          reasoningEffort = fallbackEffort;
+          result = await runCodexWithEffort(reasoningEffort);
+        }
+      }
+    }
     if (result.exitCode !== 0) {
       throw new Error(extractCliError(result.stdout, result.stderr) || `Codex exited with code ${result.exitCode}.`);
     }
@@ -673,7 +900,7 @@ async function completeWithCli(
       transport: spec.transport,
       profileId: spec.profileId,
       model: spec.model,
-      effort: spec.effort,
+      effort: toProviderEffort(reasoningEffort),
       authSource: spec.authSource ?? "cli_session",
       exitCode: result.exitCode,
       binaryPath: spec.binaryPath,
@@ -682,29 +909,50 @@ async function completeWithCli(
   }
 
   if (spec.vendor === "copilot") {
-    const args = [
-      "--output-format",
-      "json",
-      "--no-ask-user",
-      "--allow-all-tools",
-      "--add-dir",
-      repoPath,
-      "--available-tools",
-      spec.nativeWrite ? COPILOT_WRITE_TOOLS : COPILOT_READ_ONLY_TOOLS
-    ];
-    if (spec.model) {
-      args.push("--model", spec.model);
+    const runCopilotWithEffort = async (reasoningEffort?: ReturnType<typeof mapCopilotEffort>) => {
+      const args = [
+        "--output-format",
+        "json",
+        "--no-ask-user",
+        "--allow-all-tools",
+        "--add-dir",
+        repoPath,
+        "--available-tools",
+        spec.nativeWrite ? COPILOT_WRITE_TOOLS : COPILOT_READ_ONLY_TOOLS
+      ];
+      if (spec.model) {
+        args.push("--model", spec.model);
+      }
+      if (reasoningEffort) {
+        args.push("--reasoning-effort", reasoningEffort);
+      }
+      args.push("-p", prompt);
+      return runBinary(binaryPath, args, {
+        cwd: repoPath,
+        env,
+        timeoutMs,
+        allowNonZeroExit: true
+      });
+    };
+    const requestedEffort = spec.effort ? mapCopilotEffort(spec.effort) : undefined;
+    const cachedSupportedEfforts = requestedEffort
+      ? await loadCachedSupportedCliEfforts(repoPath, spec.vendor, spec.model)
+      : null;
+    let effectiveEffort = requestedEffort
+      ? selectPreferredCliEffort(requestedEffort, cachedSupportedEfforts)
+      : undefined;
+    let result = await runCopilotWithEffort(effectiveEffort);
+    if (result.exitCode !== 0 && effectiveEffort) {
+      const supportedEfforts = parseSupportedCliReasoningEfforts(result.stdout, result.stderr);
+      if (supportedEfforts.length > 0) {
+        await persistSupportedCliEfforts(repoPath, spec.vendor, spec.model, supportedEfforts, "error_response");
+      }
+      const fallbackEffort = selectCliFallbackEffort(effectiveEffort, supportedEfforts);
+      if (fallbackEffort && fallbackEffort !== effectiveEffort) {
+        result = await runCopilotWithEffort(fallbackEffort);
+        effectiveEffort = fallbackEffort;
+      }
     }
-    if (spec.effort) {
-      args.push("--reasoning-effort", mapCopilotEffort(spec.effort));
-    }
-    args.push("-p", prompt);
-    const result = await runBinary(spec.binaryPath, args, {
-      cwd: repoPath,
-      env,
-      timeoutMs,
-      allowNonZeroExit: true
-    });
     if (result.exitCode !== 0) {
       throw new Error(extractCliError(result.stdout, result.stderr) || `GitHub Copilot CLI exited with code ${result.exitCode}.`);
     }
@@ -715,7 +963,7 @@ async function completeWithCli(
       transport: spec.transport,
       profileId: spec.profileId,
       model: spec.model,
-      effort: spec.effort,
+      effort: effectiveEffort ? unmapCopilotEffort(effectiveEffort) : spec.effort,
       authSource: spec.authSource ?? "cli_session",
       exitCode: result.exitCode,
       binaryPath: spec.binaryPath,
@@ -826,6 +1074,9 @@ async function discoverCliTransport(
     probeCliAuth(vendor, binaryPath, cwd, env),
     capabilities.supportsModelDiscovery ? probeCliModels(vendor, binaryPath, cwd, env) : Promise.resolve([])
   ]);
+  const modelEffortSupport = capabilities.supportsEffort && cwd
+    ? await loadCachedModelEffortSupport(cwd, vendor)
+    : [];
 
   return {
     transport: "cli",
@@ -836,6 +1087,7 @@ async function discoverCliTransport(
     version,
     authSource: authProbe.authSource ?? (authProbe.ok ? "cli_session" : null),
     models: models.length > 0 ? models : undefined,
+    modelEffortSupport: modelEffortSupport.length > 0 ? modelEffortSupport : undefined,
     profiles: models.length > 0
       ? injectDiscoveredModels(listProviderProfiles(vendor, "cli"), vendor, "cli", models)
       : listProviderProfiles(vendor, "cli"),
@@ -847,17 +1099,26 @@ async function discoverApiTransport(
   vendor: ProviderVendor,
   capabilities: ProviderCapabilitySummary,
   env: NodeJS.ProcessEnv,
-  apiSecrets?: Partial<Record<"openai" | "claude", boolean>>
+  apiSecrets?: Partial<Record<"openai" | "claude", boolean>>,
+  apiKeys?: Partial<Record<"openai" | "claude", string>>
 ): Promise<ProviderDiscoveryTransport> {
   const secretName = defaultApiKeyRef(vendor);
   const configured = Boolean(secretName && ((apiSecrets && apiSecrets[vendor as "openai" | "claude"]) || env[secretName]));
+  const apiKey = vendor === "openai" || vendor === "claude" ? apiKeys?.[vendor] : undefined;
+  const models =
+    configured && capabilities.supportsModelDiscovery && typeof apiKey === "string" && apiKey.trim().length > 0
+      ? await probeApiModels(vendor, apiKey, env)
+      : [];
   return {
     transport: "api",
     available: true,
     configured,
     reason: configured ? undefined : `${secretName ?? "API key"} is not configured.`,
     authSource: configured ? `api_key:${secretName}` : null,
-    profiles: listProviderProfiles(vendor, "api"),
+    models: models.length > 0 ? models : undefined,
+    profiles: models.length > 0
+      ? injectDiscoveredModels(listProviderProfiles(vendor, "api"), vendor, "api", models)
+      : listProviderProfiles(vendor, "api"),
     capabilities
   };
 }
@@ -869,13 +1130,19 @@ async function discoverLocalHttpTransport(
 ): Promise<ProviderDiscoveryTransport> {
   const endpoint = localHttpEndpointFor(vendor, env);
   const configured = await probeLocalHttpEndpoint(vendor, endpoint);
+  const models = configured && capabilities.supportsModelDiscovery
+    ? await probeLocalHttpModels(vendor, endpoint)
+    : [];
   return {
     transport: "local_http",
     available: configured,
     configured,
     reason: configured ? undefined : `${endpoint} is not responding.`,
     authSource: configured ? `local_http:${endpoint}` : null,
-    profiles: listProviderProfiles(vendor, "local_http"),
+    models: models.length > 0 ? models : undefined,
+    profiles: models.length > 0
+      ? injectDiscoveredModels(listProviderProfiles(vendor, "local_http"), vendor, "local_http", models)
+      : listProviderProfiles(vendor, "local_http"),
     capabilities
   };
 }
@@ -959,10 +1226,12 @@ async function probeCliModels(
     allowNonZeroExit: true
   }).catch(() => null);
   if (!result || result.exitCode !== 0) return [];
-  return result.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim().replace(/^[-*]\s*/, ""))
-    .filter((line) => Boolean(line) && !/^available models/i.test(line) && !/^model\s+/i.test(line));
+  return sanitizeDiscoveredModels(
+    result.stdout
+      .split(/\r?\n/)
+      .map((line) => normalizeDiscoveredModelId(line))
+      .filter((line): line is string => Boolean(line))
+  );
 }
 
 async function probeLocalHttpEndpoint(vendor: ProviderVendor, endpoint: string): Promise<boolean> {
@@ -976,6 +1245,59 @@ async function probeLocalHttpEndpoint(vendor: ProviderVendor, endpoint: string):
     return response.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function probeApiModels(
+  vendor: ProviderVendor,
+  apiKey: string,
+  env: NodeJS.ProcessEnv
+): Promise<string[]> {
+  if (vendor !== "openai") return [];
+  const configuredBaseUrl = firstNonEmptyEnv(env.OPENAI_API_BASE_URL, env.OPENAI_BASE_URL) ?? "https://api.openai.com/v1";
+  const baseUrl = validateApiBaseUrl(
+    configuredBaseUrl,
+    "openai",
+    firstNonEmptyEnv(env.OPENAI_API_BASE_URL) ? "OPENAI_API_BASE_URL" : firstNonEmptyEnv(env.OPENAI_BASE_URL) ? "OPENAI_BASE_URL" : "default"
+  );
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal
+    });
+    if (!response.ok) return [];
+    const payload = (await response.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
+    return sanitizeDiscoveredModels((payload.data ?? []).map((entry) => readString(entry.id) ?? ""));
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function probeLocalHttpModels(vendor: ProviderVendor, endpoint: string): Promise<string[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    if (vendor === "ollama") {
+      const response = await fetch(`${endpoint.replace(/\/$/, "")}/api/tags`, { signal: controller.signal });
+      if (!response.ok) return [];
+      const payload = (await response.json().catch(() => ({}))) as { models?: Array<{ name?: string }> };
+      return sanitizeDiscoveredModels((payload.models ?? []).map((entry) => readString(entry.name) ?? ""));
+    }
+    if (vendor === "llama.cpp") {
+      const response = await fetch(`${endpoint.replace(/\/$/, "")}/v1/models`, { signal: controller.signal });
+      if (!response.ok) return [];
+      const payload = (await response.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
+      return sanitizeDiscoveredModels((payload.data ?? []).map((entry) => readString(entry.id) ?? ""));
+    }
+    return [];
+  } catch {
+    return [];
   } finally {
     clearTimeout(timeout);
   }
@@ -1041,14 +1363,16 @@ function normalizeAuthConfig(input: unknown, vendor?: string, transport?: string
 function normalizeFallback(input: unknown): Omit<ProviderSpec, "fallback"> | null {
   if (!input || typeof input !== "object") return null;
   const fallback = input as Record<string, unknown>;
-  return {
-    vendor: normalizeCanonicalProvider(readString(fallback.vendor)),
-    transport: normalizeProviderTransport(readString(fallback.transport)),
+  const vendor = normalizeCanonicalProvider(readString(fallback.vendor));
+  const transport = normalizeProviderTransport(readString(fallback.transport));
+  return repairNormalizedProviderSpec({
+    vendor,
+    transport,
     profileId: readString(fallback.profileId) ?? undefined,
-    modelOverride: readString(fallback.modelOverride) ?? undefined,
+    modelOverride: normalizeProviderModelOverride(vendor, transport, readString(fallback.modelOverride) ?? undefined),
     effort: normalizeEffort(readString(fallback.effort)) ?? undefined,
     auth: normalizeAuthConfig(fallback.auth, readString(fallback.vendor) ?? undefined, readString(fallback.transport) ?? undefined)
-  };
+  });
 }
 
 function inferDefaultTransport(vendor?: string): ProviderTransport {
@@ -1135,15 +1459,78 @@ function shouldUseNativeWrite(role?: string, executor?: NodeExecutorKind): boole
 
 function normalizeEffort(input: string | null | undefined): ProviderEffort | null {
   const normalized = (input ?? "").trim().toLowerCase();
-  if (normalized === "low" || normalized === "medium" || normalized === "high" || normalized === "max") {
+  if (normalized === "minimal" || normalized === "low" || normalized === "medium" || normalized === "high" || normalized === "max") {
     return normalized;
   }
   return null;
 }
 
-function mapCopilotEffort(effort: ProviderEffort): "low" | "medium" | "high" | "xhigh" {
+function mapCopilotEffort(effort: ProviderEffort): CliReasoningEffort {
   if (effort === "max") return "xhigh";
   return effort;
+}
+
+function unmapCopilotEffort(effort: CliReasoningEffort): ProviderEffort {
+  if (effort === "xhigh") return "max";
+  return effort;
+}
+
+function selectCliFallbackEffort(
+  requested: CliReasoningEffort,
+  supported: CliReasoningEffort[]
+): CliReasoningEffort | null {
+  if (supported.length === 0 || supported.includes(requested)) return null;
+  const fallbackPriority: CliReasoningEffort[] =
+    requested === "xhigh"
+      ? ["high", "medium", "low", "minimal"]
+      : requested === "high"
+        ? ["medium", "low", "minimal", "xhigh"]
+        : requested === "medium"
+          ? ["high", "low", "minimal", "xhigh"]
+          : requested === "low"
+            ? ["minimal", "medium", "high", "xhigh"]
+            : ["low", "medium", "high", "xhigh"];
+  return fallbackPriority.find((effort) => supported.includes(effort)) ?? null;
+}
+
+function selectPreferredCliEffort(
+  requested: CliReasoningEffort,
+  supported: CliReasoningEffort[] | null
+): CliReasoningEffort {
+  if (!supported?.length || supported.includes(requested)) return requested;
+  return selectCliFallbackEffort(requested, supported) ?? requested;
+}
+
+function parseSupportedCliReasoningEfforts(stdout: string, stderr: string): CliReasoningEffort[] {
+  const text = `${stdout}\n${stderr}`;
+  const supportedText = text.match(/Supported values are:?\s*([\s\S]*?)(?:\.(?:\s|$)|\n|$)/i)?.[1] ?? "";
+  const matches = Array.from(
+    supportedText.matchAll(/'((?:minimal|low|medium|high|xhigh))'/gi)
+  ).map((entry) => entry[1]?.toLowerCase() ?? "");
+  return Array.from(
+    new Set(
+      matches
+        .map((value) => normalizeCliReasoningEffort(value))
+        .filter((value): value is CliReasoningEffort => Boolean(value))
+    )
+  );
+}
+
+function normalizeCliReasoningEffort(input: string | null | undefined): CliReasoningEffort | null {
+  const normalized = (input ?? "").trim().toLowerCase();
+  return CLI_REASONING_EFFORTS.includes(normalized as CliReasoningEffort)
+    ? normalized as CliReasoningEffort
+    : null;
+}
+
+function sanitizeDiscoveredModels(models: string[]): string[] {
+  return Array.from(
+    new Set(
+      models
+        .map((model) => normalizeDiscoveredModelId(model))
+        .filter((model): model is string => Boolean(model))
+    )
+  ).sort((left, right) => left.localeCompare(right));
 }
 
 function injectDiscoveredModels(
@@ -1209,6 +1596,238 @@ function parseStructuredCliOutput(stdout: string): unknown {
   if (parsedLines.length === 1) return parsedLines[0];
   if (parsedLines.length > 1) return parsedLines;
   return stdout.trim();
+}
+
+function repairNormalizedProviderSpec(spec: ProviderSpec, role?: string): ProviderSpec {
+  const profiles = listProviderProfiles(spec.vendor, spec.transport);
+  const validProfile = spec.profileId && profiles.some((profile) => profile.id === spec.profileId)
+    ? spec.profileId
+    : undefined;
+  const normalizedModel = normalizeProviderModelOverride(spec.vendor, spec.transport, spec.modelOverride);
+  const derivedProfile = !validProfile && normalizedModel
+    ? profiles.find((profile) => profile.model === normalizedModel)?.id
+    : undefined;
+  return {
+    ...spec,
+    profileId: validProfile ?? derivedProfile ?? undefined,
+    modelOverride: normalizedModel,
+    effort: normalizeProviderEffort(spec.vendor, spec.effort),
+    fallback: spec.fallback ? repairNormalizedProviderSpec({ ...spec.fallback, fallback: null }, role) : null
+  };
+}
+
+function repairProviderSpecForTransport(
+  spec: Omit<ProviderSpec, "fallback">,
+  transport: ProviderDiscoveryTransport,
+  role?: string
+): Omit<ProviderSpec, "fallback"> {
+  const profiles = transport.profiles;
+  const explicitSelection = Boolean(spec.profileId || spec.modelOverride);
+  const normalizedModel = normalizeProviderModelOverride(spec.vendor, spec.transport, spec.modelOverride);
+  const validProfile = spec.profileId && profiles.some((profile) => profile.id === spec.profileId)
+    ? spec.profileId
+    : undefined;
+  const profileFromModel = !validProfile && normalizedModel
+    ? profiles.find((profile) => profile.model === normalizedModel)?.id
+    : undefined;
+  const allowedModels = new Set(
+    [...profiles.map((profile) => profile.model), ...(transport.models ?? [])]
+      .map((model) => normalizeProviderModelOverride(spec.vendor, spec.transport, model))
+      .filter((model): model is string => Boolean(model))
+  );
+  const allowCustomModel =
+    spec.vendor === "openai"
+    || spec.transport === "local_http";
+  let nextModel = normalizedModel;
+  if (!allowCustomModel && nextModel && allowedModels.size > 0 && !allowedModels.has(nextModel)) {
+    nextModel = undefined;
+  }
+  let nextProfileId = validProfile ?? profileFromModel ?? undefined;
+  if (explicitSelection && !nextProfileId && !nextModel) {
+    const roleDefault = defaultProviderForRole(role);
+    if (roleDefault.vendor === spec.vendor && roleDefault.transport === spec.transport && roleDefault.profileId) {
+      nextProfileId = roleDefault.profileId;
+    } else {
+      nextProfileId = profiles.find((profile) => profile.recommended)?.id ?? profiles[0]?.id;
+    }
+  }
+  return {
+    ...spec,
+    profileId: nextProfileId,
+    modelOverride: nextModel,
+    effort: transport.capabilities.supportsEffort ? normalizeProviderEffort(spec.vendor, spec.effort) : undefined
+  };
+}
+
+function normalizeProviderEffort(_vendor: ProviderVendor, effort: ProviderEffort | undefined): ProviderEffort | undefined {
+  if (!effort) return undefined;
+  return effort;
+}
+
+function resolveCodexReasoningEffort(effort: ProviderEffort | undefined): CliReasoningEffort {
+  if (!effort) return "medium";
+  if (effort === "max") return "xhigh";
+  return effort;
+}
+
+function toProviderEffort(effort: CliReasoningEffort | undefined): ProviderEffort | undefined {
+  if (!effort) return undefined;
+  if (effort === "xhigh") return "max";
+  return effort;
+}
+
+async function loadCachedModelEffortSupport(repoPath: string, vendor: ProviderVendor): Promise<Array<{
+  model: string;
+  supportedEfforts: string[];
+  updatedAt?: string;
+  source?: string;
+}>> {
+  const cache = await loadProviderCapabilityCache(repoPath);
+  return cache.effortSupport
+    .filter((entry) => entry.vendor === vendor && entry.transport === "cli")
+    .map((entry) => ({
+      model: entry.model,
+      supportedEfforts: entry.supportedEfforts,
+      updatedAt: entry.updatedAt,
+      source: entry.source
+    }))
+    .sort((left, right) => left.model.localeCompare(right.model));
+}
+
+async function loadCachedSupportedCliEfforts(
+  repoPath: string | undefined,
+  vendor: ProviderVendor,
+  model: string
+): Promise<CliReasoningEffort[] | null> {
+  if (!repoPath) return null;
+  const normalizedModel = normalizeDiscoveredModelId(model) ?? model.trim();
+  if (!normalizedModel) return null;
+  const cache = await loadProviderCapabilityCache(repoPath);
+  const match = cache.effortSupport.find((entry) =>
+    entry.vendor === vendor
+    && entry.transport === "cli"
+    && entry.model === normalizedModel
+  );
+  return match?.supportedEfforts?.length ? match.supportedEfforts : null;
+}
+
+async function persistSupportedCliEfforts(
+  repoPath: string | undefined,
+  vendor: ProviderVendor,
+  model: string,
+  supportedEfforts: CliReasoningEffort[],
+  source: ProviderCapabilityCacheEntry["source"]
+): Promise<void> {
+  if (!repoPath) return;
+  const normalizedModel = normalizeDiscoveredModelId(model) ?? model.trim();
+  const normalizedEfforts = Array.from(new Set(
+    supportedEfforts
+      .map((value) => normalizeCliReasoningEffort(value))
+      .filter((value): value is CliReasoningEffort => Boolean(value))
+  ));
+  if (!normalizedModel || normalizedEfforts.length === 0) return;
+
+  const cache = await loadProviderCapabilityCache(repoPath);
+  const nextEntry: ProviderCapabilityCacheEntry = {
+    vendor,
+    transport: "cli",
+    model: normalizedModel,
+    supportedEfforts: normalizedEfforts,
+    updatedAt: new Date().toISOString(),
+    source
+  };
+  const nextEntries = cache.effortSupport.filter((entry) => !(
+    entry.vendor === vendor
+    && entry.transport === "cli"
+    && entry.model === normalizedModel
+  ));
+  nextEntries.push(nextEntry);
+
+  const nextCache: ProviderCapabilityCache = {
+    version: 1,
+    effortSupport: nextEntries.sort((left, right) => {
+      if (left.vendor !== right.vendor) return left.vendor.localeCompare(right.vendor);
+      return left.model.localeCompare(right.model);
+    })
+  };
+
+  const filePath = getWorkspaceProviderCapabilitiesPath(repoPath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(nextCache, null, 2), "utf8");
+}
+
+async function loadProviderCapabilityCache(repoPath: string): Promise<ProviderCapabilityCache> {
+  const filePath = getWorkspaceProviderCapabilitiesPath(repoPath);
+  const raw = await fs.readFile(filePath, "utf8").catch(() => "");
+  const parsed = parseJsonLoose(raw);
+  if (!parsed || typeof parsed !== "object") return emptyProviderCapabilityCache();
+  const record = parsed as Record<string, unknown>;
+  const effortSupport = Array.isArray(record.effortSupport)
+    ? record.effortSupport
+      .map((entry) => normalizeCapabilityCacheEntry(entry))
+      .filter((entry): entry is ProviderCapabilityCacheEntry => Boolean(entry))
+    : [];
+  return {
+    version: 1,
+    effortSupport
+  };
+}
+
+function normalizeCapabilityCacheEntry(input: unknown): ProviderCapabilityCacheEntry | null {
+  if (!input || typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  const vendor = readString(record.vendor);
+  const transport = readString(record.transport);
+  const model = normalizeDiscoveredModelId(readString(record.model) ?? "") ?? readString(record.model);
+  const supportedEfforts = Array.isArray(record.supportedEfforts)
+    ? record.supportedEfforts
+      .map((value) => normalizeCliReasoningEffort(readString(value) ?? undefined))
+      .filter((value): value is CliReasoningEffort => Boolean(value))
+    : [];
+  const source = readString(record.source);
+  if (!vendor || !PROVIDER_LABELS[vendor as ProviderVendor] || transport !== "cli" || !model || supportedEfforts.length === 0) {
+    return null;
+  }
+  return {
+    vendor: vendor as ProviderVendor,
+    transport: "cli",
+    model,
+    supportedEfforts,
+    updatedAt: readString(record.updatedAt) ?? new Date(0).toISOString(),
+    source: source === "probe" ? "probe" : "error_response"
+  };
+}
+
+function normalizeProviderModelOverride(
+  vendor: ProviderVendor,
+  transport: ProviderTransport,
+  input: string | null | undefined
+): string | undefined {
+  const normalized = normalizeDiscoveredModelId(input ?? "");
+  if (!normalized) return undefined;
+  const profiles = listProviderProfiles(vendor, transport);
+  const knownModels = new Set(profiles.map((profile) => profile.model));
+  const allowCustomModel = vendor === "openai" || transport === "local_http" || vendor === "cursor";
+  if (!allowCustomModel && knownModels.size > 0 && !knownModels.has(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function normalizeDiscoveredModelId(input: string): string | undefined {
+  const stripped = stripAnsi(input).trim().replace(/^[-*]\s*/, "");
+  if (!stripped) return undefined;
+  if (/^(loading models|available models|model\s+|tip:)/i.test(stripped)) return undefined;
+  const candidate = stripped.includes(" - ")
+    ? stripped.split(" - ", 1)[0]?.trim() ?? ""
+    : stripped;
+  if (!candidate) return undefined;
+  if (!/^[a-z0-9][a-z0-9._:+/-]*$/i.test(candidate)) return undefined;
+  return candidate;
+}
+
+function stripAnsi(input: string): string {
+  return input.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
 function extractTextValue(value: unknown): string {

@@ -25,6 +25,7 @@ import {
   saveGlobalConfig,
   checkForUpdates,
   installUpdate,
+  rollbackUpdate,
   listInstalledPlugins,
   installPlugin,
   removePlugin,
@@ -719,6 +720,20 @@ updateCmd
         targetDir: process.cwd()
       });
       console.log(`Installed update. Files updated: ${result.updatedFiles}`);
+    } catch (err) {
+      await handleFatal(err);
+    }
+  });
+
+updateCmd
+  .command("rollback")
+  .argument("<journal>", "Path to the update install journal.json")
+  .action(async (journalPath) => {
+    try {
+      const result = await rollbackUpdate({
+        journalPath: path.resolve(journalPath)
+      });
+      console.log(`Rolled back update using ${result.journalPath}. Restored: ${result.restoredFiles}, removed: ${result.removedFiles}`);
     } catch (err) {
       await handleFatal(err);
     }

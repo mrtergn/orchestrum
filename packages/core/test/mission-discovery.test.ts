@@ -1,5 +1,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { completeWithProvider, defaultProviderForRole, discoverMissionProviders } from "../src/mission/providers.js";
 import { createMissionSandbox, createMockCliSuite } from "./missionTestUtils.js";
 
@@ -57,7 +59,11 @@ test("provider discovery reports CLI and API readiness", async () => {
   assert.equal(cursor?.transports.find((transport) => transport.transport === "cli")?.configured, true);
   assert.equal(claude?.transports.find((transport) => transport.transport === "cli")?.configured, true);
   assert.equal(openai?.transports.find((transport) => transport.transport === "api")?.configured, true);
-  assert.deepEqual(cursor?.transports.find((transport) => transport.transport === "cli")?.models?.slice(0, 2), ["sonnet-4", "gpt-5"]);
+  const cursorModels = cursor?.transports.find((transport) => transport.transport === "cli")?.models ?? [];
+  assert.ok(cursorModels.includes("sonnet-4"));
+  assert.ok(cursorModels.includes("gpt-5"));
+  assert.ok(cursorModels.includes("auto"));
+  assert.ok(cursorModels.every((model) => !/loading models|available models|tip:/i.test(model)));
 });
 
 test("copilot discovery stays detected without env auth", async () => {
@@ -85,6 +91,49 @@ test("copilot discovery stays detected without env auth", async () => {
   assert.equal(transport?.available, true);
   assert.equal(transport?.configured, false);
   assert.match(transport?.reason ?? "", /interactive login is verified at first run/i);
+});
+
+test("provider discovery surfaces cached model effort support for CLI providers", async () => {
+  const sandbox = await createMissionSandbox("mission-provider-discovery-effort-cache");
+  const cli = await createMockCliSuite();
+  await fs.mkdir(path.join(sandbox.repoPath, ".orchestrum", "control"), { recursive: true });
+  await fs.writeFile(
+    path.join(sandbox.repoPath, ".orchestrum", "control", "provider-capabilities.json"),
+    JSON.stringify({
+      version: 1,
+      effortSupport: [{
+        vendor: "codex",
+        transport: "cli",
+        model: "gpt-5",
+        supportedEfforts: ["minimal", "low", "medium", "high"],
+        updatedAt: new Date().toISOString(),
+        source: "error_response"
+      }]
+    }, null, 2),
+    "utf8"
+  );
+  const env = {
+    ...process.env,
+    ORCHESTRUM_CODEX_BIN: cli.codex,
+    MOCK_CODEX_AUTH: "1"
+  };
+
+  const providers = await discoverMissionProviders({
+    cwd: sandbox.repoPath,
+    env
+  });
+
+  const codex = providers.find((provider) => provider.vendor === "codex");
+  const transport = codex?.transports.find((entry) => entry.transport === "cli");
+  assert.deepEqual(
+    transport?.modelEffortSupport,
+    [{
+      model: "gpt-5",
+      supportedEfforts: ["minimal", "low", "medium", "high"],
+      updatedAt: transport?.modelEffortSupport?.[0]?.updatedAt,
+      source: "error_response"
+    }]
+  );
 });
 
 test("default provider routing prefers copilot for dev and general roles", () => {

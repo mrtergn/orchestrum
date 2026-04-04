@@ -17,6 +17,37 @@ export type RepoIndex = {
   srcList: string[];
 };
 
+const CONTEXT_IGNORED_DIRECTORIES = new Set([
+  ".cache",
+  ".git",
+  ".mypy_cache",
+  ".next",
+  ".nox",
+  ".orchestrum",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".turbo",
+  ".venv",
+  "__pycache__",
+  "artifacts",
+  "build",
+  "coverage",
+  "dist",
+  "logs",
+  "node_modules",
+  "out",
+  "output",
+  "runs",
+  "temp",
+  "tmp",
+  "venv"
+]);
+
+const CONTEXT_IGNORED_FILES = new Set([
+  ".DS_Store"
+]);
+
 export async function buildRepoIndex(repoPath: string): Promise<RepoIndex> {
   const topLevel = await listDir(repoPath, 1);
   const srcDir = path.join(repoPath, "src");
@@ -131,7 +162,7 @@ async function listDir(dirPath: string, depth: number): Promise<string[]> {
     for (const item of items) {
       if (entries.length >= MAX_LIST_ENTRIES) return;
       const name = item.name;
-      if (name === "node_modules" || name === ".git" || name === "runs") {
+      if (shouldIgnoreContextEntry(name, item.isDirectory())) {
         continue;
       }
       const relative = path.join(prefix, name);
@@ -144,6 +175,13 @@ async function listDir(dirPath: string, depth: number): Promise<string[]> {
 
   await walk(dirPath, 1, "");
   return entries;
+}
+
+function shouldIgnoreContextEntry(name: string, isDirectory: boolean): boolean {
+  if (isDirectory && CONTEXT_IGNORED_DIRECTORIES.has(name)) return true;
+  if (CONTEXT_IGNORED_FILES.has(name)) return true;
+  if (!isDirectory && (name.endsWith(".pyc") || name.endsWith(".pyo"))) return true;
+  return false;
 }
 
 async function readIfExists(filePath: string): Promise<string | null> {

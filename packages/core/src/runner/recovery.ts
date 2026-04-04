@@ -28,6 +28,28 @@ async function recoverRun(runDir: string): Promise<boolean> {
     meta.status = "interrupted";
     meta.interruptedAt = new Date().toISOString();
     meta.end = meta.end ?? meta.interruptedAt;
+    meta.recovery = {
+      status: "interrupted",
+      kind: "interrupted",
+      summary: "Service startup found this run still marked as running, so it was converted to interrupted.",
+      guidance: [
+        "Inspect the last completed step and any preserved artifacts before resuming.",
+        "Resume the run if the repository and machine state are still valid.",
+        "Relaunch the work item instead of resuming if the repository changed significantly after the interruption."
+      ],
+      artifacts: [],
+      suggestedActions: [
+        {
+          kind: "resume_run",
+          label: "Resume interrupted run",
+          detail: "Resume only after confirming the repository and environment still match the interrupted run state.",
+          runId: meta.runId
+        }
+      ],
+      updatedAt: meta.interruptedAt,
+      blockingStepId: null,
+      blockingStepTitle: null
+    };
     await writeJson(runPath, meta);
     return true;
   } catch (err) {

@@ -26,8 +26,14 @@ import { registerRunRoutes } from "./routes/runs.js";
 import { registerSecretOpsRoutes } from "./routes/secretOps.js";
 import { registerSystemOpsRoutes } from "./routes/systemOps.js";
 import { registerWorkIntakeRoutes } from "./routes/workIntake.js";
+import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerWorkspaceRegistryRoutes } from "./routes/workspaceRegistry.js";
 import { registerWorkspaceSupportRoutes } from "./routes/workspaceSupport.js";
+import {
+  getWorkspaceRegistryPath,
+  loadRememberedWorkspacePaths,
+  saveRememberedWorkspacePaths
+} from "./workspaceRegistryStore.js";
 
 export type ServiceOptions = {
   port?: number;
@@ -61,6 +67,10 @@ export async function startService(options: ServiceOptions = {}) {
   await recoverInterruptedRunsIndex(runIndex);
   const workspacePathById = new Map<string, string>();
   const workspacePaths = new Set<string>();
+  const workspaceRegistryPath = getWorkspaceRegistryPath();
+  for (const repoPath of await loadRememberedWorkspacePaths(workspaceRegistryPath)) {
+    workspacePaths.add(repoPath);
+  }
   await refreshWorkspaceCache(rootDir, workspacePaths, workspacePathById);
 
   const app = express();
@@ -70,6 +80,7 @@ export async function startService(options: ServiceOptions = {}) {
   const rememberWorkspacePath = async (repoPath: string) => {
     const manifest = await ensureWorkspaceManifest(repoPath);
     workspacePaths.add(manifest.path);
+    await saveRememberedWorkspacePaths(workspacePaths, workspaceRegistryPath);
     workspacePathById.set(manifest.id, manifest.path);
     await agentPlatform.reload();
     await stateIndex.rebuild().catch(() => undefined);
@@ -78,6 +89,7 @@ export async function startService(options: ServiceOptions = {}) {
   const forgetWorkspacePath = async (repoPath: string) => {
     const resolved = path.resolve(repoPath);
     workspacePaths.delete(resolved);
+    await saveRememberedWorkspacePaths(workspacePaths, workspaceRegistryPath);
     for (const [workspaceId, workspacePath] of workspacePathById.entries()) {
       if (path.resolve(workspacePath) === resolved) {
         workspacePathById.delete(workspaceId);
@@ -86,7 +98,12 @@ export async function startService(options: ServiceOptions = {}) {
     await agentPlatform.reload();
     await stateIndex.rebuild().catch(() => undefined);
   };
-  const listWorkspacePaths = async () => Array.from(workspacePaths);
+  const listWorkspacePaths = async () => {
+    for (const repoPath of await loadRememberedWorkspacePaths(workspaceRegistryPath)) {
+      workspacePaths.add(repoPath);
+    }
+    return Array.from(workspacePaths);
+  };
   const resolveWorkspace = (workspaceId?: string) => resolveWorkspacePath(rootDir, workspaceId, {
     workspacePaths,
     workspacePathById
@@ -167,6 +184,7 @@ export async function startService(options: ServiceOptions = {}) {
     useKeychain
   });
   registerRunRoutes(app, {
+    rootDir,
     runsDir,
     stateIndex,
     runIndex,
@@ -184,6 +202,10 @@ export async function startService(options: ServiceOptions = {}) {
     listWorkspacePaths,
     resolveWorkspacePath: resolveWorkspace,
     agentPlatform
+  });
+
+  registerSessionRoutes(app, {
+    runsDir
   });
 
   agentPlatform.registerRoutes(app);
@@ -222,6 +244,18 @@ class RunIndex {
   async init() {
     await this.scan();
     this.watch();
+  }
+
+  async sync(filter: { workspaceId?: string; runId?: string } = {}) {
+    if (filter.workspaceId && filter.runId) {
+      await this.upsert(filter.workspaceId, path.join(this.runsDir, filter.workspaceId, filter.runId));
+      return;
+    }
+    if (filter.workspaceId) {
+      await this.scanWorkspace(filter.workspaceId);
+      return;
+    }
+    await this.scan();
   }
 
   list(filter: { workspaceId?: string; status?: string; tag?: string; search?: string } = {}) {
@@ -271,6 +305,20 @@ class RunIndex {
         if (!runEntry.isDirectory()) continue;
         await this.upsert(entry.name, path.join(candidate, runEntry.name));
       }
+    }
+  }
+
+  private async scanWorkspace(workspaceId: string) {
+    for (const key of Array.from(this.runs.keys())) {
+      if (key.startsWith(`${workspaceId}:`)) {
+        this.runs.delete(key);
+      }
+    }
+    const workspaceDir = path.join(this.runsDir, workspaceId);
+    const workspaceRuns = await fs.readdir(workspaceDir, { withFileTypes: true }).catch(() => []);
+    for (const runEntry of workspaceRuns) {
+      if (!runEntry.isDirectory()) continue;
+      await this.upsert(workspaceId, path.join(workspaceDir, runEntry.name));
     }
   }
 
@@ -369,6 +417,28 @@ async function recoverInterruptedRunsIndex(index: RunIndex) {
       run.status = "interrupted";
       run.interruptedAt = new Date().toISOString();
       run.end = run.end ?? run.interruptedAt;
+      run.recovery = {
+        status: "interrupted",
+        kind: "interrupted",
+        summary: "Service startup found this run still marked as running, so it was converted to interrupted.",
+        guidance: [
+          "Inspect the last completed step and any preserved artifacts before resuming.",
+          "Resume the run only if the repository and machine still match the interrupted execution state.",
+          "Relaunch the work item instead of resuming if the repo changed significantly after interruption."
+        ],
+        artifacts: [],
+        suggestedActions: [
+          {
+            kind: "resume_run",
+            label: "Resume interrupted run",
+            detail: "Resume only after confirming the repo and environment still match the interrupted state.",
+            runId: run.runId
+          }
+        ],
+        updatedAt: run.interruptedAt,
+        blockingStepId: null,
+        blockingStepTitle: null
+      };
       const record = index.get(run.runId, run.workspaceId);
       if (record) {
         await writeJson(path.join(record.runDir, "run.json"), run);

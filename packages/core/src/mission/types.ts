@@ -9,7 +9,7 @@ export type CanonicalProvider = ProviderVendor;
 export const PROVIDER_TRANSPORTS = ["cli", "api", "local_http"] as const;
 export type ProviderTransport = typeof PROVIDER_TRANSPORTS[number];
 
-export const PROVIDER_EFFORT_LEVELS = ["low", "medium", "high", "max"] as const;
+export const PROVIDER_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "max"] as const;
 export type ProviderEffort = typeof PROVIDER_EFFORT_LEVELS[number];
 
 export type ProviderAuthConfig = {
@@ -56,6 +56,12 @@ export type ProviderDiscoveryTransport = {
   version?: string;
   authSource?: string | null;
   models?: string[];
+  modelEffortSupport?: Array<{
+    model: string;
+    supportedEfforts: string[];
+    updatedAt?: string;
+    source?: string;
+  }>;
   profiles: ProviderProfile[];
   capabilities: ProviderCapabilitySummary;
 };

@@ -6,7 +6,9 @@ import {
   checkForUpdates,
   installPlugin,
   installUpdate,
+  listUpdateInstallJournals,
   listInstalledPlugins,
+  rollbackUpdate,
   removePlugin,
   selectUpdateAsset,
   setPluginEnabled
@@ -96,6 +98,29 @@ export function registerSystemOpsRoutes(
       res.json(result);
     } catch (err: any) {
       res.status(400).json({ error: err?.message ?? "Update install failed" });
+    }
+  });
+
+  app.post("/updates/rollback", async (req, res) => {
+    const journalPath = req.body?.journalPath ? String(req.body.journalPath) : "";
+    if (!journalPath) {
+      return res.status(400).json({ error: "journalPath required" });
+    }
+    try {
+      const result = await rollbackUpdate({ journalPath });
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Update rollback failed" });
+    }
+  });
+
+  app.get("/updates/history", async (req, res) => {
+    const limit = Math.max(1, Number(req.query.limit ?? 10) || 10);
+    try {
+      const journals = await listUpdateInstallJournals({ limit });
+      res.json({ journals });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message ?? "Unable to load update history" });
     }
   });
 

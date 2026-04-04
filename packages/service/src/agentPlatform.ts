@@ -4,10 +4,15 @@ import fsSync from "node:fs";
 import crypto from "node:crypto";
 import type express from "express";
 import {
+  appendWorkItemTrace,
   appendWorkspaceSignal,
   defaultProviderForRole,
+  discoverMissionProviders,
+  initTeamPreset,
   normalizeMissionProvider,
+  readJsonIfExists,
   loadWorkspaces,
+  loadWorkspaceTraces,
   findWorkspaceById,
   runMissionDetailed,
   runBrowserRunDetailed,
@@ -16,6 +21,9 @@ import {
   loadMissionRun,
   loadMissionTemplate,
   type MissionAgent,
+  type ProviderDiscoveryRecord,
+  type ProviderDiscoveryTransport,
+  type ProviderProfile,
   type MissionRun,
   type MissionProviderSpec,
   type BrowserScenarioStep,
@@ -26,18 +34,21 @@ import {
   type ValidationState,
   type WorkItemPlanningDetail,
   type WorkItemRecord,
+  type WorkItemTraceRecord,
   type WorkPlanTask,
   getWorkspaceAgentsPath as getWorkspaceAgentsFilePath,
   getWorkspaceOrgPath as getWorkspaceOrgFilePath,
   getWorkspaceTasksPath as getWorkspaceTasksFilePath,
   getWorkspaceTaskArtifactsRoot,
   getWorkspaceMessagesPath as getWorkspaceMessagesFilePath,
-  getOperatorControlDir
+  getOperatorControlDir,
+  writeJson
 } from "@orchestrum/core";
 
 type AgentState = "idle" | "active" | "sleeping" | "error";
 type TaskStatus = "queued" | "running" | "paused" | "blocked" | "succeeded" | "failed" | "cancelled";
 type TaskType = "spec" | "implement" | "validate" | "qa" | "audit";
+type ProviderReadiness = "usable_now" | "detected_needs_setup" | "fallback_default";
 
 type AgentRecord = {
   id: string;
@@ -94,6 +105,22 @@ const TASK_MISSION_TEMPLATES = {
   validate: "validation-only",
   audit: "audit-only"
 } as const;
+
+const MISSION_GOAL_OMITTED_PAYLOAD_KEYS = new Set([
+  "workItemId",
+  "plannerTaskId",
+  "cycleId",
+  "workstreamId",
+  "gateRefs",
+  "laneId",
+  "ownerAgentId",
+  "ownerAgentName",
+  "ownerRole",
+  "reviewStatus",
+  "reviewedAt"
+]);
+const MISSION_GOAL_ARRAY_LIMIT = 6;
+const MISSION_GOAL_STRING_LIMIT = 600;
 
 type TaskRecord = {
   id: string;
@@ -164,6 +191,7 @@ type LoggerLike = {
 };
 
 export class AgentPlatform {
+  private static readonly PROVIDER_DISCOVERY_CACHE_TTL_MS = 15_000;
   private dataDir: string;
   private eventsPath: string;
   private agents: AgentRecord[] = [];
@@ -175,6 +203,12 @@ export class AgentPlatform {
   private schedulerTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private logger: LoggerLike | null = null;
+  private bootstrapLocks = new Map<string, Promise<AgentRecord[]>>();
+  private providerDiscoveryCache = new Map<string, {
+    expiresAt: number;
+    records: ProviderDiscoveryRecord[];
+  }>();
+  private providerDiscoveryPending = new Map<string, Promise<ProviderDiscoveryRecord[]>>();
 
   constructor(private options: AgentPlatformOptions) {
     this.dataDir = getOperatorControlDir(options.rootDir);
@@ -206,10 +240,12 @@ export class AgentPlatform {
     for (const route of agentRoutes) {
       app.get(route, async (req, res) => {
         const workspaceId = typeof req.query.workspace === "string" ? req.query.workspace : undefined;
+        const workspacePath = workspaceId ? await this.resolveWorkspacePath(workspaceId) : null;
         const agents = workspaceId
           ? await this.loadAgentsForWorkspaceId(workspaceId)
           : this.agents;
-        res.json({ agents });
+        const enrichedAgents = await this.enrichAgentsForRuntime(agents, workspaceId, workspacePath);
+        res.json({ agents: enrichedAgents });
       });
       app.post(route, async (req, res) => {
         const workspaceId = typeof req.body?.workspaceId === "string" ? req.body.workspaceId : undefined;
@@ -529,8 +565,20 @@ export class AgentPlatform {
     goal: string;
     runId?: string;
     runOptions?: Omit<RunStartOptions, "sandbox" | "passphrase">;
+    traceContext?: {
+      workItemId?: string;
+      cycleId?: string;
+      workstreamId?: string;
+      taskId?: string;
+      ownerAgentId?: string;
+      ownerAgentName?: string;
+      ownerRole?: string;
+    };
   }): Promise<{ ok: boolean; runId: string }> {
-    const agents = await this.loadAgentsForWorkspaceId(options.workspaceId);
+    const agents = await this.ensureWorkspaceLaunchAgents({
+      workspaceId: options.workspaceId,
+      templateId: options.templateId
+    });
     if (agents.length === 0) {
       throw new Error(`No agents configured for workspace ${options.workspaceId}.`);
     }
@@ -565,6 +613,7 @@ export class AgentPlatform {
       runId,
       agents: agents.map((agent) => this.toMissionAgent(agent)),
       runOptions: options.runOptions,
+      traceContext: options.traceContext,
       onEvent: (event) => this.handleMissionEvent(event)
     })
       .then(async (result) => {
@@ -602,26 +651,32 @@ export class AgentPlatform {
     runId: string;
   }): Promise<{ ok: boolean; runId: string }> {
     const agents = await this.loadAgentsForWorkspaceId(options.workspaceId);
-    void resumeMissionRun({
-      runsDir: options.runsDir,
-      workspaceId: options.workspaceId,
-      runId: options.runId,
-      agents: agents.map((agent) => this.toMissionAgent(agent)),
-      onEvent: (event) => this.handleMissionEvent(event)
-    })
-      .then((result) => {
-        this.upsertMissionFromRun(result.run);
-      })
-      .catch(async (err: unknown) => {
-        await this.emit({
-          t: "mission.failed",
-          ts: Date.now(),
-          runId: options.runId,
-          workspaceId: options.workspaceId,
-          error: err instanceof Error ? err.message : String(err)
-        });
+    try {
+      const result = await resumeMissionRun({
+        runsDir: options.runsDir,
+        workspaceId: options.workspaceId,
+        runId: options.runId,
+        agents: agents.map((agent) => this.toMissionAgent(agent)),
+        onEvent: (event) => this.handleMissionEvent(event)
       });
-    return { ok: true, runId: options.runId };
+      this.upsertMissionFromRun(result.run);
+      if (result.run.status !== "running") {
+        const linkedTasks = this.tasks.filter((task) => task.linkedRunId === result.run.runId);
+        for (const task of linkedTasks) {
+          await this.syncTaskFromMissionRun(task, result.run);
+        }
+      }
+      return { ok: result.ok || result.run.status === "running" || result.run.status === "paused", runId: options.runId };
+    } catch (err: unknown) {
+      await this.emit({
+        t: "mission.failed",
+        ts: Date.now(),
+        runId: options.runId,
+        workspaceId: options.workspaceId,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return { ok: false, runId: options.runId };
+    }
   }
 
   async importMissionNode(options: {
@@ -657,6 +712,81 @@ export class AgentPlatform {
     return loadMissionRun(runDir);
   }
 
+  async sendBackPausedTaskRun(options: {
+    workspaceId: string;
+    workItemId?: string;
+    taskId?: string;
+    runId?: string;
+    note?: string | null;
+    fallbackTask?: {
+      title?: string;
+      laneId?: string;
+      laneLabel?: string;
+      workstreamId?: string | null;
+      workstreamType?: string | null;
+    };
+  }): Promise<{
+    ok: boolean;
+    taskId: string;
+    runId: string;
+    taskStatus: TaskStatus;
+    runStatus: MissionRun["status"];
+  }> {
+    let task = this.tasks.find((candidate) => {
+      if (candidate.workspaceId !== options.workspaceId) return false;
+      if (options.workItemId && candidate.linkedWorkItemId !== options.workItemId) return false;
+      if (options.taskId && candidate.id !== options.taskId) return false;
+      if (options.runId && candidate.linkedRunId !== options.runId) return false;
+      if (!options.taskId && !options.runId) return false;
+      return true;
+    }) ?? null;
+    if (!task) {
+      task = await this.recoverPersistedTaskRecord(options);
+    }
+    if (!task) {
+      throw new Error("Selected live task could not be found.");
+    }
+    if (task.status !== "paused") {
+      throw new Error("Selected live task is no longer paused.");
+    }
+
+    const runId = task.linkedRunId ?? options.runId ?? null;
+    if (!runId) {
+      throw new Error("Selected live task does not have a linked run.");
+    }
+
+    const runDir = path.join(this.runsDir(), options.workspaceId, runId);
+    const run = await loadMissionRun(runDir).catch(() => null);
+    if (!run) {
+      throw new Error("Selected live run could not be found.");
+    }
+    if (run.status !== "paused") {
+      throw new Error("Selected live run is no longer paused.");
+    }
+
+    const cancelledAt = new Date().toISOString();
+    const summary = options.note?.trim()
+      ? `Operator requested changes: ${options.note.trim()}`
+      : "Operator requested changes.";
+    const updatedRun = this.buildSendBackMissionRun(run, summary, cancelledAt);
+
+    await writeJson(path.join(runDir, "run.json"), updatedRun);
+    this.upsertMissionFromRun(updatedRun);
+    this.applyMissionRunToTask(task, updatedRun);
+    await this.persistTasks();
+    await this.appendLog(task, summary);
+    await this.emitTaskStateEvent(task);
+    await this.reconcileDependencyStates();
+
+    return {
+      ok: true,
+      taskId: task.id,
+      runId: updatedRun.runId,
+      taskStatus: task.status,
+      runStatus: updatedRun.status
+    };
+  }
+
   listTasks(options?: { workspaceId?: string; workItemId?: string }): TaskRecord[] {
     const workspaceId = options?.workspaceId?.trim();
     const workItemId = options?.workItemId?.trim();
@@ -681,6 +811,10 @@ export class AgentPlatform {
     const workspaceAgents = await this.loadAgentsForWorkspaceId(options.workspaceId);
     if (workspaceAgents.length === 0) {
       throw new Error(`No agents configured for workspace ${options.workspaceId}.`);
+    }
+    const workspacePath = await this.resolveWorkspacePath(options.workspaceId);
+    if (!workspacePath) {
+      throw new Error(`Workspace ${options.workspaceId} is missing or unreadable.`);
     }
 
     const assignmentByLane = new Map(options.detail.teamAssignments.map((assignment) => [assignment.laneId, assignment]));
@@ -823,6 +957,22 @@ export class AgentPlatform {
       createdTasks.push(task);
     }
 
+    for (const [index, task] of createdTasks.entries()) {
+      const plannedTask = annotatedTasks[index]!;
+      const workstream = task.workstreamId ? annotatedWorkstreamById.get(task.workstreamId) ?? null : null;
+      const selection = options.detail.teamSelection.find((entry) => entry.laneId === plannedTask.laneId) ?? null;
+      await this.recordTaskAssignmentTrace({
+        workspacePath,
+        workspaceId: options.workspaceId,
+        workItem: options.workItem,
+        cycleId: options.cycleId,
+        task,
+        plannedTask,
+        workstream,
+        selection
+      });
+    }
+
       await this.persistTasks();
       for (const task of createdTasks) {
         const agent = workspaceAgents.find((item) => item.id === task.assignedToAgentId);
@@ -842,6 +992,21 @@ export class AgentPlatform {
         workstreams: annotatedWorkstreams
       }
     };
+  }
+
+  async ensureWorkspaceLaunchAgents(options: {
+    workspaceId: string;
+    templateId?: string;
+  }): Promise<AgentRecord[]> {
+    const existingLock = this.bootstrapLocks.get(options.workspaceId);
+    if (existingLock) return existingLock;
+    const bootstrapPromise = this.ensureWorkspaceLaunchAgentsInternal(options).finally(() => {
+      if (this.bootstrapLocks.get(options.workspaceId) === bootstrapPromise) {
+        this.bootstrapLocks.delete(options.workspaceId);
+      }
+    });
+    this.bootstrapLocks.set(options.workspaceId, bootstrapPromise);
+    return bootstrapPromise;
   }
 
   private selectLaneAgentMatch(options: {
@@ -1057,11 +1222,20 @@ export class AgentPlatform {
     const result = await runMissionDetailed({
       templateId,
       repoPath: workspacePath,
-      runsDir: path.join(this.options.rootDir, "runs"),
+      runsDir: this.runsDir(),
       workspaceId,
       goal: this.buildMissionGoal(task),
       runId,
       agents: missionAgents,
+      traceContext: {
+        workItemId: task.linkedWorkItemId,
+        cycleId: task.cycleId,
+        workstreamId: task.workstreamId,
+        taskId: task.id,
+        ownerAgentId: task.ownerAgentId ?? agent.id,
+        ownerAgentName: task.ownerAgentName ?? agent.name,
+        ownerRole: task.ownerRole ?? agent.role
+      },
       onEvent: (event) => this.handleMissionEvent(event)
     });
 
@@ -1116,7 +1290,7 @@ export class AgentPlatform {
     const result = await runBrowserRunDetailed({
       kind: "qa",
       repoPath: workspacePath,
-      runsDir: path.join(this.options.rootDir, "runs"),
+      runsDir: this.runsDir(),
       workspaceId,
       runId,
       baseUrl,
@@ -1178,6 +1352,149 @@ export class AgentPlatform {
   }
 
   private async syncTaskFromMissionRun(task: TaskRecord, run: MissionRun) {
+    this.applyMissionRunToTask(task, run);
+    await this.persistTasks();
+    await this.appendLog(task, `Mission ${run.runId} ${run.status}: ${task.resultSummary}`);
+    await this.reconcileDependencyStates();
+  }
+
+  private buildSendBackMissionRun(run: MissionRun, summary: string, cancelledAt: string): MissionRun {
+    const nodes = run.graph.nodes.map((node) => {
+      if (node.status !== "awaiting_approval" && node.status !== "waiting_input") {
+        return node;
+      }
+      return {
+        ...node,
+        status: "cancelled" as const,
+        pauseReason: null,
+        end: node.end ?? cancelledAt,
+        error: summary,
+        verdict: "blocked" as const
+      };
+    });
+
+    const latestValidationNode = [...nodes]
+      .reverse()
+      .find((node) => node.validation && node.validation.status !== "not_requested");
+    const latestChangedNode = [...nodes]
+      .reverse()
+      .find((node) => node.change && node.change.status !== "none");
+
+    return {
+      ...run,
+      status: "cancelled",
+      end: run.end ?? cancelledAt,
+      pauseReason: null,
+      recovery: null,
+      error: summary,
+      verdict: "blocked",
+      meta: {
+        ...(run.meta ?? {}),
+        finishedAt: run.meta?.finishedAt ?? cancelledAt
+      },
+      validation: latestValidationNode?.validation ?? run.validation ?? { status: "not_requested", commands: [], results: [] },
+      change: latestChangedNode?.change ?? run.change ?? { status: "none" },
+      graph: {
+        ...run.graph,
+        nodes
+      }
+    };
+  }
+
+  private async recoverPersistedTaskRecord(options: {
+    workspaceId: string;
+    workItemId?: string;
+    taskId?: string;
+    runId?: string;
+    fallbackTask?: {
+      title?: string;
+      laneId?: string;
+      laneLabel?: string;
+      workstreamId?: string | null;
+      workstreamType?: string | null;
+    };
+  }): Promise<TaskRecord | null> {
+    if (!options.taskId) {
+      return null;
+    }
+    const taskDir = path.join(this.dataDir, "tasks", options.taskId);
+    const linkedRun = await readJsonIfExists<{
+      taskId?: string;
+      workspaceId?: string;
+      templateId?: string;
+      runId?: string;
+      startedAt?: string;
+    }>(path.join(taskDir, "artifacts", "linked-run.json")).catch(() => null);
+    const runResult = await readJsonIfExists<{
+      status?: string;
+      verdict?: string | null;
+      pauseReason?: PauseReason | null;
+      change?: ChangeState | null;
+      validation?: ValidationState | null;
+    }>(path.join(taskDir, "artifacts", "run-result.json")).catch(() => null);
+    const recoveredWorkspaceId = linkedRun?.workspaceId ?? options.workspaceId;
+    const recoveredRunId = linkedRun?.runId ?? options.runId ?? null;
+    if (recoveredWorkspaceId !== options.workspaceId || !recoveredRunId) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const recoveredTask = this.normalizeTaskRecord({
+      id: options.taskId,
+      workspaceId: recoveredWorkspaceId,
+      title: options.fallbackTask?.title ?? `Recovered task ${options.taskId.slice(0, 8)}`,
+      description: options.fallbackTask?.title ?? "Recovered persisted task.",
+      type: this.recoveredTaskType(options.fallbackTask?.laneId ?? null),
+      payload: {
+        workItemId: options.workItemId ?? null,
+        laneId: options.fallbackTask?.laneId ?? null,
+        laneLabel: options.fallbackTask?.laneLabel ?? null,
+        workstreamId: options.fallbackTask?.workstreamId ?? null,
+        workstreamType: options.fallbackTask?.workstreamType ?? null
+      },
+      assignedToAgentId: "recovered-agent",
+      dependsOnTaskIds: [],
+      linkedWorkItemId: options.workItemId,
+      laneId: options.fallbackTask?.laneId ?? undefined,
+      laneLabel: options.fallbackTask?.laneLabel ?? undefined,
+      workstreamId: options.fallbackTask?.workstreamId ?? undefined,
+      workstreamType: options.fallbackTask?.workstreamType ?? undefined,
+      waitingOnTaskIds: [],
+      blockedByTaskIds: [],
+      status: runResult?.status ?? "paused",
+      createdAt: linkedRun?.startedAt ?? now,
+      startedAt: linkedRun?.startedAt ?? undefined,
+      attempts: 1,
+      maxAttempts: 1,
+      artifactsPath: path.join(taskDir, "artifacts"),
+      logsPath: path.join(taskDir, "logs.ndjson"),
+      linkedRunId: recoveredRunId,
+      linkedTemplateId: linkedRun?.templateId,
+      pauseReason: runResult?.pauseReason ?? null,
+      change: runResult?.change ?? null,
+      validation: runResult?.validation ?? null,
+      verdict: typeof runResult?.verdict === "string" ? runResult.verdict : null,
+      resultSummary:
+        runResult?.status === "paused"
+          ? runResult?.pauseReason === "awaiting_approval"
+            ? "Mission paused awaiting approval."
+            : "Mission paused awaiting external input."
+          : undefined
+    });
+    this.tasks = [recoveredTask, ...this.tasks.filter((entry) => entry.id !== recoveredTask.id)];
+    return recoveredTask;
+  }
+
+  private recoveredTaskType(laneId: string | null): TaskType {
+    const normalized = laneId?.trim().toLowerCase() ?? "";
+    if (normalized === "pm") return "spec";
+    if (normalized === "tester") return "validate";
+    if (normalized === "qa") return "qa";
+    if (normalized === "audit") return "audit";
+    return "implement";
+  }
+
+  private applyMissionRunToTask(task: TaskRecord, run: MissionRun) {
     task.linkedRunId = run.runId;
     task.linkedTemplateId = run.missionTemplateId;
     task.pauseReason = run.pauseReason ?? null;
@@ -1189,9 +1506,6 @@ export class AgentPlatform {
     task.waitingOnTaskIds = [];
     task.blockedByTaskIds = [];
     task.resultSummary = this.summarizeMissionOutcome(run);
-    await this.persistTasks();
-    await this.appendLog(task, `Mission ${run.runId} ${run.status}: ${task.resultSummary}`);
-    await this.reconcileDependencyStates();
   }
 
   private mapRunStatusToTaskStatus(status: MissionRun["status"]): TaskStatus {
@@ -1215,19 +1529,19 @@ export class AgentPlatform {
         : "Mission paused awaiting external input.";
     }
     if (run.status === "blocked") {
-      return run.error ?? "Mission blocked and needs operator intervention.";
+      return run.recovery?.summary ?? run.error ?? "Mission finished with blocking findings.";
     }
     if (run.status === "failed") {
-      return run.error ?? "Mission failed.";
+      return run.recovery?.summary ?? run.error ?? "Mission failed.";
     }
     if (run.status === "cancelled") {
-      return "Mission cancelled.";
+      return run.error ?? "Mission cancelled.";
     }
     return `Mission ended with status ${run.status}.`;
   }
 
   private buildMissionGoal(task: TaskRecord): string {
-    const payloadText = JSON.stringify(task.payload ?? {}, null, 2);
+    const payloadText = JSON.stringify(buildMissionGoalPayload(task.payload ?? {}), null, 2);
     return [
       `Task title: ${task.title}`,
       "",
@@ -1236,6 +1550,264 @@ export class AgentPlatform {
       "Payload:",
       payloadText
     ].join("\n").trim();
+  }
+
+  private async recordTaskAssignmentTrace(options: {
+    workspacePath: string;
+    workspaceId: string;
+    workItem: WorkItemRecord;
+    cycleId: string;
+    task: TaskRecord;
+    plannedTask: WorkPlanTask;
+    workstream: WorkItemPlanningDetail["workstreams"][number] | null;
+    selection: WorkItemPlanningDetail["teamSelection"][number] | null;
+  }) {
+    const assignmentPrompt = this.buildMissionGoal(options.task);
+    const summary = `${options.task.ownerAgentName ?? options.task.assignedToAgentId} assigned ${options.task.title}.`;
+    const trace = await appendWorkItemTrace(options.workspacePath, {
+      workspaceId: options.workspaceId,
+      workItemId: options.workItem.id,
+      cycleId: options.cycleId,
+      workstreamId: options.task.workstreamId ?? null,
+      taskId: options.task.id,
+      traceType: "assignment",
+      ownerAgentId: options.task.ownerAgentId ?? options.task.assignedToAgentId,
+      ownerAgentName: options.task.ownerAgentName ?? null,
+      ownerRole: options.task.ownerRole ?? null,
+      assignmentToAgentId: options.task.assignedToAgentId,
+      assignmentToAgentName: options.task.ownerAgentName ?? null,
+      gateRefs: options.task.gateRefs ?? [],
+      workstreamTitle: options.workstream?.title ?? null,
+      laneLabel: options.task.laneLabel ?? null,
+      promptCountDelta: 1,
+      summary,
+      selectionReason: options.selection?.selectionReason ?? null,
+      expectedOutput: options.task.title,
+      assignmentPrompt,
+      promptSummary: options.plannedTask.description?.trim() || options.task.title,
+      payload: {
+        taskType: options.task.type,
+        plannerTaskKind: options.plannedTask.kind,
+        qaMode: options.task.qaMode ?? null,
+        dependsOnTaskIds: options.task.dependsOnTaskIds,
+        expectedGates: options.selection?.expectedGates ?? [],
+        expectedWorkstreams: options.selection?.expectedWorkstreams ?? []
+      }
+    });
+    await this.emit({
+      t: "assignment.created",
+      ts: Date.now(),
+      workspaceId: options.workspaceId,
+      workItemId: options.workItem.id,
+      cycleId: options.cycleId,
+      workstreamId: options.task.workstreamId,
+      taskId: options.task.id,
+      traceType: trace.traceType,
+      ownerAgentId: options.task.ownerAgentId ?? options.task.assignedToAgentId,
+      ownerAgentName: options.task.ownerAgentName ?? null,
+      assignmentToAgentId: options.task.assignedToAgentId,
+      assignmentToAgentName: options.task.ownerAgentName ?? null,
+      summary,
+      laneLabel: options.task.laneLabel,
+      workstreamTitle: options.workstream?.title ?? null,
+      taskTitle: options.task.title
+    });
+  }
+
+  private async recordGateUpdateTraces(workspacePath: string, task: TaskRecord) {
+    if (!task.linkedWorkItemId || !task.workspaceId || (task.gateRefs?.length ?? 0) === 0) return;
+    for (const gateRef of task.gateRefs ?? []) {
+      const summary =
+        task.status === "succeeded"
+          ? `${gateRef} passed via ${task.title}.`
+          : task.status === "failed"
+            ? `${gateRef} failed via ${task.title}.`
+            : task.status === "blocked" || task.status === "paused"
+              ? `${gateRef} is blocked by ${task.title}.`
+              : `${gateRef} is pending via ${task.title}.`;
+      const trace = await appendWorkItemTrace(workspacePath, {
+        workspaceId: task.workspaceId,
+        workItemId: task.linkedWorkItemId,
+        cycleId: task.cycleId ?? null,
+        workstreamId: task.workstreamId ?? null,
+        taskId: task.id,
+        runId: task.linkedRunId ?? null,
+        traceType: "gate_update",
+        ownerAgentId: task.ownerAgentId ?? task.assignedToAgentId,
+        ownerAgentName: task.ownerAgentName ?? null,
+        ownerRole: task.ownerRole ?? null,
+        assignmentToAgentId: task.assignedToAgentId,
+        gateRefs: [gateRef],
+        workstreamTitle: null,
+        laneLabel: task.laneLabel ?? null,
+        exchangeCountDelta: task.type === "qa" ? 1 : 0,
+        summary,
+        outputSummary: task.resultSummary ?? null,
+        payload: {
+          gateId: gateRef,
+          status: task.status,
+          qaMode: task.qaMode ?? null
+        }
+      });
+      await this.emit({
+        t: "gate.updated",
+        ts: Date.now(),
+        workspaceId: task.workspaceId,
+        workItemId: task.linkedWorkItemId,
+        cycleId: task.cycleId,
+        workstreamId: task.workstreamId,
+        taskId: task.id,
+        traceType: trace.traceType,
+        ownerAgentId: task.ownerAgentId ?? task.assignedToAgentId,
+        ownerAgentName: task.ownerAgentName ?? null,
+        assignmentToAgentId: task.assignedToAgentId,
+        assignmentToAgentName: task.ownerAgentName ?? null,
+        gateId: gateRef,
+        status: task.status,
+        summary,
+        laneLabel: task.laneLabel ?? null,
+        taskTitle: task.title
+      });
+    }
+  }
+
+  private async recordHandoffTraces(workspacePath: string, task: TaskRecord) {
+    if (!task.linkedWorkItemId || !task.workspaceId) return;
+    const downstreamTasks = this.tasks.filter((candidate) =>
+      candidate.linkedWorkItemId === task.linkedWorkItemId
+      && candidate.cycleId === task.cycleId
+      && candidate.dependsOnTaskIds.includes(task.id)
+    );
+    for (const downstream of downstreamTasks) {
+      const summary = `${task.title} handed off to ${downstream.title}.`;
+      const trace = await appendWorkItemTrace(workspacePath, {
+        workspaceId: task.workspaceId,
+        workItemId: task.linkedWorkItemId,
+        cycleId: task.cycleId ?? null,
+        workstreamId: task.workstreamId ?? null,
+        taskId: task.id,
+        traceType: "handoff",
+        ownerAgentId: task.ownerAgentId ?? task.assignedToAgentId,
+        ownerAgentName: task.ownerAgentName ?? null,
+        ownerRole: task.ownerRole ?? null,
+        assignmentToAgentId: downstream.ownerAgentId ?? downstream.assignedToAgentId,
+        assignmentToAgentName: downstream.ownerAgentName ?? null,
+        gateRefs: downstream.gateRefs ?? [],
+        handoffToWorkstreamId: downstream.workstreamId ?? null,
+        laneLabel: task.laneLabel ?? null,
+        summary,
+        outputSummary: task.resultSummary ?? null,
+        payload: {
+          fromTaskId: task.id,
+          toTaskId: downstream.id
+        }
+      });
+      await this.emit({
+        t: "handoff.created",
+        ts: Date.now(),
+        workspaceId: task.workspaceId,
+        workItemId: task.linkedWorkItemId,
+        cycleId: task.cycleId,
+        workstreamId: task.workstreamId,
+        taskId: task.id,
+        traceType: trace.traceType,
+        ownerAgentId: task.ownerAgentId ?? task.assignedToAgentId,
+        ownerAgentName: task.ownerAgentName ?? null,
+        assignmentToAgentId: downstream.ownerAgentId ?? downstream.assignedToAgentId,
+        assignmentToAgentName: downstream.ownerAgentName ?? null,
+        handoffToWorkstreamId: downstream.workstreamId,
+        summary,
+        laneLabel: task.laneLabel ?? null,
+        workstreamTitle: task.laneLabel ?? task.workstreamId ?? null,
+        taskTitle: task.title
+      });
+    }
+  }
+
+  private async enrichAgentsForRuntime(
+    agents: AgentRecord[],
+    workspaceId?: string,
+    workspacePath?: string | null
+  ): Promise<Array<AgentRecord & {
+    runtime: {
+      providerSummary: string;
+      currentModel: string | null;
+      providerReadiness: ProviderReadiness;
+      providerReadinessReason: string | null;
+      promptCount: number;
+      exchangeCount: number;
+      estimatedCostUsd: number | null;
+      assignedWorkItems: string[];
+      activeWorkstreams: Array<{
+        workstreamId: string;
+        laneLabel?: string;
+        status: string;
+        workItemId?: string;
+        taskTitle?: string;
+      }>;
+      recentAssignmentSummary: string | null;
+    };
+  }>> {
+    const tracesByWorkspace = new Map<string, WorkItemTraceRecord[]>();
+    const discoveryByWorkspace = new Map<string, ProviderDiscoveryRecord[]>();
+    const workspaceIds = Array.from(new Set(agents.map((agent) => agent.workspaceId).filter((value): value is string => Boolean(value))));
+    for (const id of workspaceIds) {
+      const resolvedPath = workspaceId && id === workspaceId
+        ? workspacePath ?? await this.resolveWorkspacePath(id)
+        : await this.resolveWorkspacePath(id);
+      if (!resolvedPath) continue;
+      tracesByWorkspace.set(id, await loadWorkspaceTraces(resolvedPath).catch(() => []));
+      discoveryByWorkspace.set(id, await this.loadProviderDiscoveryForWorkspace(id, resolvedPath));
+    }
+
+    return agents.map((agent) => {
+      const agentTasks = this.tasks.filter((task) =>
+        (!workspaceId || task.workspaceId === workspaceId)
+        && (task.assignedToAgentId === agent.id || task.ownerAgentId === agent.id)
+      );
+      const agentTraces = (agent.workspaceId ? tracesByWorkspace.get(agent.workspaceId) ?? [] : []).filter((trace) =>
+        trace.ownerAgentId === agent.id || trace.assignmentToAgentId === agent.id
+      );
+      const activeWorkstreams = Array.from(new Map(
+        agentTasks
+          .filter((task) => task.workstreamId && ["queued", "running", "blocked", "paused"].includes(task.status))
+          .map((task) => [task.workstreamId!, {
+            workstreamId: task.workstreamId!,
+            laneLabel: task.laneLabel,
+            status: task.status,
+            workItemId: task.linkedWorkItemId,
+            taskTitle: task.title
+          }])
+      ).values());
+      const assignedWorkItems = Array.from(new Set(agentTasks.map((task) => task.linkedWorkItemId).filter((value): value is string => Boolean(value))));
+      const promptCount = agentTraces.reduce((total, trace) => total + Math.max(0, trace.promptCountDelta ?? 0), 0);
+      const exchangeCount = agentTraces.reduce((total, trace) => total + Math.max(0, trace.exchangeCountDelta ?? 0), 0);
+      const costValues = agentTraces.filter((trace) => typeof trace.estimatedCostUsd === "number").map((trace) => trace.estimatedCostUsd as number);
+      const latestModel = [...agentTraces].reverse().find((trace) => trace.providerModel)?.providerModel
+        ?? agent.provider.modelOverride
+        ?? agent.provider.profileId
+        ?? null;
+      const recentAssignmentSummary = [...agentTraces].reverse().find((trace) => trace.traceType === "assignment")?.summary ?? null;
+      const providerReadiness = this.resolveProviderReadiness(
+        agent.provider,
+        discoveryByWorkspace.get(agent.workspaceId ?? "") ?? []
+      );
+      return {
+        ...agent,
+        runtime: {
+          providerSummary: this.describeProvider(agent.provider),
+          currentModel: latestModel,
+          providerReadiness: providerReadiness.readiness,
+          providerReadinessReason: providerReadiness.reason,
+          promptCount,
+          exchangeCount,
+          estimatedCostUsd: costValues.length > 0 ? Number(costValues.reduce((total, value) => total + value, 0).toFixed(6)) : null,
+          assignedWorkItems,
+          activeWorkstreams,
+          recentAssignmentSummary
+        }
+      };
+    });
   }
 
   private taskTypeForPlannedTask(task: WorkPlanTask): TaskType {
@@ -1338,12 +1910,27 @@ export class AgentPlatform {
           : task.status === "cancelled"
             ? "task.cancelled"
             : task.status === "failed"
-              ? "task.failed"
-              : "task.updated";
+            ? "task.failed"
+            : "task.updated";
+    if (task.workspaceId && task.linkedWorkItemId) {
+      const workspacePath = await this.resolveWorkspacePath(task.workspaceId);
+      if (workspacePath) {
+        await this.recordGateUpdateTraces(workspacePath, task);
+        if (task.status === "succeeded") {
+          await this.recordHandoffTraces(workspacePath, task);
+        }
+      }
+    }
     await this.emit({
       t: eventType,
       ts: Date.now(),
       taskId: task.id,
+      workspaceId: task.workspaceId,
+      workItemId: task.linkedWorkItemId,
+      cycleId: task.cycleId,
+      workstreamId: task.workstreamId,
+      ownerAgentId: task.ownerAgentId ?? task.assignedToAgentId,
+      assignmentToAgentId: task.assignedToAgentId,
       linkedRunId: task.linkedRunId,
       status: task.status,
       resultSummary: task.resultSummary,
@@ -1553,16 +2140,26 @@ export class AgentPlatform {
       if (workspacePath) {
         await appendWorkspaceSignal(workspacePath, {
           workspaceId,
-          source: "execution",
+          source: this.signalSourceForEvent(event),
           type: String(event.t ?? "execution.event"),
           entityId:
             typeof event.taskId === "string"
               ? event.taskId
+              : typeof event.workstreamId === "string"
+                ? event.workstreamId
+                : typeof event.workItemId === "string"
+                  ? event.workItemId
+                  : typeof event.traceId === "string"
+                    ? event.traceId
+                    : typeof event.handoffToWorkstreamId === "string"
+                      ? event.handoffToWorkstreamId
+                      : typeof event.gateId === "string"
+                        ? event.gateId
               : typeof event.linkedRunId === "string"
                 ? event.linkedRunId
                 : undefined,
           status: typeof event.status === "string" ? event.status : undefined,
-          summary: String(event.t ?? "execution.event"),
+          summary: this.summarizeRuntimeEvent(event),
           payload: event as Record<string, unknown>
         }).catch(() => undefined);
       }
@@ -1584,6 +2181,49 @@ export class AgentPlatform {
     const message = event.message && typeof event.message === "object" ? event.message as { workspaceId?: unknown } : null;
     if (typeof message?.workspaceId === "string" && message.workspaceId.trim()) return message.workspaceId;
     return null;
+  }
+
+  private signalSourceForEvent(event: RuntimeEvent): "mission" | "execution" | "browser" | "review" | "work" | "supervisor" | "plugin" {
+    const type = String(event.t ?? "execution.event");
+    if (type.startsWith("mission.")) return "mission";
+    if (type.startsWith("selection.") || type.startsWith("assignment.") || type.startsWith("handoff.") || type.startsWith("gate.") || type.startsWith("cost.")) {
+      return "work";
+    }
+    return "execution";
+  }
+
+  private summarizeRuntimeEvent(event: RuntimeEvent): string {
+    const type = String(event.t ?? "execution.event");
+    if (typeof event.summary === "string" && event.summary.trim()) {
+      return event.summary;
+    }
+    if (type === "assignment.created") {
+      const assignee = typeof event.assignmentToAgentId === "string" ? event.assignmentToAgentId : "specialist";
+      const title = typeof event.workstreamTitle === "string" ? event.workstreamTitle : typeof event.taskId === "string" ? event.taskId : "workstream";
+      return `${assignee} assigned ${title}`;
+    }
+    if (type === "handoff.created") {
+      const target = typeof event.handoffToWorkstreamId === "string" ? event.handoffToWorkstreamId : "next lane";
+      return `Handoff prepared for ${target}`;
+    }
+    if (type === "gate.updated") {
+      const gateId = typeof event.gateId === "string" ? event.gateId : "gate";
+      const status = typeof event.status === "string" ? event.status : "updated";
+      return `${gateId} ${status}`;
+    }
+    if (type === "cost.updated") {
+      const model = typeof event.providerModel === "string" ? event.providerModel : "provider";
+      return `Estimated cost updated for ${model}`;
+    }
+    if (type === "prompt.sent") {
+      const model = typeof event.providerModel === "string" ? event.providerModel : "provider";
+      return `Prompt sent via ${model}`;
+    }
+    if (type === "response.received") {
+      const model = typeof event.providerModel === "string" ? event.providerModel : "provider";
+      return `Response received from ${model}`;
+    }
+    return type;
   }
 
   private async readJson<T>(filePath: string, fallback: T): Promise<T> {
@@ -1661,6 +2301,27 @@ export class AgentPlatform {
     this.orgNodes = orgNodes;
     this.tasks = tasks.map((task) => this.normalizeTaskRecord(task));
     this.messages = messages;
+    const reconciled = await this.reconcilePersistedTaskRuns();
+    if (reconciled) {
+      await this.reconcileDependencyStates();
+    }
+  }
+
+  private async reconcilePersistedTaskRuns(): Promise<boolean> {
+    let changed = false;
+    for (const task of this.tasks) {
+      if (!task.workspaceId || !task.linkedRunId) continue;
+      if (!["queued", "running", "paused", "blocked"].includes(task.status)) continue;
+      const runDir = path.join(this.runsDir(), task.workspaceId, task.linkedRunId);
+      const run = await loadMissionRun(runDir).catch(() => null);
+      if (!run || run.status === "running") continue;
+      this.applyMissionRunToTask(task, run);
+      changed = true;
+    }
+    if (changed) {
+      await this.persistTasks();
+    }
+    return changed;
   }
 
   private async resolveWorkspacePath(workspaceId: string): Promise<string | null> {
@@ -1671,6 +2332,10 @@ export class AgentPlatform {
   private async listKnownWorkspaces() {
     const repoPaths = this.options.listWorkspacePaths ? await this.options.listWorkspacePaths().catch(() => []) : [];
     return loadWorkspaces(this.options.rootDir, { repoPaths }).catch(() => []);
+  }
+
+  private runsDir(): string {
+    return process.env.ORCHESTRUM_RUNS_DIR?.trim() || path.join(this.options.rootDir, "runs");
   }
 
   private getWorkspaceAgentsPath(workspacePath: string): string {
@@ -1700,6 +2365,323 @@ export class AgentPlatform {
       provider: normalizeMissionProvider(agent.provider, agent.role)
     }));
     await fs.writeFile(this.getWorkspaceAgentsPath(workspacePath), JSON.stringify(normalized, null, 2), "utf8");
+  }
+
+  private async ensureWorkspaceLaunchAgentsInternal(options: {
+    workspaceId: string;
+    templateId?: string;
+  }): Promise<AgentRecord[]> {
+    const workspacePath = await this.resolveWorkspacePath(options.workspaceId);
+    if (!workspacePath) return [];
+
+    await initTeamPreset({
+      repoPath: workspacePath,
+      workspaceId: options.workspaceId
+    }).catch(() => null);
+
+    const existing = await this.loadAgentsForWorkspacePath(workspacePath);
+    const requirements = this.bootstrapRequirementsForTemplate(options.templateId);
+    const missing = requirements.filter((requirement) =>
+      !existing.some((agent) => this.agentSatisfiesBootstrapRequirement(agent, requirement))
+    );
+    if (missing.length === 0) return existing;
+
+    const now = new Date().toISOString();
+    const created = await Promise.all(missing.map((requirement) => this.createBootstrapAgent({
+      workspacePath,
+      workspaceId: options.workspaceId,
+      role: requirement.role,
+      specialization: requirement.specialization,
+      name: requirement.name,
+      maxParallelWork: requirement.maxParallelWork,
+      createdAt: now
+    })));
+    const next = [...existing, ...created];
+    await this.saveAgentsForWorkspacePath(workspacePath, next);
+    await this.refreshWorkspaceState();
+    for (const agent of created) {
+      await this.emit({
+        t: "agent.bootstrap_created",
+        ts: Date.now(),
+        workspaceId: options.workspaceId,
+        agent,
+        summary: `${agent.name} was created automatically so work can launch without manual specialist setup.`
+      });
+    }
+    return next;
+  }
+
+  private bootstrapRequirementsForTemplate(templateId?: string): Array<{
+    role: string;
+    specialization: string;
+    name: string;
+    maxParallelWork: number;
+  }> {
+    const requestedTemplateId =
+      typeof templateId === "string" && templateId.trim()
+        ? templateId.trim()
+        : "feature-dev";
+    const recommendedRoles = new Set(loadMissionTemplate(requestedTemplateId).recommendedRoles ?? []);
+    if (requestedTemplateId === "audit-only") {
+      recommendedRoles.add("pm");
+    }
+    const requirements: Array<{
+      role: string;
+      specialization: string;
+      name: string;
+      maxParallelWork: number;
+    }> = [];
+    if (recommendedRoles.has("pm")) {
+      requirements.push({
+        role: "pm",
+        specialization: "pm",
+        name: "PM Agent",
+        maxParallelWork: 1
+      });
+    }
+    if (recommendedRoles.has("dev")) {
+      requirements.push({
+        role: "dev",
+        specialization: "fullstack",
+        name: "Delivery Agent",
+        maxParallelWork: 2
+      });
+    }
+    if (recommendedRoles.has("audit") || recommendedRoles.has("security")) {
+      requirements.push({
+        role: "audit",
+        specialization: "audit",
+        name: recommendedRoles.has("security") ? "Security Audit Agent" : "Audit Agent",
+        maxParallelWork: 1
+      });
+    }
+    if (requirements.length === 0) {
+      requirements.push({
+        role: "dev",
+        specialization: "fullstack",
+        name: "Delivery Agent",
+        maxParallelWork: 2
+      });
+    }
+    return requirements;
+  }
+
+  private agentSatisfiesBootstrapRequirement(
+    agent: AgentRecord,
+    requirement: {
+      role: string;
+      specialization: string;
+    }
+  ): boolean {
+    if (!this.roleMatches(agent.role, requirement.role)) return false;
+    const specialization = agent.profile.specialization.trim().toLowerCase();
+    const required = requirement.specialization.trim().toLowerCase();
+    if (specialization === required) return true;
+    if (required === "pm" || required === "audit") return false;
+    return specialization === "fullstack";
+  }
+
+  private createBootstrapAgent(options: {
+    workspacePath: string;
+    workspaceId: string;
+    role: string;
+    specialization: string;
+    name: string;
+    maxParallelWork: number;
+    createdAt: string;
+  }): Promise<AgentRecord> {
+    return this.buildBootstrapAgent(options);
+  }
+
+  private async buildBootstrapAgent(options: {
+    workspacePath: string;
+    workspaceId: string;
+    role: string;
+    specialization: string;
+    name: string;
+    maxParallelWork: number;
+    createdAt: string;
+  }): Promise<AgentRecord> {
+    const provider = await this.selectBootstrapProvider({
+      workspacePath: options.workspacePath,
+      role: options.role
+    });
+    return {
+      id: crypto.randomUUID(),
+      workspaceId: options.workspaceId,
+      name: options.name,
+      role: options.role,
+      tags: ["preset", "auto-bootstrap"],
+      profile: {
+        specialization: options.specialization,
+        seniority: options.role === "pm" ? "lead" : "senior",
+        maxParallelWork: options.maxParallelWork
+      },
+      provider: provider.provider,
+      capabilities: {
+        shell: false,
+        fs: true,
+        network: true
+      },
+      status: {
+        state: "idle",
+        currentTaskIds: [],
+        lastHeartbeatAt: options.createdAt
+      },
+      createdAt: options.createdAt,
+      updatedAt: options.createdAt
+    };
+  }
+
+  private async selectBootstrapProvider(options: {
+    workspacePath: string;
+    role: string;
+  }): Promise<{ provider: MissionProviderSpec; readiness: ProviderReadiness; reason: string }> {
+    const workspaceId = (await this.listKnownWorkspaces())
+      .find((workspace) => workspace.path === options.workspacePath)
+      ?.id;
+    const discovery = await this.loadProviderDiscoveryForWorkspace(
+      workspaceId ?? options.workspacePath,
+      options.workspacePath
+    );
+
+    const configuredLocal = this.selectDiscoveryProviderCandidate(
+      discovery,
+      options.role,
+      (transport) => transport.configured && this.isLocalTransport(transport.transport)
+    );
+    if (configuredLocal) {
+      return {
+        provider: configuredLocal,
+        readiness: "usable_now",
+        reason: `Bootstrap chose ${this.describeProvider(configuredLocal)} because it is configured on this machine right now.`
+      };
+    }
+
+    const detectedLocal = this.selectDiscoveryProviderCandidate(
+      discovery,
+      options.role,
+      (transport) => transport.available && this.isLocalTransport(transport.transport)
+    );
+    if (detectedLocal) {
+      return {
+        provider: detectedLocal,
+        readiness: "detected_needs_setup",
+        reason: `Bootstrap chose ${this.describeProvider(detectedLocal)} because it was detected locally, but still needs sign-in or setup.`
+      };
+    }
+
+    const configuredRemote = this.selectDiscoveryProviderCandidate(
+      discovery,
+      options.role,
+      (transport) => transport.configured
+    );
+    if (configuredRemote) {
+      return {
+        provider: configuredRemote,
+        readiness: "usable_now",
+        reason: `Bootstrap chose ${this.describeProvider(configuredRemote)} because it is already configured.`
+      };
+    }
+
+    const fallback = normalizeMissionProvider(defaultProviderForRole(options.role), options.role);
+    return {
+      provider: fallback,
+      readiness: "fallback_default",
+      reason: `Bootstrap fell back to ${this.describeProvider(fallback)} because discovery did not find a role-aligned configured route.`
+    };
+  }
+
+  private resolveProviderReadiness(
+    provider: MissionProviderSpec,
+    discovery: ProviderDiscoveryRecord[]
+  ): { readiness: ProviderReadiness; reason: string } {
+    const record = discovery.find((entry) => entry.vendor === provider.vendor) ?? null;
+    const transport = record?.transports.find((entry) => entry.transport === provider.transport) ?? null;
+    if (transport?.configured) {
+      return {
+        readiness: "usable_now",
+        reason: `${this.describeProvider(provider)} is configured and can be used immediately.`
+      };
+    }
+    if (transport?.available) {
+      return {
+        readiness: "detected_needs_setup",
+        reason: `${this.describeProvider(provider)} was detected locally, but still needs sign-in or setup.`
+      };
+    }
+    return {
+      readiness: "fallback_default",
+      reason: `${this.describeProvider(provider)} is a fallback route because discovery did not confirm a matching configured transport.`
+    };
+  }
+
+  private selectDiscoveryProviderCandidate(
+    discovery: ProviderDiscoveryRecord[],
+    role: string,
+    predicate: (transport: ProviderDiscoveryTransport) => boolean
+  ): MissionProviderSpec | null {
+    for (const record of discovery) {
+      for (const transport of record.transports) {
+        if (!predicate(transport)) continue;
+        const profile = this.selectProviderProfileForRole(transport.profiles, role);
+        if (!profile) continue;
+        return normalizeMissionProvider({
+          vendor: record.vendor,
+          transport: transport.transport,
+          profileId: profile.id
+        }, role);
+      }
+    }
+    return null;
+  }
+
+  private selectProviderProfileForRole(profiles: ProviderProfile[], role: string): ProviderProfile | null {
+    if (!profiles.length) return null;
+    const normalizedRole = role.trim().toLowerCase();
+    const roleMatch = profiles.find((profile) =>
+      Array.isArray(profile.roleHints)
+      && profile.roleHints.some((hint) => hint === normalizedRole || (normalizedRole === "pm" && hint === "plan"))
+    );
+    return roleMatch ?? profiles.find((profile) => profile.recommended) ?? profiles[0] ?? null;
+  }
+
+  private isLocalTransport(transport: string): boolean {
+    return transport === "cli" || transport === "local_http";
+  }
+
+  private async loadProviderDiscoveryForWorkspace(
+    cacheKey: string,
+    workspacePath: string
+  ): Promise<ProviderDiscoveryRecord[]> {
+    const cached = this.providerDiscoveryCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.records;
+    }
+    const pending = this.providerDiscoveryPending.get(cacheKey);
+    if (pending) {
+      return pending;
+    }
+    const loadPromise = (async () => {
+      try {
+        const records = await discoverMissionProviders({
+          cwd: workspacePath,
+          env: process.env
+        });
+        return Array.isArray(records) ? records : [];
+      } catch {
+        return [];
+      }
+    })();
+    this.providerDiscoveryPending.set(cacheKey, loadPromise);
+    const records = await loadPromise.finally(() => {
+      this.providerDiscoveryPending.delete(cacheKey);
+    });
+    this.providerDiscoveryCache.set(cacheKey, {
+      expiresAt: Date.now() + AgentPlatform.PROVIDER_DISCOVERY_CACHE_TTL_MS,
+      records
+    });
+    return records;
   }
 
   private async loadOrgForWorkspaceId(workspaceId: string): Promise<OrgNode[]> {
@@ -1871,7 +2853,7 @@ export class AgentPlatform {
     if (!runId) return;
     const workspaceId = typeof event.workspaceId === "string" ? event.workspaceId : undefined;
     if (!workspaceId) return;
-    const runDir = path.join(this.options.rootDir, "runs", workspaceId, runId);
+    const runDir = path.join(this.runsDir(), workspaceId, runId);
     const run = await loadMissionRun(runDir).catch(() => null);
     if (run) {
       this.upsertMissionFromRun(run);
@@ -1883,9 +2865,7 @@ export class AgentPlatform {
           task.validation = run.validation ?? null;
           task.verdict = run.verdict ?? null;
           if (run.status !== "running") {
-            task.status = this.mapRunStatusToTaskStatus(run.status);
-            task.finishedAt = run.end ?? task.finishedAt ?? new Date().toISOString();
-            task.resultSummary = this.summarizeMissionOutcome(run);
+            this.applyMissionRunToTask(task, run);
           }
         }
         await this.persistTasks();
@@ -1963,4 +2943,45 @@ export class AgentPlatform {
         .map((node) => node.id)
     });
   }
+}
+
+function buildMissionGoalPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const normalized = Object.fromEntries(
+    Object.entries(payload)
+      .filter(([key]) => !MISSION_GOAL_OMITTED_PAYLOAD_KEYS.has(key))
+      .map(([key, value]) => [key, normalizeMissionGoalValue(value)])
+      .filter(([, value]) => !isEmptyMissionGoalValue(value))
+  );
+  return normalized;
+}
+
+function normalizeMissionGoalValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if (trimmed.length <= MISSION_GOAL_STRING_LIMIT) return trimmed;
+    return `${trimmed.slice(0, MISSION_GOAL_STRING_LIMIT)}... (truncated for mission goal clarity)`;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeMissionGoalValue(entry))
+      .filter((entry) => !isEmptyMissionGoalValue(entry))
+      .slice(0, MISSION_GOAL_ARRAY_LIMIT);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, entry]) => [key, normalizeMissionGoalValue(entry)])
+        .filter(([, entry]) => !isEmptyMissionGoalValue(entry))
+    );
+  }
+  return value;
+}
+
+function isEmptyMissionGoalValue(value: unknown): boolean {
+  if (value == null) return true;
+  if (typeof value === "string") return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length === 0;
+  return false;
 }

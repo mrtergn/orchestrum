@@ -1,31 +1,37 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { FormEvent, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
-  WorkItemImportSkip,
   WorkItemCreateRequest,
-  WorkItemPlanningDetail,
-  WorkItemPbiPreviewResponse,
   WorkItemRecord,
-  WorkOrganizationControl,
-  WorkOrganizationControlActionResponse,
-  WorkOrganizationControlResponse,
-  WorkOrganizationSupervisorResponse,
-  WorkItemSourceType,
-  WorkItemSprintImportResponse,
-  WorkSprintPreview,
-  WorkSprintPreviewResponse,
   WorkItemsResponse,
+  WorkOrganizationControl,
+  WorkOrganizationControlResponse,
+  WorkItemSourceType,
+  WorkItemStartResponse,
+  WorkItemTeamRuntime,
+  WorkItemTeamSelectionLane,
   WorkWorkspaceOptimizationSummary
 } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
 import {
-  buildWorkspaceTeamRuntime,
-  type RuntimeAgentRecord,
-  type RuntimeTaskRecord
-} from "@/lib/workRuntime";
-import { buildWorkspaceApiPath } from "@/lib/workspaces";
+  EmptyState,
+  KeyValueGrid,
+  MetricStrip,
+  NoticePanel,
+  PageHeader,
+  SurfacePanel
+} from "@/components/ui/PagePrimitives";
+import {
+  preferredTransport,
+  providerDiscoveryBadgeLabel,
+  providerDiscoveryExplanation,
+  providerDiscoverySummaryLabel
+} from "@/lib/providers";
+import { useProviderDiscovery } from "@/lib/queries/useProviderDiscovery";
+import { buildWorkspaceApiPath, rememberRecentWorkspacePath } from "@/lib/workspaces";
 
 type WorkspaceSummary = {
   id: string;
@@ -38,61 +44,73 @@ type WorkItemResponse = {
   error?: string;
 };
 
-type WorkItemStartResponse = {
-  ok?: boolean;
-  runId?: string;
-  workItem?: WorkItemRecord;
-  error?: string;
-};
-
 type WorkItemsPayload = WorkItemsResponse & {
   optimizationSummary?: WorkWorkspaceOptimizationSummary | null;
 };
 
-const SOURCE_OPTIONS: Array<{
-  value: WorkItemSourceType;
+type WorkItemTeamSnapshotResponse = {
+  teamRuntime?: WorkItemTeamRuntime | null;
+  teamSelection?: WorkItemTeamSelectionLane[];
+};
+
+type LaunchMode = "feature" | "audit" | "browser";
+
+const LAUNCH_OPTIONS: Array<{
+  id: LaunchMode;
   label: string;
   kicker: string;
   description: string;
-  refLabel: string;
-  refPlaceholder: string;
-  templateId: string;
+  sourceType?: WorkItemSourceType;
+  templateId?: string;
+  titlePlaceholder?: string;
+  refLabel?: string;
+  refPlaceholder?: string;
+  requestLabel?: string;
+  requestPlaceholder?: string;
+  acceptanceLabel?: string;
+  acceptancePlaceholder?: string;
+  constraintsLabel?: string;
+  constraintsPlaceholder?: string;
 }> = [
   {
-    value: "feature",
+    id: "feature",
     label: "Feature",
     kicker: "Product work",
-    description: "Start from a feature request, acceptance criteria, and scope constraints.",
+    description: "Start a scoped implementation request with acceptance criteria and guardrails.",
+    sourceType: "feature",
+    templateId: "feature-dev",
+    titlePlaceholder: "Name the feature work item",
     refLabel: "Context reference",
     refPlaceholder: "Optional doc, ticket, or design reference",
-    templateId: "feature-dev"
+    requestLabel: "Request",
+    requestPlaceholder: "Describe the goal, current context, and what should be delivered.",
+    acceptanceLabel: "Acceptance criteria",
+    acceptancePlaceholder: "One criterion per line\nUI state is visible\nRegression is covered",
+    constraintsLabel: "Constraints",
+    constraintsPlaceholder: "One constraint per line\nNo schema changes\nKeep scope inside ui package"
   },
   {
-    value: "pbi",
-    label: "Sprint / PBI",
-    kicker: "Backlog intake",
-    description: "Point to a sprint file or PBI identifier and launch work against that item.",
-    refLabel: "Sprint file / PBI ref",
-    refPlaceholder: "Example: sprint5.md :: ABC",
-    templateId: "feature-dev"
+    id: "audit",
+    label: "Audit",
+    kicker: "Review work",
+    description: "Run a focused audit and produce findings without turning this into a delivery control room.",
+    sourceType: "audit",
+    templateId: "audit-only",
+    titlePlaceholder: "Name the audit",
+    refLabel: "Scope reference",
+    refPlaceholder: "Optional diff, file, PR, issue, or repo area",
+    requestLabel: "Audit request",
+    requestPlaceholder: "Describe what should be audited and which risks or regressions should be prioritized.",
+    acceptanceLabel: "Audit priorities",
+    acceptancePlaceholder: "One focus per line\nCorrectness\nRegression risk\nMissing validation",
+    constraintsLabel: "Guardrails",
+    constraintsPlaceholder: "One guardrail per line\nDo not edit files\nStay inside ui package"
   },
   {
-    value: "bug",
-    label: "Bug",
-    kicker: "Repair loop",
-    description: "Capture repro context and expected behavior for a focused hotfix run.",
-    refLabel: "Bug / repro ref",
-    refPlaceholder: "Example: Sentry issue, Linear ticket, repro URL",
-    templateId: "bugfix-hotpatch"
-  },
-  {
-    value: "pr_hardening",
-    label: "PR Hardening",
-    kicker: "Release safety",
-    description: "Harden an existing diff before review or release using validation and audit focus.",
-    refLabel: "PR / diff ref",
-    refPlaceholder: "Example: PR #182 or branch compare scope",
-    templateId: "release-hardening"
+    id: "browser",
+    label: "Browser Smoke",
+    kicker: "UI evidence",
+    description: "Start browser evidence from Work when you need smoke or scenario proof instead of a long-lived work item."
   }
 ];
 
@@ -111,37 +129,7 @@ function statusClassName(status: string) {
 
 function statusLabel(status: string) {
   if (status === "ready_for_review") return "Ready for review";
-  return status
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function sourceLabel(sourceType: WorkItemSourceType) {
-  return SOURCE_OPTIONS.find((option) => option.value === sourceType)?.label ?? sourceType;
-}
-
-function candidateDispositionClassName(disposition: string) {
-  switch (disposition) {
-    case "selected":
-      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
-    case "deferred":
-      return "border-amber-400/30 bg-amber-400/10 text-amber-200";
-    default:
-      return "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-200";
-  }
-}
-
-function agentStateClassName(state: string) {
-  switch (state) {
-    case "active":
-      return "border-amber-400/30 bg-amber-400/10 text-amber-200";
-    case "idle":
-      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
-    case "sleeping":
-      return "border-slate-700 bg-slate-900/60 text-slate-300";
-    default:
-      return "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-200";
-  }
+  return status.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function executionModeLabel(workItem: WorkItemRecord) {
@@ -170,25 +158,81 @@ function splitMultilineList(value: string): string[] {
     .filter(Boolean);
 }
 
-function sprintSourcePath(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  const index = trimmed.indexOf("::");
-  return index >= 0 ? trimmed.slice(0, index).trim() : trimmed;
+function workItemKindLabel(workItem: WorkItemRecord) {
+  if (workItem.brief.sourceType === "audit" || workItem.recommendedTemplateId === "audit-only") {
+    return "Audit";
+  }
+  switch (workItem.brief.sourceType) {
+    case "bug":
+      return "Bug";
+    case "pbi":
+      return "Sprint / PBI";
+    case "pr_hardening":
+      return "PR Hardening";
+    default:
+      return "Feature";
+  }
 }
 
-function sprintSelectionHint(selectedCount: number, totalCount: number) {
-  if (selectedCount <= 0) return `0 of ${totalCount} selected`;
-  if (selectedCount === totalCount) return `All ${totalCount} selected`;
-  return `${selectedCount} of ${totalCount} selected`;
+function sortByUpdatedAtDesc(items: WorkItemRecord[]) {
+  return items.slice().sort((left, right) => {
+    const leftTime = Date.parse(left.updatedAt ?? left.createdAt);
+    const rightTime = Date.parse(right.updatedAt ?? right.createdAt);
+    return rightTime - leftTime;
+  });
+}
+
+function WorkItemCard({
+  workItem,
+  workspaceId,
+  action,
+  secondary
+}: {
+  workItem: WorkItemRecord;
+  workspaceId: string;
+  action?: ReactNode;
+  secondary?: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Link
+            href={`/work/${workItem.id}?workspace=${encodeURIComponent(workspaceId)}`}
+            className="text-sm font-medium text-white transition hover:text-amber-100"
+          >
+            {workItem.brief.title}
+          </Link>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            <span>{workItemKindLabel(workItem)}</span>
+            <span>•</span>
+            <span>{executionModeLabel(workItem)}</span>
+            <span>•</span>
+            <span>{new Date(workItem.updatedAt).toLocaleString()}</span>
+          </div>
+          {secondary ? <div className="mt-3 text-xs text-slate-400">{secondary}</div> : null}
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${statusClassName(workItem.status)}`}>
+            {workItem.reviewStatus === "changes_requested" ? "Changes requested" : statusLabel(workItem.status)}
+          </span>
+          {action}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function WorkIntakePage() {
-  const { selectedWorkspaceId, setSelectedWorkspaceId, pushToast } = useAppUi();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { selectedWorkspaceId, setSelectedWorkspaceId, openRunConfig, pushToast } = useAppUi();
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workItems, setWorkItems] = useState<WorkItemRecord[]>([]);
+  const [organizationControl, setOrganizationControl] = useState<WorkOrganizationControl | null>(null);
+  const [optimizationSummary, setOptimizationSummary] = useState<WorkWorkspaceOptimizationSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sourceType, setSourceType] = useState<WorkItemSourceType>("feature");
+  const [launchMode, setLaunchMode] = useState<LaunchMode>("feature");
   const [title, setTitle] = useState("");
   const [request, setRequest] = useState("");
   const [sourceRef, setSourceRef] = useState("");
@@ -196,42 +240,102 @@ export default function WorkIntakePage() {
   const [constraints, setConstraints] = useState("");
   const [busy, setBusy] = useState<"" | "draft" | "launch">("");
   const [launchingId, setLaunchingId] = useState("");
-  const [selectedWorkItemId, setSelectedWorkItemId] = useState("");
-  const [pbiPreview, setPbiPreview] = useState<WorkItemPlanningDetail | null>(null);
-  const [pbiPreviewError, setPbiPreviewError] = useState("");
-  const [pbiPreviewLoading, setPbiPreviewLoading] = useState(false);
-  const [sprintPreview, setSprintPreview] = useState<WorkSprintPreview | null>(null);
-  const [sprintPreviewError, setSprintPreviewError] = useState("");
-  const [sprintPreviewLoading, setSprintPreviewLoading] = useState(false);
-  const [selectedSprintPbiIds, setSelectedSprintPbiIds] = useState<string[]>([]);
-  const [importingSprint, setImportingSprint] = useState(false);
-  const [organizationControl, setOrganizationControl] = useState<WorkOrganizationControl | null>(null);
-  const [agents, setAgents] = useState<RuntimeAgentRecord[]>([]);
-  const [tasks, setTasks] = useState<RuntimeTaskRecord[]>([]);
-  const [runtimeBusy, setRuntimeBusy] = useState<"" | "launch_next_ready" | "fill_wip">("");
-  const [supervisorBusy, setSupervisorBusy] = useState(false);
-  const [targetWip, setTargetWip] = useState(2);
-  const [maxAutoLaunchPerAction, setMaxAutoLaunchPerAction] = useState(2);
-  const [blockLaunchWhenReviewPending, setBlockLaunchWhenReviewPending] = useState(true);
-  const [allowImportDuringAutoLaunch, setAllowImportDuringAutoLaunch] = useState(true);
-  const [backgroundSupervisorEnabled, setBackgroundSupervisorEnabled] = useState(false);
-  const [optimizationSummary, setOptimizationSummary] = useState<WorkWorkspaceOptimizationSummary | null>(null);
+  const [workspacePathInput, setWorkspacePathInput] = useState("");
+  const [workspaceNameInput, setWorkspaceNameInput] = useState("");
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceMessage, setWorkspaceMessage] = useState("");
+  const [pendingBrowserLaunch, setPendingBrowserLaunch] = useState(false);
+  const [teamSnapshot, setTeamSnapshot] = useState<{
+    workItemId: string;
+    teamRuntime: WorkItemTeamRuntime | null;
+    teamSelection: WorkItemTeamSelectionLane[];
+  } | null>(null);
+  const [teamSnapshotLoading, setTeamSnapshotLoading] = useState(false);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? workspaces[0] ?? null,
     [selectedWorkspaceId, workspaces]
   );
-  const selectedSource = useMemo(
-    () => SOURCE_OPTIONS.find((option) => option.value === sourceType) ?? SOURCE_OPTIONS[0]!,
-    [sourceType]
+  const selectedLaunch = useMemo(
+    () => LAUNCH_OPTIONS.find((option) => option.id === launchMode) ?? LAUNCH_OPTIONS[0]!,
+    [launchMode]
   );
-  const selectedWorkItem = useMemo(
-    () => workItems.find((item) => item.id === selectedWorkItemId) ?? workItems[0] ?? null,
-    [selectedWorkItemId, workItems]
-  );
+  const providerDiscovery = useProviderDiscovery({
+    scope: "workspace",
+    workspaceId: activeWorkspace?.id,
+    enabled: Boolean(activeWorkspace?.id)
+  });
+  const queryLaunchMode = useMemo(() => {
+    const value = searchParams.get("launch");
+    return value === "feature" || value === "audit" || value === "browser" ? value : null;
+  }, [searchParams]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const providerLead = useMemo(() => {
+    const orderedProviders = providerDiscovery.providers.map((record) => ({
+      record,
+      transport: preferredTransport(record)
+    }));
+    return orderedProviders.find((entry) => entry.transport?.configured)
+      ?? orderedProviders.find((entry) => entry.transport?.available)
+      ?? orderedProviders[0]
+      ?? null;
+  }, [providerDiscovery.providers]);
+  const providerBadgeLabel = providerDiscovery.isLoading
+    ? "Checking"
+    : providerLead
+      ? providerDiscoveryBadgeLabel(providerLead.transport)
+      : "Not ready";
+  const providerBadgeClassName = providerLead?.transport?.configured
+    ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+    : providerLead?.transport?.available
+      ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+      : "border-rose-400/30 bg-rose-400/10 text-rose-200";
+  const providerHeadline = providerDiscovery.isLoading
+    ? "Checking provider readiness"
+    : providerLead?.record.label ?? "No provider route";
+  const providerSummary = providerDiscovery.error
+    ? providerDiscovery.error
+    : providerLead
+      ? providerDiscoverySummaryLabel(providerLead.transport)
+      : activeWorkspace
+        ? "Open Settings to connect or sign in to a provider before the first launch."
+        : "Choose a workspace to inspect provider readiness.";
+  const providerExplanation = providerDiscovery.error
+    ? "Provider discovery could not finish for this workspace."
+    : providerLead
+      ? providerDiscoveryExplanation(providerLead.transport)
+      : activeWorkspace
+        ? "The first launch will stay brittle until one provider route is ready."
+        : "Provider status appears after you select a workspace.";
+  const launchStepSummary = launchMode === "feature"
+    ? "Create one feature work item and jump straight into its live session."
+    : launchMode === "audit"
+      ? "Create one review work item and keep findings, handoffs, and the decision loop in the same place."
+      : "Start one browser evidence run from Work. It does not create a long-lived work item.";
+  const reviewStepSummary = launchMode === "browser"
+    ? "Use Runs only if the smoke summary is not enough and you need deeper evidence."
+    : "Approve, send back, or relaunch directly from the live session when the team reaches review.";
+
+  useEffect(() => {
+    if (!queryLaunchMode) return;
+    setLaunchMode(queryLaunchMode);
+    if (queryLaunchMode === "browser") {
+      setPendingBrowserLaunch(true);
+    }
+    router.replace("/work", { scroll: false });
+  }, [queryLaunchMode, router]);
+
+  useEffect(() => {
+    if (!pendingBrowserLaunch || !activeWorkspace?.id) return;
+    openRunConfig({
+      workspaceId: activeWorkspace.id,
+      runKind: "qa"
+    });
+    setPendingBrowserLaunch(false);
+  }, [activeWorkspace?.id, openRunConfig, pendingBrowserLaunch]);
+
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     try {
       const workspaceRes = await fetch(buildWorkspaceApiPath("/api/workspaces"), { cache: "no-store" });
       const workspaceData = workspaceRes.ok ? await workspaceRes.json() : { workspaces: [] };
@@ -247,21 +351,17 @@ export default function WorkIntakePage() {
       if (!fallbackWorkspaceId) {
         setWorkItems([]);
         setOrganizationControl(null);
-        setAgents([]);
-        setTasks([]);
         setOptimizationSummary(null);
         return;
       }
 
-      const [workItemsRes, controlRes, agentRes, taskRes] = await Promise.all([
+      const [workItemsRes, controlRes] = await Promise.all([
         fetch(`/api/work-items?workspace=${encodeURIComponent(fallbackWorkspaceId)}`, {
           cache: "no-store"
         }),
         fetch(`/api/work-items/organization-control?workspace=${encodeURIComponent(fallbackWorkspaceId)}`, {
           cache: "no-store"
-        }),
-        fetch(`/api/agents?workspace=${encodeURIComponent(fallbackWorkspaceId)}`, { cache: "no-store" }),
-        fetch(`/api/tasks?workspace=${encodeURIComponent(fallbackWorkspaceId)}`, { cache: "no-store" })
+        })
       ]);
       const workItemsData = workItemsRes.ok
         ? ((await workItemsRes.json()) as WorkItemsPayload)
@@ -269,152 +369,36 @@ export default function WorkIntakePage() {
       const controlData = controlRes.ok
         ? ((await controlRes.json()) as WorkOrganizationControlResponse)
         : { ok: false };
-      const agentData = await agentRes.json().catch(() => ({ agents: [] }));
-      const taskData = await taskRes.json().catch(() => ({ tasks: [] }));
       setWorkItems(Array.isArray(workItemsData.workItems) ? workItemsData.workItems : []);
       setOptimizationSummary(workItemsData.optimizationSummary ?? null);
       setOrganizationControl(controlData.ok && controlData.control ? controlData.control : null);
-      setAgents(Array.isArray(agentData.agents) ? agentData.agents as RuntimeAgentRecord[] : []);
-      setTasks(Array.isArray(taskData.tasks) ? taskData.tasks as RuntimeTaskRecord[] : []);
-      if (controlData.ok && controlData.control) {
-        setTargetWip(controlData.control.governance.targetWip);
-        setMaxAutoLaunchPerAction(controlData.control.governance.maxAutoLaunchPerAction);
-        setBlockLaunchWhenReviewPending(controlData.control.governance.blockLaunchWhenReviewPending);
-        setAllowImportDuringAutoLaunch(controlData.control.governance.allowImportDuringAutoLaunch);
-        setBackgroundSupervisorEnabled(controlData.control.supervisor.enabled);
-      } else {
-        setOrganizationControl(null);
-      }
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [selectedWorkspaceId, setSelectedWorkspaceId]);
 
   useEffect(() => {
-    void load();
+    void load(false);
     const timer = setInterval(() => {
-      void load();
+      void load(true);
     }, 6000);
     return () => clearInterval(timer);
   }, [load]);
 
-  useEffect(() => {
-    if (!workItems.length) {
-      setSelectedWorkItemId("");
-      return;
-    }
-    if (!selectedWorkItemId || !workItems.some((item) => item.id === selectedWorkItemId)) {
-      setSelectedWorkItemId(workItems[0]!.id);
-    }
-  }, [selectedWorkItemId, workItems]);
-
-  useEffect(() => {
-    if (sourceType !== "pbi" || !activeWorkspace?.id || !sourceRef.trim()) {
-      setPbiPreview(null);
-      setPbiPreviewError("");
-      setPbiPreviewLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      setPbiPreviewLoading(true);
-      try {
-        const query = new URLSearchParams({
-          workspace: activeWorkspace.id,
-          sourceRef: sourceRef.trim()
-        });
-        const res = await fetch(`/api/work-items/pbi-preview?${query.toString()}`, {
-          cache: "no-store"
-        });
-        const payload = (await res.json().catch(() => ({}))) as WorkItemPbiPreviewResponse;
-        if (!res.ok || !payload.ok || !payload.preview) {
-          throw new Error(payload.error ?? "PBI preview could not be generated");
-        }
-        if (!cancelled) {
-          setPbiPreview(payload.preview);
-          setPbiPreviewError("");
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setPbiPreview(null);
-          setPbiPreviewError(error instanceof Error ? error.message : String(error));
-        }
-      } finally {
-        if (!cancelled) {
-          setPbiPreviewLoading(false);
-        }
-      }
-    }, 320);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [activeWorkspace?.id, sourceRef, sourceType]);
-
-  useEffect(() => {
-    const sourcePath = sprintSourcePath(sourceRef);
-    if (sourceType !== "pbi" || !activeWorkspace?.id || !sourcePath) {
-      setSprintPreview(null);
-      setSprintPreviewError("");
-      setSprintPreviewLoading(false);
-      setSelectedSprintPbiIds([]);
-      return;
-    }
-
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      setSprintPreviewLoading(true);
-      try {
-        const query = new URLSearchParams({
-          workspace: activeWorkspace.id,
-          sourcePath
-        });
-        const res = await fetch(`/api/work-items/sprint-preview?${query.toString()}`, {
-          cache: "no-store"
-        });
-        const payload = (await res.json().catch(() => ({}))) as WorkSprintPreviewResponse;
-        if (!res.ok || !payload.ok || !payload.preview) {
-          throw new Error(payload.error ?? "Sprint preview could not be generated");
-        }
-        if (!cancelled) {
-          setSprintPreview(payload.preview);
-          setSelectedSprintPbiIds(payload.preview.pbis.map((item) => item.pbiId));
-          setSprintPreviewError("");
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setSprintPreview(null);
-          setSelectedSprintPbiIds([]);
-          setSprintPreviewError(error instanceof Error ? error.message : String(error));
-        }
-      } finally {
-        if (!cancelled) {
-          setSprintPreviewLoading(false);
-        }
-      }
-    }, 320);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [activeWorkspace?.id, sourceRef, sourceType]);
-
   const createWorkItem = useCallback(
     async (mode: "draft" | "launch") => {
-      if (!activeWorkspace?.id) {
+      if (!activeWorkspace?.id || !selectedLaunch.sourceType || !selectedLaunch.templateId) {
         pushToast({
           tone: "warning",
           title: "Workspace required",
-          message: "Add or select a workspace before creating work items."
+          message: "Select a workspace before creating work."
         });
         return;
       }
       const payload: WorkItemCreateRequest = {
         workspaceId: activeWorkspace.id,
-        sourceType,
+        sourceType: selectedLaunch.sourceType,
+        recommendedTemplateId: selectedLaunch.templateId,
         title: title.trim(),
         request: request.trim(),
         sourceRef: sourceRef.trim() || undefined,
@@ -447,7 +431,7 @@ export default function WorkIntakePage() {
           createdWorkItem = launchData.workItem;
           pushToast({
             tone: "success",
-            title: "Work item launched",
+            title: "Work launched",
             message: createdWorkItem.brief.title
           });
         } else {
@@ -463,8 +447,10 @@ export default function WorkIntakePage() {
         setSourceRef("");
         setAcceptanceCriteria("");
         setConstraints("");
-        setSelectedWorkItemId(createdWorkItem.id);
-        await load();
+        if (mode === "launch") {
+          router.push(`/work/${createdWorkItem.id}?workspace=${encodeURIComponent(activeWorkspace.id)}`);
+        }
+        await load(true);
       } catch (error) {
         pushToast({
           tone: "danger",
@@ -482,8 +468,10 @@ export default function WorkIntakePage() {
       load,
       pushToast,
       request,
+      router,
+      selectedLaunch.sourceType,
+      selectedLaunch.templateId,
       sourceRef,
-      sourceType,
       title
     ]
   );
@@ -492,6 +480,76 @@ export default function WorkIntakePage() {
     event.preventDefault();
     await createWorkItem("launch");
   };
+
+  const handlePickWorkspaceDir = useCallback(async () => {
+    if (!window.orchestrumDesktop?.pickDirectory) {
+      setWorkspaceMessage("Directory picker is available in desktop mode. Enter the repo path manually in web mode.");
+      return;
+    }
+    const picked = await window.orchestrumDesktop.pickDirectory();
+    if (picked) {
+      setWorkspacePathInput(picked);
+      setWorkspaceMessage("");
+    }
+  }, []);
+
+  const handleAddWorkspace = useCallback(async () => {
+    setWorkspaceMessage("");
+    if (!workspacePathInput.trim()) {
+      setWorkspaceMessage("Enter the local repo path first.");
+      return;
+    }
+    setWorkspaceBusy(true);
+    try {
+      const res = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: workspacePathInput.trim(),
+          name: workspaceNameInput.trim() || undefined
+        })
+      });
+      const payload = (await res.json().catch(() => ({}))) as { workspace?: WorkspaceSummary; error?: string };
+      if (!res.ok || !payload.workspace) {
+        throw new Error(payload.error ?? "Workspace could not be added.");
+      }
+      rememberRecentWorkspacePath(payload.workspace.path);
+      setSelectedWorkspaceId(payload.workspace.id);
+      setWorkspacePathInput("");
+      setWorkspaceNameInput("");
+      pushToast({
+        tone: "success",
+        title: "Workspace added",
+        message: payload.workspace.name ?? payload.workspace.id
+      });
+      await load(true);
+    } catch (error) {
+      setWorkspaceMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }, [
+    load,
+    pushToast,
+    setSelectedWorkspaceId,
+    workspaceNameInput,
+    workspacePathInput
+  ]);
+
+  const handleOpenBrowserSmoke = useCallback(() => {
+    if (!activeWorkspace?.id) {
+      pushToast({
+        tone: "warning",
+        title: "Workspace required",
+        message: "Choose a workspace before starting browser evidence."
+      });
+      return;
+    }
+    openRunConfig({
+      workspaceId: activeWorkspace.id,
+      runKind: "qa"
+    });
+  }, [activeWorkspace?.id, openRunConfig, pushToast]);
 
   const handleLaunchExisting = async (workItem: WorkItemRecord) => {
     if (!activeWorkspace?.id) return;
@@ -511,7 +569,8 @@ export default function WorkIntakePage() {
         title: "Run started",
         message: workItem.brief.title
       });
-      await load();
+      router.push(`/work/${workItem.id}?workspace=${encodeURIComponent(activeWorkspace.id)}`);
+      await load(true);
     } catch (error) {
       pushToast({
         tone: "danger",
@@ -523,92 +582,6 @@ export default function WorkIntakePage() {
     }
   };
 
-  const loadSprintPbiIntoForm = useCallback((pbiId: string) => {
-    const pbi = sprintPreview?.pbis.find((item) => item.pbiId === pbiId);
-    if (!pbi) return;
-    setSourceType("pbi");
-    setTitle(`${pbi.pbiId} · ${pbi.pbiTitle}`);
-    setRequest(pbi.summary?.trim() || `${pbi.pbiId} backlog item imported from sprint markdown.`);
-    setSourceRef(pbi.sourceRef);
-    setAcceptanceCriteria(pbi.acceptanceCriteria.join("\n"));
-    setConstraints("");
-    pushToast({
-      tone: "success",
-      title: "PBI loaded into intake",
-      message: `${pbi.pbiId} is now loaded into the work item form.`
-    });
-  }, [pushToast, sprintPreview]);
-
-  const toggleSprintPbiSelection = useCallback((pbiId: string) => {
-    setSelectedSprintPbiIds((current) =>
-      current.includes(pbiId)
-        ? current.filter((entry) => entry !== pbiId)
-        : [...current, pbiId]
-    );
-  }, []);
-
-  const handleImportSprintPbis = useCallback(async (pbiIds: string[], launchAfterImport = false) => {
-    if (!activeWorkspace?.id) return;
-    const sourcePath = sprintSourcePath(sourceRef);
-    if (!sourcePath) return;
-    setImportingSprint(true);
-    try {
-      const res = await fetch("/api/work-items/sprint-import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: activeWorkspace.id,
-          sourcePath,
-          pbiIds
-        })
-      });
-      const payload = (await res.json().catch(() => ({}))) as Partial<WorkItemSprintImportResponse> & {
-        error?: string;
-      };
-      if (!res.ok || !payload.ok) {
-        throw new Error(payload.error ?? "Sprint PBIs could not be imported");
-      }
-
-      const created = Array.isArray(payload.created) ? payload.created : [];
-      const skipped = Array.isArray(payload.skipped) ? payload.skipped as WorkItemImportSkip[] : [];
-
-      if (launchAfterImport && created.length === 1) {
-        const launchRes = await fetch(`/api/work-items/${created[0]!.id}/start`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspaceId: activeWorkspace.id })
-        });
-        const launchPayload = (await launchRes.json().catch(() => ({}))) as WorkItemStartResponse;
-        if (!launchRes.ok || !launchPayload.ok || !launchPayload.workItem) {
-          throw new Error(launchPayload.error ?? "PBI was imported but launch failed");
-        }
-      }
-
-      if (created[0]) {
-        setSelectedWorkItemId(created[0].id);
-      }
-      await load();
-      pushToast({
-        tone: created.length > 0 ? "success" : "warning",
-        title: launchAfterImport ? "PBI imported and launched" : "Sprint backlog imported",
-        message:
-          created.length > 0
-            ? `${created.length} work item${created.length !== 1 ? "s" : ""} created${skipped.length > 0 ? `, ${skipped.length} skipped` : ""}.`
-            : skipped.length > 0
-              ? skipped[0]!.reason
-              : "No new work items were created."
-      });
-    } catch (error) {
-      pushToast({
-        tone: "danger",
-        title: "Sprint import failed",
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setImportingSprint(false);
-    }
-  }, [activeWorkspace?.id, load, pushToast, sourceRef]);
-
   const runningCount = useMemo(
     () => workItems.filter((item) => item.status === "running").length,
     [workItems]
@@ -617,185 +590,363 @@ export default function WorkIntakePage() {
     () => workItems.filter((item) => item.status === "ready_for_review").length,
     [workItems]
   );
-  const failedCount = useMemo(
-    () => workItems.filter((item) => item.status === "failed").length,
+  const blockedCount = useMemo(
+    () => workItems.filter((item) => item.status === "blocked" || item.status === "failed").length,
     [workItems]
   );
-  const workLanes = useMemo(() => {
-    const lanes = [
-      { id: "draft", label: "Backlog", statuses: new Set(["draft"]) },
-      { id: "running", label: "In Flight", statuses: new Set(["running"]) },
-      { id: "review", label: "Review", statuses: new Set(["ready_for_review"]) },
-      { id: "blocked", label: "Blocked", statuses: new Set(["blocked", "failed"]) },
-      { id: "done", label: "Done", statuses: new Set(["completed"]) }
-    ] as const;
-    return lanes.map((lane) => ({
-      ...lane,
-      items: workItems.filter((item) => lane.statuses.has(item.status))
-    }));
-  }, [workItems]);
-  const teamRuntime = useMemo(() => {
-    if (!organizationControl) return null;
-    return buildWorkspaceTeamRuntime({
-      control: organizationControl,
-      workItems,
-      agents,
-      tasks
+  const sortedWorkItems = useMemo(() => sortByUpdatedAtDesc(workItems), [workItems]);
+  const currentWorkItems = useMemo(
+    () => sortedWorkItems.filter((item) => item.status === "running" || item.status === "ready_for_review" || item.reviewStatus === "changes_requested"),
+    [sortedWorkItems]
+  );
+  const attentionItems = useMemo(
+    () => sortedWorkItems.filter((item) => item.status === "blocked" || item.status === "failed" || item.status === "ready_for_review" || item.reviewStatus === "changes_requested"),
+    [sortedWorkItems]
+  );
+  const draftItems = useMemo(
+    () => sortedWorkItems.filter((item) => item.status === "draft"),
+    [sortedWorkItems]
+  );
+  const completedItems = useMemo(
+    () => sortedWorkItems.filter((item) => item.status === "completed").slice(0, 6),
+    [sortedWorkItems]
+  );
+  const primaryTeamWorkItem = useMemo(
+    () => currentWorkItems[0] ?? attentionItems[0] ?? null,
+    [attentionItems, currentWorkItems]
+  );
+  const selectedSnapshotTeam = useMemo(
+    () => (teamSnapshot?.teamSelection ?? []).filter((entry) => entry.decision === "selected" || entry.decision === "standby"),
+    [teamSnapshot?.teamSelection]
+  );
+  const liveSessionHeadline = primaryTeamWorkItem
+    ? primaryTeamWorkItem.reviewStatus === "changes_requested"
+      ? "Remediation is waiting"
+      : primaryTeamWorkItem.status === "ready_for_review"
+        ? "Human review is waiting"
+        : primaryTeamWorkItem.status === "blocked" || primaryTeamWorkItem.status === "failed"
+          ? "A live session needs intervention"
+          : "A live session is in progress"
+    : null;
+
+  useEffect(() => {
+    const workspaceId = activeWorkspace?.id ?? primaryTeamWorkItem?.workspaceId;
+    if (!primaryTeamWorkItem?.id || !workspaceId) {
+      setTeamSnapshot(null);
+      setTeamSnapshotLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setTeamSnapshotLoading(true);
+    const loadTeamSnapshot = async () => {
+      const res = await fetch(
+        `/api/work-items/${primaryTeamWorkItem.id}/team-runtime?workspace=${encodeURIComponent(workspaceId)}`,
+        { cache: "no-store" }
+      );
+      const payload = (await res.json().catch(() => ({}))) as WorkItemTeamSnapshotResponse;
+      if (cancelled) return;
+      setTeamSnapshot({
+        workItemId: primaryTeamWorkItem.id,
+        teamRuntime: payload.teamRuntime ?? null,
+        teamSelection: Array.isArray(payload.teamSelection) ? payload.teamSelection : []
+      });
+      setTeamSnapshotLoading(false);
+    };
+    void loadTeamSnapshot().catch(() => {
+      if (cancelled) return;
+      setTeamSnapshot(null);
+      setTeamSnapshotLoading(false);
     });
-  }, [agents, organizationControl, tasks, workItems]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace?.id, primaryTeamWorkItem?.id, primaryTeamWorkItem?.workspaceId]);
 
-  const runOrganizationAction = useCallback(async (action: "launch_next_ready" | "fill_wip") => {
-    if (!activeWorkspace?.id) return;
-    setRuntimeBusy(action);
-    try {
-      const res = await fetch("/api/work-items/organization-control/action", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: activeWorkspace.id,
-          action,
-          targetWip,
-          maxAutoLaunchPerAction,
-          blockLaunchWhenReviewPending,
-          allowImportDuringAutoLaunch
-        })
-      });
-      const payload = (await res.json().catch(() => ({}))) as WorkOrganizationControlActionResponse;
-      if (!res.ok || !payload.ok) {
-        throw new Error(payload.error ?? "Workspace runtime action failed");
-      }
-      if (payload.control) {
-        setOrganizationControl(payload.control);
-        setBackgroundSupervisorEnabled(payload.control.supervisor.enabled);
-      }
-      await load();
-      pushToast({
-        tone: payload.launched.length > 0 ? "success" : "warning",
-        title: action === "launch_next_ready" ? "Next work item processed" : "Workspace WIP updated",
-        message:
-          payload.launched.length > 0
-            ? `${payload.launched.length} work item${payload.launched.length !== 1 ? "s" : ""} launched${payload.skipped.length > 0 ? `, ${payload.skipped.length} skipped` : ""}.`
-            : payload.skipped[0]?.reason ?? "No launchable work item was available."
-      });
-    } catch (error) {
-      pushToast({
-        tone: "danger",
-        title: "Workspace runtime failed",
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setRuntimeBusy("");
-    }
-  }, [
-    activeWorkspace?.id,
-    allowImportDuringAutoLaunch,
-    blockLaunchWhenReviewPending,
-    load,
-    maxAutoLaunchPerAction,
-    pushToast,
-    targetWip
-  ]);
-
-  const saveBackgroundSupervisor = useCallback(async (enabled: boolean) => {
-    if (!activeWorkspace?.id) return;
-    setSupervisorBusy(true);
-    try {
-      const res = await fetch("/api/work-items/organization-control/supervisor", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: activeWorkspace.id,
-          enabled,
-          targetWip,
-          maxAutoLaunchPerAction,
-          blockLaunchWhenReviewPending,
-          allowImportDuringAutoLaunch
-        })
-      });
-      const payload = (await res.json().catch(() => ({}))) as WorkOrganizationSupervisorResponse;
-      if (!res.ok || !payload.ok || !payload.control || !payload.supervisor) {
-        throw new Error(payload.error ?? "Workspace supervisor policy could not be saved");
-      }
-      setOrganizationControl(payload.control);
-      setBackgroundSupervisorEnabled(payload.supervisor.enabled);
-      setTargetWip(payload.control.governance.targetWip);
-      setMaxAutoLaunchPerAction(payload.control.governance.maxAutoLaunchPerAction);
-      setBlockLaunchWhenReviewPending(payload.control.governance.blockLaunchWhenReviewPending);
-      setAllowImportDuringAutoLaunch(payload.control.governance.allowImportDuringAutoLaunch);
-      pushToast({
-        tone: payload.supervisor.enabled ? "success" : "warning",
-        title: payload.supervisor.enabled ? "Workspace supervisor enabled" : "Workspace supervisor paused",
-        message: payload.supervisor.enabled
-          ? "The organization runtime will keep the workspace queue moving in the background."
-          : "Automatic workspace orchestration has been paused."
-      });
-    } catch (error) {
-      pushToast({
-        tone: "danger",
-        title: "Supervisor update failed",
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      setSupervisorBusy(false);
-    }
-  }, [
-    activeWorkspace?.id,
-    allowImportDuringAutoLaunch,
-    blockLaunchWhenReviewPending,
-    maxAutoLaunchPerAction,
-    pushToast,
-    targetWip
-  ]);
+  if (loading && workspaces.length === 0) {
+    return (
+      <main className="space-y-6">
+        <EmptyState
+          icon="◎"
+          title="Loading work"
+          description="Fetching workspaces and current repo work."
+        />
+      </main>
+    );
+  }
 
   if (!loading && workspaces.length === 0) {
     return (
-      <main className="space-y-6">
-        <section className="rounded-3xl border border-dashed border-slate-700 bg-slate-950/50 px-8 py-12 text-center">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-400/20 to-cyan-400/20 text-xl text-amber-200">
-            ◉
-          </div>
-          <h1 className="mt-5 text-2xl font-semibold text-white">Work Intake needs a workspace</h1>
-          <p className="mt-2 text-sm text-slate-400">
-            Work items are stored inside each workspace under <code>.orchestrum/control/work-items.json</code>. Add a repo first.
-          </p>
-          <Link
-            href="/workspaces?intent=add"
-            className="mt-6 inline-flex items-center rounded-xl border border-amber-400/40 bg-amber-400/10 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-amber-200 transition-colors hover:bg-amber-400/20"
+      <main className="space-y-6 overflow-x-hidden">
+        <PageHeader
+          eyebrow="Work"
+          title="Add one workspace, then start feature work or audits here"
+          description="Work stays self-contained. Register the local repo once, then this page becomes the only normal place to start and continue repo work."
+        />
+        <section className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
+          <SurfacePanel
+            title="Add workspace"
+            description="Point Orchestrum at the local repo you want to operate on. Work items will then live under that repo in `.orchestrum/control/work-items.json`."
           >
-            Add workspace
-          </Link>
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_auto_auto]">
+              <input
+                value={workspacePathInput}
+                onChange={(event) => setWorkspacePathInput(event.target.value)}
+                placeholder="/Users/you/project"
+                className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-600"
+              />
+              <input
+                value={workspaceNameInput}
+                onChange={(event) => setWorkspaceNameInput(event.target.value)}
+                placeholder="Display name (optional)"
+                className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-600"
+              />
+              <button
+                type="button"
+                onClick={() => void handlePickWorkspaceDir()}
+                className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+              >
+                Browse
+              </button>
+              <button
+                type="button"
+                disabled={workspaceBusy}
+                onClick={() => void handleAddWorkspace()}
+                className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2.5 text-xs font-medium uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {workspaceBusy ? "Adding..." : "Add"}
+              </button>
+            </div>
+            {workspaceMessage ? <div className="mt-3 text-sm text-rose-300">{workspaceMessage}</div> : null}
+          </SurfacePanel>
+
+          <SurfacePanel
+            title="What happens next"
+            description="Once the repo is registered, keep using Work for the main flow and Workspaces only when you need to register another repo."
+          >
+            <KeyValueGrid
+              columns={1}
+              items={[
+                { label: "1", value: "If no provider looks usable yet, connect one in Settings before launching work." },
+                { label: "2", value: "Start a Feature, Audit, or Browser Smoke flow directly from Work." },
+                { label: "3", value: "Review outcomes in Work or Runs, then open Inspect or Diagnostics only when needed." }
+              ]}
+            />
+            <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+              <Link
+                href="/workspaces"
+                className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+              >
+                Open Workspaces
+              </Link>
+              <Link
+                href="/settings"
+                className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+              >
+                Open Settings
+              </Link>
+              <Link
+                href="/help"
+                className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-2 text-xs font-medium text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-200"
+              >
+                Help & Docs
+              </Link>
+            </div>
+          </SurfacePanel>
         </section>
       </main>
     );
   }
 
   return (
-    <main className="space-y-6">
-      <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="rounded-3xl border border-slate-800 bg-slate-950/60 p-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.24em] text-amber-300">Phase 8</div>
-              <h1 className="mt-2 text-2xl font-semibold text-white">Work Intake</h1>
-              <p className="mt-2 max-w-2xl text-sm text-slate-400">
-                Route feature work, PBIs, bugs, and PR hardening requests into a canonical work item, or let the workspace PM runtime supervise the whole queue.
-              </p>
-            </div>
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-3 text-right">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Active workspace</div>
-              <div className="mt-1 text-sm font-medium text-white">{activeWorkspace?.name ?? activeWorkspace?.id ?? "None"}</div>
-              <div className="mt-1 text-xs text-slate-500">{activeWorkspace?.path ?? "Select a workspace"}</div>
+    <main className="space-y-6 overflow-x-hidden">
+      <PageHeader
+        eyebrow="Work"
+        title="Choose a workspace, confirm provider readiness, then launch one item"
+        description="The normal path is Workspace, Provider, Start Work, Live Session, Review. Runs and Diagnostics stay secondary until the live session summary stops being enough."
+        actions={
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-3 text-right">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Active workspace</div>
+            <div className="mt-1 text-sm font-medium text-white">{activeWorkspace?.name ?? activeWorkspace?.id ?? "None"}</div>
+            <div className="mt-1 max-w-[22rem] truncate text-xs text-slate-500">{activeWorkspace?.path ?? "Select a workspace"}</div>
+            <div className="mt-4 border-t border-slate-800 pt-4 text-left">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Provider route</div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className={`rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${providerBadgeClassName}`}>
+                  {providerBadgeLabel}
+                </span>
+                <span className="text-sm font-medium text-white">{providerHeadline}</span>
+              </div>
+              <div className="mt-2 max-w-[22rem] text-xs leading-5 text-slate-500">{providerSummary}</div>
             </div>
           </div>
+        }
+      />
 
-          <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            {SOURCE_OPTIONS.map((option) => {
-              const active = option.value === sourceType;
+      <MetricStrip
+        items={[
+          {
+            label: "Tracked work",
+            value: workItems.length,
+            sub: activeWorkspace ? `${activeWorkspace.name ?? activeWorkspace.id} workspace` : "No workspace selected"
+          },
+          {
+            label: "Running",
+            value: runningCount,
+            sub: runningCount > 0 ? "In flight now" : "No active execution",
+            accentClassName: runningCount > 0 ? "text-amber-200" : undefined
+          },
+          {
+            label: "Review",
+            value: reviewCount,
+            sub: reviewCount > 0 ? "Waiting on a human decision" : "Nothing waiting",
+            accentClassName: reviewCount > 0 ? "text-emerald-200" : undefined
+          },
+          {
+            label: "Blocked",
+            value: blockedCount,
+            sub: blockedCount > 0 ? "Needs intervention" : "No blocked work",
+            accentClassName: blockedCount > 0 ? "text-rose-200" : undefined
+          }
+        ]}
+      />
+
+      {primaryTeamWorkItem ? (
+        <SurfacePanel
+          title="Resume live session"
+          description="The most important current work item stays pinned here so you can jump straight back into the live team runtime."
+        >
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(280px,0.9fr)]">
+            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-5 py-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-cyan-200">{liveSessionHeadline}</div>
+                  <Link
+                    href={`/work/${primaryTeamWorkItem.id}?workspace=${encodeURIComponent(activeWorkspace?.id ?? primaryTeamWorkItem.workspaceId)}`}
+                    className="mt-2 block text-lg font-semibold text-white transition hover:text-cyan-100"
+                  >
+                    {primaryTeamWorkItem.brief.title}
+                  </Link>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-300">
+                    <span>{workItemKindLabel(primaryTeamWorkItem)}</span>
+                    <span>•</span>
+                    <span>{executionModeLabel(primaryTeamWorkItem)}</span>
+                    <span>•</span>
+                    <span>{new Date(primaryTeamWorkItem.updatedAt).toLocaleString()}</span>
+                  </div>
+                  <div className="mt-4 text-sm leading-6 text-cyan-50/90">
+                    {teamSnapshot?.teamRuntime?.currentStage
+                      ?? (primaryTeamWorkItem.reviewStatus === "changes_requested"
+                        ? "Review sent this work back. Resume the live session and follow the current remediation lane."
+                        : primaryTeamWorkItem.status === "ready_for_review"
+                          ? "The team finished the current cycle. Open the live session to review the final story, evidence, and gates."
+                          : "Open the live session to follow the current baton, story, focused run, and lane flow.")}
+                  </div>
+                </div>
+                <Link
+                  href={`/work/${primaryTeamWorkItem.id}?workspace=${encodeURIComponent(activeWorkspace?.id ?? primaryTeamWorkItem.workspaceId)}`}
+                  className="shrink-0 rounded-xl border border-cyan-300/30 bg-slate-950/40 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-cyan-100 transition-colors hover:bg-slate-950/60"
+                >
+                  Open live session
+                </Link>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {teamSnapshot?.teamRuntime ? (
+                <KeyValueGrid
+                  columns={2}
+                  items={[
+                    { label: "Active agents", value: teamSnapshot.teamRuntime.activeAgents },
+                    { label: "Blocked lanes", value: teamSnapshot.teamRuntime.blockedLanes },
+                    { label: "Completed lanes", value: teamSnapshot.teamRuntime.completedLanes },
+                    { label: "Missing coverage", value: teamSnapshot.teamRuntime.missingCoverage }
+                  ]}
+                />
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                  Team runtime is still loading for this session.
+                </div>
+              )}
+
+              {selectedSnapshotTeam.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {selectedSnapshotTeam.slice(0, 6).map((selection) => (
+                    <span
+                      key={selection.laneId}
+                      className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-slate-300"
+                    >
+                      {selection.laneLabel}
+                      {selection.chosenAgentName ? ` · ${selection.chosenAgentName}` : ""}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </SurfacePanel>
+      ) : null}
+
+      <section className="grid gap-4 xl:grid-cols-2">
+        <SurfacePanel
+          title="Current work"
+          description="The few work items that are actively running or already waiting for human review."
+        >
+          <div className="space-y-3">
+            {currentWorkItems.length > 0 ? currentWorkItems.slice(0, 4).map((item) => (
+              <WorkItemCard
+                key={item.id}
+                workItem={item}
+                workspaceId={activeWorkspace?.id ?? item.workspaceId}
+                secondary={item.reviewStatus === "changes_requested" ? "Remediation requested." : null}
+              />
+            )) : (
+              <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                No active work item is visible right now.
+              </div>
+            )}
+          </div>
+        </SurfacePanel>
+
+        <SurfacePanel
+          title="Needs attention"
+          description="Blocked, failed, or review-ready work that should usually be handled before you open more new work."
+        >
+          <div className="space-y-3">
+            {attentionItems.length > 0 ? attentionItems.slice(0, 4).map((item) => (
+              <WorkItemCard
+                key={item.id}
+                workItem={item}
+                workspaceId={activeWorkspace?.id ?? item.workspaceId}
+                secondary={
+                  item.reviewStatus === "changes_requested"
+                    ? "Changes were requested in review."
+                    : item.status === "ready_for_review"
+                      ? "A human decision is needed."
+                      : "Operator intervention is needed."
+                }
+              />
+            )) : (
+              <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                Nothing urgent is waiting right now.
+              </div>
+            )}
+          </div>
+        </SurfacePanel>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+        <SurfacePanel
+          title="Start one item"
+          description="Feature is the normal default. Audit stays in the same flow. Browser Smoke starts direct evidence from here instead of sending you into a separate product path."
+        >
+          <div className="grid gap-3 md:grid-cols-3">
+            {LAUNCH_OPTIONS.map((option) => {
+              const active = option.id === launchMode;
               return (
                 <button
-                  key={option.value}
+                  key={option.id}
                   type="button"
-                  onClick={() => setSourceType(option.value)}
+                  onClick={() => setLaunchMode(option.id)}
                   className={`rounded-2xl border p-4 text-left transition-colors ${
                     active
                       ? "border-amber-400/40 bg-amber-400/10"
@@ -812,892 +963,312 @@ export default function WorkIntakePage() {
             })}
           </div>
 
-          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-            <div className="grid gap-4 md:grid-cols-2">
+          {launchMode === "browser" ? (
+            <div className="mt-5 space-y-4">
+              <NoticePanel tone="info" title="Browser Smoke is direct evidence, not a parallel product mode">
+                Start the browser run here when you need smoke or scenario evidence. Use Runs only if the resulting summary is not enough and you need to inspect deeper artifacts.
+              </NoticePanel>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleOpenBrowserSmoke}
+                  className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-amber-200 transition-colors hover:bg-amber-400/20"
+                >
+                  Start Browser Smoke
+                </button>
+                <Link
+                  href="/runs"
+                  className="rounded-xl border border-slate-700 bg-slate-900/60 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+                >
+                  Open Runs
+                </Link>
+                <span className="text-xs text-slate-500">
+                  Use Browser Smoke when you need fast UI evidence, not a long-lived work item.
+                </span>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="space-y-2">
+                  <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">Title</span>
+                  <input
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    placeholder={selectedLaunch.titlePlaceholder}
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
+                    required
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">{selectedLaunch.refLabel}</span>
+                  <input
+                    value={sourceRef}
+                    onChange={(event) => setSourceRef(event.target.value)}
+                    placeholder={selectedLaunch.refPlaceholder}
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
+                  />
+                </label>
+              </div>
+
               <label className="space-y-2">
-                <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">Title</span>
-                <input
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  placeholder={`Name the ${selectedSource.label.toLowerCase()} work item`}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
+                <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">{selectedLaunch.requestLabel}</span>
+                <textarea
+                  value={request}
+                  onChange={(event) => setRequest(event.target.value)}
+                  placeholder={selectedLaunch.requestPlaceholder}
+                  className="h-36 w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm leading-6 text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
                   required
                 />
               </label>
-              <label className="space-y-2">
-                <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">{selectedSource.refLabel}</span>
-                <input
-                  value={sourceRef}
-                  onChange={(event) => setSourceRef(event.target.value)}
-                  placeholder={selectedSource.refPlaceholder}
-                  className="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
-                />
-              </label>
-            </div>
 
-            <label className="space-y-2">
-              <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">Request</span>
-              <textarea
-                value={request}
-                onChange={(event) => setRequest(event.target.value)}
-                placeholder="Describe the goal, current context, and what the team should accomplish."
-                className="h-36 w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm leading-6 text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
-                required
-              />
-            </label>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="space-y-2">
-                <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">Acceptance criteria</span>
-                <textarea
-                  value={acceptanceCriteria}
-                  onChange={(event) => setAcceptanceCriteria(event.target.value)}
-                  placeholder={"One criterion per line\nUI state is visible\nRegression is covered"}
-                  className="h-32 w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm leading-6 text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
-                />
-              </label>
-              <label className="space-y-2">
-                <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">Constraints</span>
-                <textarea
-                  value={constraints}
-                  onChange={(event) => setConstraints(event.target.value)}
-                  placeholder={"One constraint per line\nNo schema changes\nKeep scope inside ui package"}
-                  className="h-32 w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm leading-6 text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
-                />
-              </label>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="submit"
-                disabled={busy !== ""}
-                className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {busy === "launch" ? "Launching..." : "Create + Launch"}
-              </button>
-              <button
-                type="button"
-                disabled={busy !== ""}
-                onClick={() => void createWorkItem("draft")}
-                className="rounded-xl border border-slate-700 bg-slate-900/60 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {busy === "draft" ? "Saving..." : "Save Draft"}
-              </button>
-              <span className="text-xs text-slate-500">
-                Phase 8 launches <span className="text-slate-300">{selectedSource.label}</span> into either a mission run or a specialist task graph, while the workspace PM runtime can keep the broader queue moving.
-              </span>
-            </div>
-          </form>
-        </div>
-
-        <div className="space-y-4">
-          <section className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Queue snapshot</div>
-            <div className="mt-4 grid grid-cols-3 gap-3">
-              {[
-                { label: "Running", value: runningCount, tone: "text-amber-300 border-amber-400/20 bg-amber-400/10" },
-                { label: "Review", value: reviewCount, tone: "text-emerald-300 border-emerald-400/20 bg-emerald-400/10" },
-                { label: "Failed", value: failedCount, tone: "text-rose-300 border-rose-400/20 bg-rose-400/10" }
-              ].map((stat) => (
-                <div key={stat.label} className={`rounded-2xl border px-4 py-3 ${stat.tone}`}>
-                  <div className="text-lg font-semibold text-white">{stat.value}</div>
-                  <div className="mt-1 text-[10px] uppercase tracking-[0.2em]">{stat.label}</div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Current route</div>
-              <div className="mt-2 text-sm font-medium text-white">{selectedSource.label}</div>
-              <div className="mt-1 text-xs text-slate-400">{selectedSource.description}</div>
-              <div className="mt-4 flex items-center justify-between rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                <span className="text-xs text-slate-400">Mission template</span>
-                <code className="text-xs text-amber-200">{selectedSource.templateId}</code>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="space-y-2">
+                  <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">{selectedLaunch.acceptanceLabel}</span>
+                  <textarea
+                    value={acceptanceCriteria}
+                    onChange={(event) => setAcceptanceCriteria(event.target.value)}
+                    placeholder={selectedLaunch.acceptancePlaceholder}
+                    className="h-32 w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm leading-6 text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">{selectedLaunch.constraintsLabel}</span>
+                  <textarea
+                    value={constraints}
+                    onChange={(event) => setConstraints(event.target.value)}
+                    placeholder={selectedLaunch.constraintsPlaceholder}
+                    className="h-32 w-full rounded-2xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-sm leading-6 text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-amber-400/40"
+                  />
+                </label>
               </div>
-            </div>
-            {optimizationSummary && (
-              <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Review optimization summary</div>
-                <div className="mt-3 grid grid-cols-3 gap-2">
-                  {[
-                    { label: "Prompt suggestions", value: optimizationSummary.pendingPromptSuggestions },
-                    { label: "Strategies", value: optimizationSummary.pendingStrategies },
-                    { label: "Opportunities", value: optimizationSummary.pendingOpportunities }
-                  ].map((item) => (
-                    <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                      <div className="text-lg font-semibold text-white">{item.value}</div>
-                      <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{item.label}</div>
-                    </div>
-                  ))}
-                </div>
-                {optimizationSummary.recentCycles.length > 0 && (
-                  <div className="mt-4 space-y-2">
-                    {optimizationSummary.recentCycles.slice(0, 3).map((cycle) => (
-                      <Link
-                        key={`${cycle.workItemId}:${cycle.cycleId}`}
-                        href={`/work/${cycle.workItemId}?workspace=${encodeURIComponent(activeWorkspace?.id ?? "")}`}
-                        className="block rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 transition-colors hover:border-slate-700"
-                      >
-                        <div className="text-sm font-medium text-white">{cycle.title}</div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          Cycle {cycle.sequence} · {cycle.sourceStatus.replace(/_/g, " ")} · {new Date(cycle.createdAt).toLocaleString()}
-                        </div>
-                      </Link>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {sourceType === "pbi" && (
-              <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sprint / PBI preview</div>
-                {pbiPreviewLoading && (
-                  <div className="mt-3 text-sm text-slate-400">Parsing sprint markdown...</div>
-                )}
-                {!pbiPreviewLoading && pbiPreviewError && (
-                  <div className="mt-3 rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-3 text-sm text-rose-100">
-                    {pbiPreviewError}
-                  </div>
-                )}
-                {!pbiPreviewLoading && !pbiPreviewError && !pbiPreview && (
-                  <div className="mt-3 text-sm text-slate-500">
-                    Use a source ref like <code>sprint5.md :: ABC</code> to preview the parsed PBI.
-                  </div>
-                )}
-                {pbiPreview && !pbiPreviewLoading && (
-                  <div className="mt-3 space-y-3">
-                    <div>
-                      <div className="text-sm font-medium text-white">
-                        {pbiPreview.sourceSnapshot.pbiId}
-                        {pbiPreview.sourceSnapshot.pbiTitle ? ` · ${pbiPreview.sourceSnapshot.pbiTitle}` : ""}
-                      </div>
-                      <div className="mt-1 text-xs text-slate-500">
-                        {pbiPreview.sourceSnapshot.sprintName ?? "Sprint name not found"} · {pbiPreview.sourceSnapshot.sourcePath}
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-lg font-semibold text-white">{pbiPreview.tasks.length}</div>
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Tasks</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-lg font-semibold text-white">{pbiPreview.acceptanceCriteria.length}</div>
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Criteria</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-lg font-semibold text-white">{pbiPreview.sourceSnapshot.warnings.length}</div>
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Warnings</div>
-                      </div>
-                    </div>
-                    {pbiPreview.sourceSnapshot.warnings.length > 0 && (
-                      <div className="rounded-xl border border-fuchsia-400/20 bg-fuchsia-400/10 px-3 py-3 text-xs text-fuchsia-100">
-                        {pbiPreview.sourceSnapshot.warnings[0]}
-                      </div>
-                    )}
-                  </div>
-                )}
 
-                <div className="mt-5 border-t border-slate-800 pt-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Sprint backlog</div>
-                      <div className="mt-2 text-sm text-slate-300">
-                        {sprintPreview?.sprintName ?? "Preview all PBIs from the selected sprint file."}
-                      </div>
-                    </div>
-                    {sprintPreview && (
-                      <div className="text-xs text-slate-500">
-                        {sprintSelectionHint(selectedSprintPbiIds.length, sprintPreview.pbis.length)}
-                      </div>
-                    )}
-                  </div>
-
-                  {sprintPreviewLoading && (
-                    <div className="mt-3 text-sm text-slate-400">Scanning sprint backlog...</div>
-                  )}
-                  {!sprintPreviewLoading && sprintPreviewError && (
-                    <div className="mt-3 rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-3 text-sm text-rose-100">
-                      {sprintPreviewError}
-                    </div>
-                  )}
-                  {!sprintPreviewLoading && !sprintPreviewError && !sprintPreview && (
-                    <div className="mt-3 text-sm text-slate-500">
-                      Enter a sprint markdown path like <code>sprint5.md</code> to preview the full backlog.
-                    </div>
-                  )}
-
-                  {sprintPreview && !sprintPreviewLoading && (
-                    <div className="mt-4 space-y-3">
-                      <div className="grid grid-cols-3 gap-2">
-                        <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                          <div className="text-lg font-semibold text-white">{sprintPreview.pbis.length}</div>
-                          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">PBIs</div>
-                        </div>
-                        <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                          <div className="text-lg font-semibold text-white">{selectedSprintPbiIds.length}</div>
-                          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Selected</div>
-                        </div>
-                        <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                          <div className="text-lg font-semibold text-white">{sprintPreview.warnings.length}</div>
-                          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Warnings</div>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={importingSprint || selectedSprintPbiIds.length === 0}
-                          onClick={() => void handleImportSprintPbis(selectedSprintPbiIds)}
-                          className="rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-cyan-200 transition-colors hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {importingSprint ? "Importing..." : "Import selected"}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={selectedSprintPbiIds.length === 0}
-                          onClick={() => setSelectedSprintPbiIds(sprintPreview.pbis.map((item) => item.pbiId))}
-                          className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Select all
-                        </button>
-                        <button
-                          type="button"
-                          disabled={selectedSprintPbiIds.length === 0}
-                          onClick={() => setSelectedSprintPbiIds([])}
-                          className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Clear
-                        </button>
-                        <Link
-                          href={`/work/sprint?workspace=${encodeURIComponent(activeWorkspace?.id ?? "")}&sourcePath=${encodeURIComponent(sprintPreview.sourcePath)}`}
-                          className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                        >
-                          Open control room
-                        </Link>
-                      </div>
-
-                      <div className="max-h-[26rem] space-y-2 overflow-auto pr-1">
-                        {sprintPreview.pbis.map((pbi) => {
-                          const selected = selectedSprintPbiIds.includes(pbi.pbiId);
-                          return (
-                            <div
-                              key={pbi.pbiId}
-                              className={`rounded-xl border p-3 transition-colors ${
-                                selected
-                                  ? "border-cyan-400/30 bg-cyan-400/10"
-                                  : "border-slate-800 bg-slate-950/70"
-                              }`}
-                            >
-                              <div className="flex items-start gap-3">
-                                <input
-                                  type="checkbox"
-                                  checked={selected}
-                                  onChange={() => toggleSprintPbiSelection(pbi.pbiId)}
-                                  className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-300 focus:ring-cyan-400/40"
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <div className="text-sm font-medium text-white">{pbi.pbiId}</div>
-                                    <div className="text-sm text-slate-300">{pbi.pbiTitle}</div>
-                                  </div>
-                                  {pbi.summary && (
-                                    <div className="mt-2 line-clamp-2 text-sm text-slate-400">{pbi.summary}</div>
-                                  )}
-                                  <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                                    <span>{pbi.taskCount} tasks</span>
-                                    <span>{pbi.acceptanceCriteria.length} criteria</span>
-                                    {pbi.warnings.length > 0 && <span>{pbi.warnings.length} warnings</span>}
-                                  </div>
-                                  {pbi.warnings.length > 0 && (
-                                    <div className="mt-2 rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/10 px-3 py-2 text-xs text-fuchsia-100">
-                                      {pbi.warnings[0]}
-                                    </div>
-                                  )}
-                                </div>
-                                <div className="flex shrink-0 flex-col gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => loadSprintPbiIntoForm(pbi.pbiId)}
-                                    className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                                  >
-                                    Load into form
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={importingSprint}
-                                    onClick={() => void handleImportSprintPbis([pbi.pbiId], false)}
-                                    className="rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-cyan-200 transition-colors hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                                  >
-                                    Import draft
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={importingSprint}
-                                    onClick={() => void handleImportSprintPbis([pbi.pbiId], true)}
-                                    className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                                  >
-                                    Import + launch
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </section>
-
-          <section className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Organization Runtime</div>
-            {!organizationControl || !teamRuntime ? (
-              <div className="mt-4 rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
-                Workspace control room will appear once Orchestrum can resolve the queue for the selected workspace.
-              </div>
-            ) : (
-              <>
-                <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                  <div className="text-sm font-medium text-white">{teamRuntime.headline}</div>
-                  <div className="mt-2 text-sm leading-6 text-slate-400">{teamRuntime.pmFocus}</div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                    <span>Supervisor {organizationControl.supervisor.enabled ? organizationControl.supervisor.state : "paused"}</span>
-                    <span>{organizationControl.supervisor.tickIntervalSeconds}s cadence</span>
-                    {organizationControl.supervisor.lastActionAt && (
-                      <span>last action {new Date(organizationControl.supervisor.lastActionAt).toLocaleTimeString()}</span>
-                    )}
-                  </div>
-                  <div className="mt-4 grid gap-3 grid-cols-2 xl:grid-cols-4">
-                    {[
-                      { label: "Running", value: teamRuntime.activeWorkItems },
-                      { label: "Review", value: teamRuntime.reviewQueue },
-                      { label: "Blocked", value: teamRuntime.blockedItems },
-                      { label: "Active agents", value: teamRuntime.activeAgents }
-                    ].map((item) => (
-                      <div key={item.label} className="rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3">
-                        <div className="text-lg font-semibold text-white">{item.value}</div>
-                        <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">{item.label}</div>
-                      </div>
-                    ))}
-                  </div>
-                  {teamRuntime.bottleneckLabel && (
-                    <div className="mt-4 rounded-2xl border border-fuchsia-400/20 bg-fuchsia-400/10 px-4 py-3 text-sm text-fuchsia-100">
-                      Bottleneck lane: {teamRuntime.bottleneckLabel}
-                    </div>
-                  )}
-                  {organizationControl.supervisor.lastError && (
-                    <div className="mt-4 rounded-2xl border border-fuchsia-400/20 bg-fuchsia-400/10 px-4 py-3 text-sm text-fuchsia-100">
-                      Supervisor error: {organizationControl.supervisor.lastError}
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-4 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">PM Runtime</div>
-                    <div className="mt-4 grid gap-4">
-                      <div className="grid gap-4 sm:grid-cols-2">
-                        <label className="space-y-2">
-                          <span className="text-xs uppercase tracking-[0.16em] text-slate-500">Target WIP</span>
-                          <input
-                            type="number"
-                            min={1}
-                            value={targetWip}
-                            onChange={(event) => setTargetWip(Math.max(1, Number(event.target.value || 1)))}
-                            className="w-28 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-400/40"
-                          />
-                        </label>
-                        <label className="space-y-2">
-                          <span className="text-xs uppercase tracking-[0.16em] text-slate-500">Max auto launches</span>
-                          <input
-                            type="number"
-                            min={1}
-                            value={maxAutoLaunchPerAction}
-                            onChange={(event) => setMaxAutoLaunchPerAction(Math.max(1, Number(event.target.value || 1)))}
-                            className="w-28 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition-colors focus:border-cyan-400/40"
-                          />
-                        </label>
-                      </div>
-                      <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={blockLaunchWhenReviewPending}
-                          onChange={(event) => setBlockLaunchWhenReviewPending(event.target.checked)}
-                          className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-300 focus:ring-cyan-400/40"
-                        />
-                        <div>
-                          <div className="text-sm text-white">Hold launches while review is pending</div>
-                          <div className="mt-1 text-xs text-slate-500">Keeps PM focus on human gate before opening new work.</div>
-                        </div>
-                      </label>
-                      <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={allowImportDuringAutoLaunch}
-                          onChange={(event) => setAllowImportDuringAutoLaunch(event.target.checked)}
-                          className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-300 focus:ring-cyan-400/40"
-                        />
-                        <div>
-                          <div className="text-sm text-white">Allow import during automatic launch</div>
-                          <div className="mt-1 text-xs text-slate-500">Lets the runtime pull draft backlog items forward without a manual open.</div>
-                        </div>
-                      </label>
-                      <label className="flex items-start gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={backgroundSupervisorEnabled}
-                          onChange={(event) => void saveBackgroundSupervisor(event.target.checked)}
-                          disabled={supervisorBusy}
-                          className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-900 text-cyan-300 focus:ring-cyan-400/40"
-                        />
-                        <div>
-                          <div className="text-sm text-white">Background supervisor</div>
-                          <div className="mt-1 text-xs text-slate-500">Runs the workspace PM loop inside the service process even when the UI is closed.</div>
-                        </div>
-                      </label>
-                    </div>
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={runtimeBusy !== ""}
-                        onClick={() => void runOrganizationAction("launch_next_ready")}
-                        className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {runtimeBusy === "launch_next_ready" ? "Launching..." : "Launch next ready"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={runtimeBusy !== ""}
-                        onClick={() => void runOrganizationAction("fill_wip")}
-                        className="rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-cyan-200 transition-colors hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {runtimeBusy === "fill_wip" ? "Filling..." : "Fill WIP"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={supervisorBusy}
-                        onClick={() => void saveBackgroundSupervisor(backgroundSupervisorEnabled)}
-                        className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {supervisorBusy ? "Saving..." : "Save background policy"}
-                      </button>
-                    </div>
-                    <div className="mt-4 text-xs text-slate-500">
-                      Active WIP is {organizationControl.summary.activeWip}. Launchable backlog is {organizationControl.summary.launchable}.
-                    </div>
-                    <div className="mt-2 text-xs text-slate-500">
-                      Background state: {organizationControl.supervisor.state}
-                      {organizationControl.supervisor.lastTickAt ? ` · last tick ${new Date(organizationControl.supervisor.lastTickAt).toLocaleString()}` : ""}
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Launch Queue</div>
-                    <div className="mt-3 space-y-3">
-                      {organizationControl.launchQueue.length > 0 ? (
-                        organizationControl.launchQueue.slice(0, 5).map((candidate) => (
-                          <div key={candidate.workItemId} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <div>
-                                <div className="text-sm font-medium text-white">{candidate.title}</div>
-                                <div className="mt-1 text-xs text-slate-500">
-                                  {sourceLabel(candidate.sourceType)} · score {candidate.score}
-                                </div>
-                              </div>
-                              <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${candidateDispositionClassName(candidate.disposition)}`}>
-                                {candidate.disposition}
-                              </span>
-                            </div>
-                            <div className="mt-3 space-y-1 text-xs text-slate-400">
-                              {candidate.reasons.slice(0, 2).map((reason) => (
-                                <div key={reason}>{reason}</div>
-                              ))}
-                            </div>
-                            <div className="mt-3 flex flex-wrap items-center gap-2">
-                              <Link
-                                href={`/work/${candidate.workItemId}?workspace=${encodeURIComponent(activeWorkspace?.id ?? "")}`}
-                                className="rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                              >
-                                Open board
-                              </Link>
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-sm text-slate-500">
-                          No launchable work item is currently visible.
-                        </div>
-                      )}
-                    </div>
-                    {organizationControl.blockers.length > 0 && (
-                      <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Blockers</div>
-                        <div className="mt-3 space-y-2 text-xs text-slate-400">
-                          {organizationControl.blockers.slice(0, 4).map((blocker) => (
-                            <div key={blocker}>{blocker}</div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-4 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Stage Load</div>
-                    <div className="mt-3 space-y-3">
-                      {teamRuntime.stages.length > 0 ? (
-                        teamRuntime.stages.slice(0, 5).map((stage) => (
-                          <div key={stage.laneId} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm font-medium text-white">{stage.laneLabel}</div>
-                              <div className="text-xs text-slate-500">{stage.total} tasks</div>
-                            </div>
-                            <div className="mt-3 grid grid-cols-4 gap-2 text-center text-xs">
-                              {[
-                                { label: "Run", value: stage.running, tone: "text-amber-200" },
-                                { label: "Queue", value: stage.queued, tone: "text-cyan-200" },
-                                { label: "Block", value: stage.blocked, tone: "text-fuchsia-200" },
-                                { label: "Done", value: stage.succeeded, tone: "text-emerald-200" }
-                              ].map((item) => (
-                                <div key={item.label} className="rounded-lg border border-slate-800 bg-slate-900/60 px-2 py-2">
-                                  <div className={`text-sm font-medium ${item.tone}`}>{item.value}</div>
-                                  <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-slate-500">{item.label}</div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-sm text-slate-500">
-                          No specialist task graph is active across this workspace yet.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Active Roster</div>
-                    <div className="mt-3 space-y-3">
-                      {teamRuntime.agents.length > 0 ? (
-                        teamRuntime.agents.slice(0, 6).map((agent) => (
-                          <div key={agent.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                            <div className="flex items-start justify-between gap-2">
-                              <div>
-                                <div className="text-sm font-medium text-white">{agent.name}</div>
-                                <div className="mt-1 text-xs text-slate-500">
-                                  {agent.specialization} · {agent.seniority} · {agent.role}
-                                </div>
-                              </div>
-                              <span className={`rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.16em] ${agentStateClassName(agent.state)}`}>
-                                {agent.activeLoad}/{agent.maxParallelWork}
-                              </span>
-                            </div>
-                            {agent.activePbis.length > 0 && (
-                              <div className="mt-3 text-xs text-slate-400">
-                                Work items: {agent.activePbis.join(" | ")}
-                              </div>
-                            )}
-                            {agent.activeTasks.length > 0 && (
-                              <div className="mt-2 text-xs text-slate-500">
-                                Tasks: {agent.activeTasks.join(" | ")}
-                              </div>
-                            )}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-sm text-slate-500">
-                          No active roster load is visible yet.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </section>
-
-          <section className="rounded-3xl border border-slate-800 bg-slate-950/60 p-5">
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Selected item</div>
-            {!selectedWorkItem ? (
-              <div className="mt-4 rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
-                No work item selected yet.
-              </div>
-            ) : (
-              <div className="mt-4 space-y-4">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2.5 py-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
-                      {sourceLabel(selectedWorkItem.brief.sourceType)}
-                    </span>
-                    <span className={`rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClassName(selectedWorkItem.status)}`}>
-                      {statusLabel(selectedWorkItem.status)}
-                    </span>
-                  </div>
-                  <h2 className="mt-3 text-lg font-semibold text-white">{selectedWorkItem.brief.title}</h2>
-                  <p className="mt-2 text-sm leading-6 text-slate-400">{selectedWorkItem.brief.request}</p>
-                </div>
-
-                {selectedWorkItem.brief.sourceRef && (
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 px-4 py-3">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Source reference</div>
-                    <div className="mt-2 text-sm text-slate-200">{selectedWorkItem.brief.sourceRef}</div>
-                  </div>
-                )}
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Acceptance criteria</div>
-                    <div className="mt-3 space-y-2 text-sm text-slate-300">
-                      {selectedWorkItem.brief.acceptanceCriteria.length > 0 ? (
-                        selectedWorkItem.brief.acceptanceCriteria.map((item) => (
-                          <div key={item} className="flex gap-2">
-                            <span className="text-amber-300">•</span>
-                            <span>{item}</span>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-slate-500">No explicit criteria yet.</div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Constraints</div>
-                    <div className="mt-3 space-y-2 text-sm text-slate-300">
-                      {selectedWorkItem.brief.constraints.length > 0 ? (
-                        selectedWorkItem.brief.constraints.map((item) => (
-                          <div key={item} className="flex gap-2">
-                            <span className="text-cyan-300">•</span>
-                            <span>{item}</span>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-slate-500">No explicit constraints yet.</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Linked execution</div>
-                      <div className="mt-2 text-sm text-slate-200">
-                        {executionModeLabel(selectedWorkItem)}
-                      </div>
-                      <div className="mt-1 text-xs text-slate-500">
-                        {selectedWorkItem.executionMode === "task_graph" || (selectedWorkItem.linkedTaskIds?.length ?? 0) > 0
-                          ? `Task status: ${selectedWorkItem.linkedTaskStatus ?? "queued"} · ${selectedWorkItem.linkedTaskIds?.length ?? 0} task(s)`
-                          : `Run status: ${selectedWorkItem.linkedRunStatus ?? "not started"}`}
-                      </div>
-                      {selectedWorkItem.reviewNote && (
-                        <div className="mt-1 text-xs text-fuchsia-200">
-                          Last operator note: {selectedWorkItem.reviewNote}
-                        </div>
-                      )}
-                      <div className="mt-1 text-xs text-slate-500">
-                        Template <code>{selectedWorkItem.recommendedTemplateId}</code>
-                      </div>
-                      {(selectedWorkItem.cycles?.length ?? 0) > 0 && (
-                        <div className="mt-1 text-xs text-slate-500">
-                          {selectedWorkItem.cycles?.length} cycle{selectedWorkItem.cycles?.length !== 1 ? "s" : ""} recorded
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Link
-                        href={`/work/${selectedWorkItem.id}?workspace=${encodeURIComponent(selectedWorkItem.workspaceId)}`}
-                        className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                      >
-                        Open board
-                      </Link>
-                      {!hasActiveExecution(selectedWorkItem) && selectedWorkItem.reviewStatus !== "approved" && (
-                        <button
-                          type="button"
-                          onClick={() => void handleLaunchExisting(selectedWorkItem)}
-                          disabled={launchingId === selectedWorkItem.id}
-                          className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {launchingId === selectedWorkItem.id ? "Launching..." : launchActionLabel(selectedWorkItem)}
-                        </button>
-                      )}
-                      {selectedWorkItem.linkedRunId && (
-                        <Link
-                          href={`/runs/${selectedWorkItem.linkedRunId}?workspace=${encodeURIComponent(selectedWorkItem.workspaceId)}`}
-                          className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                        >
-                          Open run
-                        </Link>
-                      )}
-                      {(selectedWorkItem.linkedTaskIds?.length ?? 0) > 0 && (
-                        <Link
-                          href={`/tasks?workItem=${encodeURIComponent(selectedWorkItem.id)}`}
-                          className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                        >
-                          Open tasks
-                        </Link>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </section>
-        </div>
-      </section>
-
-      <section className="rounded-3xl border border-slate-800 bg-slate-950/60 p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Workspace queue</div>
-            <h2 className="mt-2 text-xl font-semibold text-white">
-              {activeWorkspace?.name ?? "Selected workspace"} work items
-            </h2>
-          </div>
-          <div className="text-sm text-slate-500">
-            {workItems.length} item{workItems.length !== 1 ? "s" : ""} tracked in <code>.orchestrum/control/work-items.json</code>
-          </div>
-        </div>
-
-        <div className="mt-5 grid gap-4 xl:grid-cols-5">
-          {workLanes.map((lane) => (
-            <div key={lane.id} className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium text-white">{lane.label}</div>
-                <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">
-                  {lane.items.length}
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={busy !== ""}
+                  className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {busy === "launch" ? "Launching..." : "Create + Launch"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy !== ""}
+                  onClick={() => void createWorkItem("draft")}
+                  className="rounded-xl border border-slate-700 bg-slate-900/60 px-5 py-2.5 text-xs font-medium uppercase tracking-[0.2em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {busy === "draft" ? "Saving..." : "Save draft"}
+                </button>
+                <span className="text-xs text-slate-500">
+                  {selectedLaunch.label} stays inside the normal Work flow. You do not need a separate launch surface for this route.
                 </span>
               </div>
-              <div className="mt-4 space-y-2">
-                {lane.items.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-700 px-3 py-4 text-xs text-slate-500">
-                    No items in this lane.
-                  </div>
-                ) : (
-                  lane.items.slice(0, 4).map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setSelectedWorkItemId(item.id)}
-                      className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 text-left transition-colors hover:border-slate-700 hover:bg-slate-950"
-                    >
-                      <div className="text-sm font-medium text-white">{item.brief.title}</div>
-                      <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">{item.brief.request}</div>
-                      <div className="mt-2 text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                        {sourceLabel(item.brief.sourceType)} · {item.cycles?.length ?? 0} cycles
-                      </div>
-                    </button>
-                  ))
-                )}
-                {lane.items.length > 4 && (
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                    +{lane.items.length - 4} more
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-5 space-y-3">
-          {!loading && workItems.length === 0 && (
-            <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-8 text-center text-sm text-slate-500">
-              No work items yet. Create one above to seed the queue.
-            </div>
+            </form>
           )}
-          {workItems.map((workItem) => {
-            const active = selectedWorkItem?.id === workItem.id;
-            const canLaunch = !hasActiveExecution(workItem) && workItem.reviewStatus !== "approved";
-            return (
-              <div
-                key={workItem.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => setSelectedWorkItemId(workItem.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setSelectedWorkItemId(workItem.id);
-                  }
-                }}
-                className={`w-full rounded-2xl border p-4 text-left transition-colors cursor-pointer ${
-                  active
-                    ? "border-amber-400/30 bg-amber-400/10"
-                    : "border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:bg-slate-900/70"
-                }`}
+        </SurfacePanel>
+
+        <div className="space-y-4 min-w-0">
+          <SurfacePanel
+            title="Launch path"
+            description="Keep the first-screen sequence honest: workspace, provider, start, live session, review."
+            actions={
+              <Link
+                href={activeWorkspace ? "/settings" : "/workspaces"}
+                className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
               >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                        {sourceLabel(workItem.brief.sourceType)}
-                      </span>
-                      <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] ${statusClassName(workItem.status)}`}>
-                        {statusLabel(workItem.status)}
-                      </span>
+                {activeWorkspace ? "Provider setup" : "Add workspace"}
+              </Link>
+            }
+          >
+            <KeyValueGrid
+              columns={1}
+              items={[
+                {
+                  label: "1 Workspace",
+                  value: activeWorkspace
+                    ? `${activeWorkspace.name ?? activeWorkspace.id} · ${activeWorkspace.path}`
+                    : "Choose one local repo before you launch anything."
+                },
+                {
+                  label: "2 Provider",
+                  value: (
+                    <div className="space-y-1">
+                      <div className="font-medium text-white">{providerHeadline}</div>
+                      <div>{providerSummary}</div>
+                      <div className="text-xs text-slate-500">{providerExplanation}</div>
                     </div>
-                    <div className="mt-3 text-sm font-medium text-white">{workItem.brief.title}</div>
-                    <div className="mt-1 line-clamp-2 text-sm text-slate-400">{workItem.brief.request}</div>
-                    <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-500">
-                      <span>Template <code>{workItem.recommendedTemplateId}</code></span>
-                      <span>{executionModeLabel(workItem)}</span>
-                      <span>Updated {new Date(workItem.updatedAt).toLocaleString()}</span>
-                      {workItem.linkedRunId && <span>Run {workItem.linkedRunId}</span>}
-                      {(workItem.linkedTaskIds?.length ?? 0) > 0 && <span>{workItem.linkedTaskIds?.length} tasks</span>}
-                      {workItem.reviewStatus === "changes_requested" && <span>Needs remediation</span>}
-                      {(workItem.cycles?.length ?? 0) > 0 && <span>{workItem.cycles?.length} cycles</span>}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  )
+                },
+                {
+                  label: launchMode === "browser" ? "3 Start browser evidence" : `3 Start ${selectedLaunch.label}`,
+                  value: launchStepSummary
+                },
+                {
+                  label: "4 Live Session",
+                  value: primaryTeamWorkItem ? (
                     <Link
-                      href={`/work/${workItem.id}?workspace=${encodeURIComponent(workItem.workspaceId)}`}
-                      onClick={(event) => event.stopPropagation()}
-                      className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+                      href={`/work/${primaryTeamWorkItem.id}?workspace=${encodeURIComponent(activeWorkspace?.id ?? primaryTeamWorkItem.workspaceId)}`}
+                      className="text-cyan-300 transition hover:text-cyan-200"
                     >
-                      Board
+                      Resume {primaryTeamWorkItem.brief.title}
                     </Link>
-                    {canLaunch ? (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void handleLaunchExisting(workItem);
-                        }}
-                        disabled={launchingId === workItem.id}
-                        className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {launchingId === workItem.id ? "Launching..." : launchActionLabel(workItem)}
-                      </button>
-                    ) : (
-                      <>
-                        {workItem.linkedRunId && (
-                          <Link
-                            href={`/runs/${workItem.linkedRunId}?workspace=${encodeURIComponent(workItem.workspaceId)}`}
-                            onClick={(event) => event.stopPropagation()}
-                            className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                          >
-                            Open run
-                          </Link>
-                        )}
-                        {(workItem.linkedTaskIds?.length ?? 0) > 0 && (
-                          <Link
-                            href={`/tasks?workItem=${encodeURIComponent(workItem.id)}`}
-                            onClick={(event) => event.stopPropagation()}
-                            className="rounded-xl border border-slate-700 bg-slate-950/70 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                          >
-                            Open tasks
-                          </Link>
-                        )}
-                      </>
-                    )}
-                  </div>
+                  ) : (
+                    "The live session becomes the main screen as soon as you launch a feature or audit item."
+                  )
+                },
+                {
+                  label: "5 Review",
+                  value: reviewStepSummary
+                }
+              ]}
+            />
+          </SurfacePanel>
+
+          <SurfacePanel
+            title="Drafts waiting to start"
+            description="Saved drafts live here until you explicitly launch them."
+          >
+            <div className="space-y-3">
+              {draftItems.length > 0 ? draftItems.slice(0, 6).map((item) => (
+                <WorkItemCard
+                  key={item.id}
+                  workItem={item}
+                  workspaceId={activeWorkspace?.id ?? item.workspaceId}
+                  action={
+                    <button
+                      type="button"
+                      disabled={launchingId === item.id}
+                      onClick={() => void handleLaunchExisting(item)}
+                      className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.16em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {launchingId === item.id ? "Launching..." : launchActionLabel(item)}
+                    </button>
+                  }
+                />
+              )) : (
+                <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                  No drafts are waiting to be launched.
                 </div>
+              )}
+            </div>
+          </SurfacePanel>
+
+          {completedItems.length > 0 ? (
+            <SurfacePanel
+              title="Recent completions"
+              description="A light completion history, not a wall of archived state."
+            >
+              <div className="space-y-3">
+                {completedItems.slice(0, 4).map((item) => (
+                  <WorkItemCard
+                    key={item.id}
+                    workItem={item}
+                    workspaceId={activeWorkspace?.id ?? item.workspaceId}
+                  />
+                ))}
               </div>
-            );
-          })}
+            </SurfacePanel>
+          ) : null}
+
+          {attentionItems.length > 0 ? (
+            <NoticePanel tone="warning" title="Attention beats new launch">
+              There are {attentionItems.length} blocked, remediation, or review-ready items in this workspace. If one of them matters more than the new request, resume that live session first.
+            </NoticePanel>
+          ) : null}
         </div>
       </section>
+
+      <details className="group rounded-3xl border border-slate-800 bg-slate-950/40 p-5">
+        <summary className="cursor-pointer list-none">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Inspect only when needed</div>
+              <div className="mt-2 text-lg font-medium text-white">Workspace runtime signals and advanced tools</div>
+              <div className="mt-2 text-sm leading-6 text-slate-400">
+                The core Work flow stays above. Open this only when you need workspace-wide runtime counts, optimization hints, or repair surfaces.
+              </div>
+            </div>
+            <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300 transition group-open:border-cyan-400/30 group-open:text-cyan-100">
+              Expand
+            </span>
+          </div>
+        </summary>
+
+        <div className="mt-5 grid gap-6 xl:grid-cols-[1fr_1fr]">
+          <SurfacePanel
+            title="Workspace runtime summary"
+            description="Read-only runtime signals for this workspace."
+          >
+            {organizationControl ? (
+              <KeyValueGrid
+                columns={2}
+                items={[
+                  { label: "Tracked items", value: organizationControl.summary.total },
+                  { label: "Launchable", value: organizationControl.summary.launchable },
+                  { label: "Active WIP", value: organizationControl.summary.activeWip },
+                  { label: "Running", value: organizationControl.summary.running },
+                  { label: "Review", value: organizationControl.summary.review },
+                  { label: "Blocked", value: organizationControl.summary.blocked },
+                  { label: "Background state", value: organizationControl.supervisor.state },
+                  { label: "Tick cadence", value: `${organizationControl.supervisor.tickIntervalSeconds}s` }
+                ]}
+              />
+            ) : (
+              <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                Runtime summary becomes visible once the selected workspace has readable work-item state.
+              </div>
+            )}
+          </SurfacePanel>
+
+          <SurfacePanel
+            title="Review optimization"
+            description="Only summary-level optimization counts stay here. Deep optimization detail belongs in each work item."
+          >
+            {optimizationSummary ? (
+              <KeyValueGrid
+                columns={2}
+                items={[
+                  { label: "Prompt suggestions", value: optimizationSummary.pendingPromptSuggestions },
+                  { label: "Strategies", value: optimizationSummary.pendingStrategies },
+                  { label: "Opportunities", value: optimizationSummary.pendingOpportunities },
+                  { label: "Recent cycles", value: optimizationSummary.recentCycles.length }
+                ]}
+              />
+            ) : (
+              <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
+                No review-derived optimization summary is visible for this workspace yet.
+              </div>
+            )}
+          </SurfacePanel>
+
+          <SurfacePanel
+            title="Advanced tools"
+            description="Open these only when Work and Live Session no longer explain what is happening."
+            className="xl:col-span-2"
+          >
+            <div className="grid gap-3 md:grid-cols-3">
+              <Link
+                href="/diagnostics"
+                className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 text-sm text-slate-200 transition hover:border-slate-700 hover:bg-slate-900/55"
+              >
+                Runtime health, machine checks, raw logs, and recovery tools
+              </Link>
+              <Link
+                href="/runs"
+                className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 text-sm text-slate-200 transition hover:border-slate-700 hover:bg-slate-900/55"
+              >
+                Execution history and troubleshooting when a run needs deeper inspection
+              </Link>
+              <Link
+                href="/settings"
+                className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 text-sm text-slate-200 transition hover:border-slate-700 hover:bg-slate-900/55"
+              >
+                Provider setup, team presets, and optional advanced runtime tuning
+              </Link>
+            </div>
+          </SurfacePanel>
+        </div>
+      </details>
     </main>
   );
 }

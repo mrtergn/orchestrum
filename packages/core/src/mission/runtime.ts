@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, readJsonIfExists, readTextIfExists, safeRunId, writeJson, writeText, appendLine } from "../runner/fs.js";
-import { applyPatch, gitDiff, PatchApplyError } from "../runner/git.js";
+import { applyPatch, gitChangedFiles, gitDiff, gitDiffStat, PatchApplyError } from "../runner/git.js";
 import { loadConfig } from "../runner/config.js";
 import { estimateCostUsd, normalizeUsage, resolvePricing } from "../runner/cost.js";
 import { appendLearnings, buildRunLearnings } from "../runner/learnings.js";
@@ -10,7 +10,8 @@ import { buildStepState, loadPlugins, runPluginHook, type OrchestrumPlugin } fro
 import { createApprovalToken, isWorkspaceApproved, writeApprovalRequest } from "../runner/approvals.js";
 import { loadRepoExecutionProfile, runValidationSuite } from "../runner/repoExecution.js";
 import { appendWorkspaceSignal } from "../runner/signals.js";
-import type { RunState, StepState } from "../runner/types.js";
+import { appendWorkItemTrace } from "../runner/traces.js";
+import type { RunRecoveryState, RunState, StepState } from "../runner/types.js";
 import { applyDerivedSessionState } from "../delivery/sessionState.js";
 import { createRemediationTasks, extractFindingsFromImport, resolvePacketCompletionStatus } from "../delivery/triage.js";
 import { buildRemediationPacket } from "../delivery/workPackets.js";
@@ -46,7 +47,17 @@ type StartMissionOptions = {
   runOptions?: {
     concurrency?: number;
     modelOverrides?: Record<string, string>;
+    effortOverrides?: Record<string, string>;
     strategyMode?: string;
+  };
+  traceContext?: {
+    workItemId?: string;
+    cycleId?: string | null;
+    workstreamId?: string | null;
+    taskId?: string | null;
+    ownerAgentId?: string | null;
+    ownerAgentName?: string | null;
+    ownerRole?: string | null;
   };
   onEvent?: EventHandler;
 };
@@ -57,6 +68,7 @@ type MissionRuntimeSignals = {
   tier: LicenseTier;
   workspaceId: string;
   finalized: boolean;
+  traceContext?: StartMissionOptions["traceContext"];
 };
 
 type ResumeMissionOptions = {
@@ -65,6 +77,72 @@ type ResumeMissionOptions = {
   runId: string;
   agents: MissionAgent[];
   onEvent?: EventHandler;
+};
+
+const MAX_GOAL_INPUT_CHARS = 12_000;
+const MAX_REPO_CONTEXT_INPUT_CHARS = 12_000;
+const MAX_ARTIFACT_INPUT_CHARS = 48_000;
+const MAX_LITERAL_INPUT_CHARS = 8_000;
+const MAX_GIT_DIFF_PROMPT_CHARS = 80_000;
+const MAX_GIT_DIFF_STAT_CHARS = 4_000;
+const MAX_CHANGED_FILES_IN_PROMPT = 40;
+const MAX_GIT_DIFF_HEAD_CHARS = 48_000;
+const MAX_GIT_DIFF_TAIL_CHARS = 16_000;
+const MAX_AUDIT_REPO_CONTEXT_INPUT_CHARS = 2_500;
+const MAX_AUDIT_GIT_DIFF_PROMPT_CHARS = 12_000;
+const MAX_AUDIT_GIT_DIFF_STAT_CHARS = 1_200;
+const MAX_AUDIT_CHANGED_FILES_IN_PROMPT = 24;
+const MAX_AUDIT_GIT_DIFF_HEAD_CHARS = 3_500;
+const MAX_AUDIT_GIT_DIFF_TAIL_CHARS = 1_500;
+const MAX_COMPACT_REPO_CONTEXT_ENTRIES = 20;
+const MAX_COMPACT_REPO_CONTEXT_FILES = 8;
+const MAX_COMPACT_REPO_PACKAGE_JSON_CHARS = 900;
+const MAX_COMPACT_REPO_README_CHARS = 700;
+const MODULE_RESOLUTION_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css", ".scss", ".svg"];
+
+type GitDiffPromptBudget = {
+  maxChars: number;
+  maxStatChars: number;
+  maxChangedFiles: number;
+  headChars: number;
+  tailChars: number;
+};
+
+type PromptInputBudget = {
+  goalChars: number;
+  repoContextChars: number;
+  repoContextMode: "default" | "compact";
+  gitDiff: GitDiffPromptBudget;
+};
+
+const DEFAULT_GIT_DIFF_PROMPT_BUDGET: GitDiffPromptBudget = {
+  maxChars: MAX_GIT_DIFF_PROMPT_CHARS,
+  maxStatChars: MAX_GIT_DIFF_STAT_CHARS,
+  maxChangedFiles: MAX_CHANGED_FILES_IN_PROMPT,
+  headChars: MAX_GIT_DIFF_HEAD_CHARS,
+  tailChars: MAX_GIT_DIFF_TAIL_CHARS
+};
+
+const AUDIT_GIT_DIFF_PROMPT_BUDGET: GitDiffPromptBudget = {
+  maxChars: MAX_AUDIT_GIT_DIFF_PROMPT_CHARS,
+  maxStatChars: MAX_AUDIT_GIT_DIFF_STAT_CHARS,
+  maxChangedFiles: MAX_AUDIT_CHANGED_FILES_IN_PROMPT,
+  headChars: MAX_AUDIT_GIT_DIFF_HEAD_CHARS,
+  tailChars: MAX_AUDIT_GIT_DIFF_TAIL_CHARS
+};
+
+const DEFAULT_PROMPT_INPUT_BUDGET: PromptInputBudget = {
+  goalChars: MAX_GOAL_INPUT_CHARS,
+  repoContextChars: MAX_REPO_CONTEXT_INPUT_CHARS,
+  repoContextMode: "default",
+  gitDiff: DEFAULT_GIT_DIFF_PROMPT_BUDGET
+};
+
+const AUDIT_PROMPT_INPUT_BUDGET: PromptInputBudget = {
+  goalChars: MAX_GOAL_INPUT_CHARS,
+  repoContextChars: MAX_AUDIT_REPO_CONTEXT_INPUT_CHARS,
+  repoContextMode: "compact",
+  gitDiff: AUDIT_GIT_DIFF_PROMPT_BUDGET
 };
 
 type ImportMissionNodeInputOptions = {
@@ -91,10 +169,13 @@ export async function runMissionDetailed(options: StartMissionOptions): Promise<
     telemetryConfig: config?.telemetry ?? null,
     tier: license.tier,
     workspaceId,
-    finalized: false
+    finalized: false,
+    traceContext: options.traceContext
   };
   const profile = await loadRepoExecutionProfile(options.repoPath, config).catch(() => null);
-  const graph = createMissionGraph(template, options.agents, options.goal, options.runOptions?.modelOverrides);
+  const roleModelOverrides = resolveMissionRoleModelOverrides(config, options.runOptions?.modelOverrides);
+  const roleEffortOverrides = resolveMissionRoleEffortOverrides(config, options.runOptions?.effortOverrides);
+  const graph = createMissionGraph(template, options.agents, options.goal, roleModelOverrides, roleEffortOverrides);
   const run: MissionRun = {
     schemaVersion: 2,
     runId,
@@ -186,13 +267,25 @@ export async function resumeMissionRun(options: ResumeMissionOptions): Promise<M
     workspaceId: run.workspaceId ?? options.workspaceId ?? "default",
     finalized: false
   };
-  if (run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "blocked") {
+  if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
     return { ok: run.status === "completed", runId: run.runId, runDir, run };
+  }
+  if (run.status === "blocked") {
+    const recovered = await attemptBlockedMissionRecovery({
+      runDir,
+      repoPath: run.repoPath,
+      run
+    });
+    if (!recovered) {
+      await persistMissionRun(runDir, run);
+      return { ok: false, runId: run.runId, runDir, run };
+    }
   }
   run.status = "running";
   run.end = null;
   run.pauseReason = null;
   run.verdict = "running";
+  run.recovery = null;
   await persistMissionRun(runDir, run);
   await emitMissionEvent(runDir, {
     t: "mission.resumed",
@@ -207,6 +300,90 @@ export async function resumeMissionRun(options: ResumeMissionOptions): Promise<M
     signals,
     onEvent: options.onEvent
   });
+}
+
+async function attemptBlockedMissionRecovery(options: {
+  runDir: string;
+  repoPath: string;
+  run: MissionRun;
+}): Promise<boolean> {
+  const node = [...options.run.graph.nodes].reverse().find((entry) => entry.status === "blocked") ?? null;
+  if (!node) {
+    return false;
+  }
+  const nodeDir = getNodeDir(options.runDir, node.id);
+  if (node.change?.status === "apply_failed") {
+    const diffText = await loadRecoveryDiff(nodeDir);
+    if (!diffText) {
+      node.error = node.error ?? "Recovery diff is missing for the blocked step.";
+      return false;
+    }
+    try {
+      await applyPatch(options.repoPath, diffText);
+      node.status = "completed";
+      node.end = nowIso();
+      node.error = null;
+      node.pauseReason = null;
+      node.change = {
+        status: "applied",
+        diffArtifact: node.change?.diffArtifact ?? "apply.patch",
+        appliedAt: nowIso(),
+        source: node.change?.source ?? "provider"
+      };
+      node.verdict = "ready_for_review";
+      node.artifacts = upsertArtifacts(node.artifacts, [
+        await writeArtifact(nodeDir, "post-apply.diff", await gitDiff(options.repoPath).catch(() => diffText), "text/x-diff")
+      ]);
+      recalculateRunProgress(options.run);
+      updateRunTruth(options.run);
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      node.status = "blocked";
+      node.end = nowIso();
+      node.error = message;
+      node.change = {
+        status: "apply_failed",
+        diffArtifact: node.change?.diffArtifact ?? "apply.patch",
+        applyError: message,
+        source: node.change?.source ?? "provider"
+      };
+      node.verdict = "blocked";
+      if (err instanceof PatchApplyError && err.artifacts) {
+        node.artifacts = upsertArtifacts(node.artifacts, [
+          await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
+          await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
+          await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown"),
+          await writeArtifact(nodeDir, "recovery-guide.md", await fs.readFile(err.artifacts.recoveryGuidePath, "utf8").catch(() => message), "text/markdown")
+        ]);
+      }
+      recalculateRunProgress(options.run);
+      updateRunTruth(options.run);
+      return false;
+    }
+  }
+  if (node.executor === "validate") {
+    node.status = "pending";
+    node.end = undefined;
+    node.error = null;
+    node.pauseReason = null;
+    node.verdict = "running";
+    recalculateRunProgress(options.run);
+    updateRunTruth(options.run);
+    return true;
+  }
+  return false;
+}
+
+async function loadRecoveryDiff(nodeDir: string): Promise<string | null> {
+  for (const candidate of ["pending.diff", "external_patch.diff", "git.diff", "apply.patch"]) {
+    const content = await readTextIfExists(path.join(nodeDir, candidate));
+    if (content?.trim()) {
+      return content;
+    }
+  }
+  return null;
 }
 
 export async function importMissionNodeInput(options: ImportMissionNodeInputOptions): Promise<MissionRun> {
@@ -281,7 +458,8 @@ export async function importMissionNodeInput(options: ImportMissionNodeInputOpti
           await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
           await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
           await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
-          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown")
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown"),
+          await writeArtifact(nodeDir, "recovery-guide.md", await fs.readFile(err.artifacts.recoveryGuidePath, "utf8").catch(() => message), "text/markdown")
         );
       }
       node.artifacts = upsertArtifacts(node.artifacts, applyArtifacts);
@@ -539,7 +717,8 @@ async function executeMissionNode(options: {
       repoPath: options.repoPath,
       config: options.config,
       run: options.run,
-      node
+      node,
+      traceContext: options.signals.traceContext
     });
 
     node.artifacts = upsertArtifacts(node.artifacts, result.artifacts ?? []);
@@ -619,6 +798,7 @@ async function runMissionNodeExecutor(options: {
   config: Awaited<ReturnType<typeof loadConfig>>;
   run: MissionRun;
   node: MissionNode;
+  traceContext?: StartMissionOptions["traceContext"];
 }): Promise<NodeExecutorResult> {
   if (options.node.executor === "delivery.export") {
     return executeDeliveryExportNode(options);
@@ -646,6 +826,7 @@ async function runMissionNodeExecutor(options: {
     executor: options.node.executor
   });
   const model = result.model;
+  let estimatedCost: number | null = null;
   const usage = normalizeUsage(result.usage ?? null);
   if (usage) {
     options.run.totalTokens = (options.run.totalTokens ?? 0) + usage.total_tokens;
@@ -653,11 +834,42 @@ async function runMissionNodeExecutor(options: {
     const cost = estimateCostUsd(usage, pricing);
     if (typeof cost === "number") {
       options.run.totalCost = Number(((options.run.totalCost ?? 0) + cost).toFixed(6));
+      estimatedCost = cost;
+    }
+    if (options.node.assignedAgentId) {
+      const existing = options.run.costByAgent?.[options.node.assignedAgentId] ?? { tokens: 0, cost: 0 };
+      options.run.costByAgent = {
+        ...(options.run.costByAgent ?? {}),
+        [options.node.assignedAgentId]: {
+          tokens: existing.tokens + usage.total_tokens,
+          cost: Number((existing.cost + (estimatedCost ?? 0)).toFixed(6))
+        }
+      };
     }
   }
+  if (model?.trim()) {
+    options.run.modelUsage = {
+      ...(options.run.modelUsage ?? {}),
+      [model]: (options.run.modelUsage?.[model] ?? 0) + 1
+    };
+  }
+  const nodeDir = getNodeDir(options.runDir, options.node.id);
+  await writeArtifact(nodeDir, "prompt.md", prompt, "text/markdown");
+  await appendProviderTrace({
+    repoPath: options.repoPath,
+    workspaceId: options.run.workspaceId ?? "default",
+    runId: options.run.runId,
+    node: options.node,
+    traceContext: options.traceContext,
+    prompt,
+    response: result.text,
+    provider: result,
+    usage,
+    estimatedCost
+  });
 
   if (options.node.executor === "audit") {
-    return executeAuditNode(options.runDir, options.node, result.text, result);
+    return executeAuditNode(options.runDir, options.repoPath, options.node, result.text, result);
   }
 
   if (options.node.executor === "patch") {
@@ -715,12 +927,14 @@ async function executeDeliveryExportNode(options: {
 
 async function executeAuditNode(
   runDir: string,
+  repoPath: string,
   node: MissionNode,
   outputText: string,
   execution: Awaited<ReturnType<typeof completeWithProvider>>
 ): Promise<NodeExecutorResult> {
   const nodeDir = getNodeDir(runDir, node.id);
-  const parsed = parseAuditOutput(outputText);
+  const parsed = await normalizeAuditOutput(repoPath, parseAuditOutput(outputText));
+  const findingSummary = parsed.blocking ? summarizeAuditFindings(parsed) : null;
   const artifacts = [
     await writeArtifact(nodeDir, "output.md", outputText),
     await writeArtifact(nodeDir, "output.json", JSON.stringify(parsed, null, 2), "application/json")
@@ -742,7 +956,8 @@ async function executeAuditNode(
     effort: execution.effort,
     authSource: execution.authSource,
     exitCode: execution.exitCode,
-    usage: execution.usage ?? null
+    usage: execution.usage ?? null,
+    failureMessage: findingSummary
   };
 }
 
@@ -829,7 +1044,8 @@ async function executePatchNode(
           await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
           await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
           await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
-          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown")
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown"),
+          await writeArtifact(nodeDir, "recovery-guide.md", await fs.readFile(err.artifacts.recoveryGuidePath, "utf8").catch(() => message), "text/markdown")
         );
       }
       return {
@@ -969,7 +1185,8 @@ async function finalizeApprovedPatchNode(
           await writeArtifact(nodeDir, "apply.patch", diffText, "text/x-diff"),
           await writeArtifact(nodeDir, "git-status.txt", await fs.readFile(err.artifacts.gitStatusPath, "utf8").catch(() => ""), "text/plain"),
           await writeArtifact(nodeDir, "conflicts.json", await fs.readFile(err.artifacts.conflictsPath, "utf8").catch(() => "{}"), "application/json"),
-          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown")
+          await writeArtifact(nodeDir, "conflict-summary.md", await fs.readFile(err.artifacts.summaryPath, "utf8").catch(() => message), "text/markdown"),
+          await writeArtifact(nodeDir, "recovery-guide.md", await fs.readFile(err.artifacts.recoveryGuidePath, "utf8").catch(() => message), "text/markdown")
         ]);
       }
       await writeNodeStatus(nodeDir, node);
@@ -1008,7 +1225,7 @@ async function finalizeApprovedPatchNode(
 
 async function buildPromptForNode(runDir: string, repoPath: string, run: MissionRun, node: MissionNode): Promise<string> {
   const template = node.promptPath ? await fs.readFile(node.promptPath, "utf8").catch(() => "") : "";
-  const inputs = await resolveMissionInputs(runDir, repoPath, run, node.inputs ?? []);
+  const inputs = await resolveMissionInputs(runDir, repoPath, run, node, node.inputs ?? []);
   return renderPrompt(template, inputs);
 }
 
@@ -1016,20 +1233,30 @@ async function resolveMissionInputs(
   runDir: string,
   repoPath: string,
   run: MissionRun,
+  node: MissionNode,
   refs: MissionInputRef[]
 ): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
+  const promptBudget = resolvePromptInputBudget(node);
   for (const ref of refs) {
     if (ref === "goal") {
-      result.goal = run.goal ?? run.userGoal ?? "";
+      result.goal = truncatePromptInput(
+        run.goal ?? run.userGoal ?? "",
+        promptBudget.goalChars,
+        "Goal truncated for prompt safety."
+      );
       continue;
     }
     if (ref === "repo_context") {
-      result.repo_context = await buildRepoContext(repoPath);
+      result.repo_context = truncatePromptInput(
+        await buildRepoContext(repoPath, { mode: promptBudget.repoContextMode }),
+        promptBudget.repoContextChars,
+        "Repo context truncated for prompt safety."
+      );
       continue;
     }
     if (ref === "git_diff") {
-      result.git_diff = await gitDiff(repoPath).catch(() => "(git diff unavailable)");
+      result.git_diff = await buildPromptSafeGitDiff(repoPath, promptBudget.gitDiff);
       continue;
     }
     if (ref.startsWith("artifact:")) {
@@ -1039,14 +1266,72 @@ async function resolveMissionInputs(
         continue;
       }
       const content = await readTextIfExists(path.join(getNodeDir(runDir, nodeId), fileName));
-      result[`${nodeId}.${fileName}`] = content ?? `(missing artifact: ${nodeId}/${fileName})`;
+      result[`${nodeId}.${fileName}`] = content
+        ? truncatePromptInput(content, MAX_ARTIFACT_INPUT_CHARS, "Artifact content truncated for prompt safety.")
+        : `(missing artifact: ${nodeId}/${fileName})`;
       continue;
     }
     if (ref.startsWith("literal:")) {
-      result.literal = ref.slice("literal:".length);
+      result.literal = truncatePromptInput(
+        ref.slice("literal:".length),
+        MAX_LITERAL_INPUT_CHARS,
+        "Literal input truncated for prompt safety."
+      );
     }
   }
   return result;
+}
+
+function resolvePromptInputBudget(node: MissionNode): PromptInputBudget {
+  if (node.executor === "audit") {
+    return AUDIT_PROMPT_INPUT_BUDGET;
+  }
+  return DEFAULT_PROMPT_INPUT_BUDGET;
+}
+
+async function buildPromptSafeGitDiff(repoPath: string, budget: GitDiffPromptBudget = DEFAULT_GIT_DIFF_PROMPT_BUDGET): Promise<string> {
+  const diff = await gitDiff(repoPath).catch(() => "");
+  if (!diff.trim()) {
+    return "(git diff unavailable or empty)";
+  }
+  if (diff.length <= budget.maxChars) {
+    return diff;
+  }
+
+  const [changedFiles, diffStat] = await Promise.all([
+    gitChangedFiles(repoPath).catch(() => []),
+    gitDiffStat(repoPath).catch(() => "")
+  ]);
+  const omittedFiles = Math.max(0, changedFiles.length - budget.maxChangedFiles);
+  const diffHead = diff.slice(0, budget.headChars).trimEnd();
+  const diffTail = diff.length > budget.headChars
+    ? diff.slice(Math.max(budget.headChars, diff.length - budget.tailChars)).trimStart()
+    : "";
+  const summary = [
+    "Git diff truncated for prompt safety.",
+    `Original diff size: ${diff.length.toLocaleString()} characters across ${changedFiles.length} changed file${changedFiles.length === 1 ? "" : "s"}.`,
+    diffStat
+      ? `Diff stat:\n${truncatePromptInput(diffStat, budget.maxStatChars, "Diff stat truncated for prompt safety.")}`
+      : "",
+    changedFiles.length > 0
+      ? [
+          "Changed files:",
+          ...changedFiles.slice(0, budget.maxChangedFiles).map((file) => `- ${file}`),
+          omittedFiles > 0 ? `- ... ${omittedFiles} more file${omittedFiles === 1 ? "" : "s"}` : ""
+        ].filter(Boolean).join("\n")
+      : "",
+    `Patch excerpt (start):\n${diffHead}`,
+    diffTail ? `Patch excerpt (end):\n${diffTail}` : ""
+  ].filter(Boolean).join("\n\n");
+
+  return truncatePromptInput(summary, budget.maxChars, "Git diff summary truncated further for prompt safety.");
+}
+
+function truncatePromptInput(value: string, maxChars: number, reason: string): string {
+  if (value.length <= maxChars) return value;
+  const marker = `\n... (${reason})`;
+  const sliceLength = Math.max(0, maxChars - marker.length);
+  return `${value.slice(0, sliceLength)}${marker}`;
 }
 
 function renderPrompt(template: string, inputs: Record<string, string>): string {
@@ -1057,7 +1342,10 @@ function renderPrompt(template: string, inputs: Record<string, string>): string 
   return `${template.trim()}\n\n# Inputs\n${sections}`.trim();
 }
 
-async function buildRepoContext(repoPath: string): Promise<string> {
+async function buildRepoContext(repoPath: string, options: { mode?: "default" | "compact" } = {}): Promise<string> {
+  if (options.mode === "compact") {
+    return buildCompactRepoContext(repoPath);
+  }
   const files: string[] = [];
   await collectRepoFiles(repoPath, repoPath, files);
   const packageJson = await readTextIfExists(path.join(repoPath, "package.json"));
@@ -1070,13 +1358,68 @@ async function buildRepoContext(repoPath: string): Promise<string> {
   ].filter(Boolean).join("\n\n");
 }
 
+async function buildCompactRepoContext(repoPath: string): Promise<string> {
+  const entries = (await fs.readdir(repoPath, { withFileTypes: true }).catch(() => []))
+    .filter((entry) => !shouldIgnoreRepoContextEntry(entry.name, entry.isDirectory(), repoPath, repoPath))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const files: string[] = [];
+  await collectRepoFiles(repoPath, repoPath, files);
+  const topLevelEntries = entries
+    .slice(0, MAX_COMPACT_REPO_CONTEXT_ENTRIES)
+    .map((entry) => `- ${entry.name}${entry.isDirectory() ? "/" : ""}`)
+    .join("\n");
+  const representativeFiles = files
+    .slice(0, MAX_COMPACT_REPO_CONTEXT_FILES)
+    .map((file) => `- ${file}`)
+    .join("\n");
+  const packageJson = await readTextIfExists(path.join(repoPath, "package.json"));
+  const readme = packageJson ? "" : await readTextIfExists(path.join(repoPath, "README.md"));
+  return [
+    `Repo: ${repoPath}`,
+    topLevelEntries ? `Top-level entries:\n${topLevelEntries}` : "",
+    representativeFiles ? `Representative files:\n${representativeFiles}` : "",
+    packageJson ? `Root package.json excerpt:\n${packageJson.slice(0, MAX_COMPACT_REPO_PACKAGE_JSON_CHARS)}` : "",
+    !packageJson && readme ? `README excerpt:\n${readme.slice(0, MAX_COMPACT_REPO_README_CHARS)}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+
+const REPO_CONTEXT_IGNORED_DIRECTORIES = new Set([
+  ".cache",
+  ".git",
+  ".mypy_cache",
+  ".next",
+  ".nox",
+  ".orchestrum",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".turbo",
+  ".venv",
+  "__pycache__",
+  "artifacts",
+  "build",
+  "coverage",
+  "dist",
+  "logs",
+  "node_modules",
+  "out",
+  "output",
+  "runs",
+  "temp",
+  "tmp",
+  "venv"
+]);
+
+const REPO_CONTEXT_IGNORED_FILES = new Set([
+  ".DS_Store"
+]);
+
 async function collectRepoFiles(rootDir: string, currentDir: string, result: string[]): Promise<void> {
   if (result.length >= 80) return;
   const entries = await fs.readdir(currentDir, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     if (result.length >= 80) return;
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "runs") continue;
-    if (entry.name === ".orchestrum" && currentDir === rootDir) continue;
+    if (shouldIgnoreRepoContextEntry(entry.name, entry.isDirectory(), currentDir, rootDir)) continue;
     const fullPath = path.join(currentDir, entry.name);
     const relPath = path.relative(rootDir, fullPath) || entry.name;
     if (entry.isDirectory()) {
@@ -1087,11 +1430,25 @@ async function collectRepoFiles(rootDir: string, currentDir: string, result: str
   }
 }
 
+function shouldIgnoreRepoContextEntry(
+  name: string,
+  isDirectory: boolean,
+  currentDir: string,
+  rootDir: string
+): boolean {
+  if (isDirectory && REPO_CONTEXT_IGNORED_DIRECTORIES.has(name)) return true;
+  if (REPO_CONTEXT_IGNORED_FILES.has(name)) return true;
+  if (name === ".orchestrum" && currentDir === rootDir) return true;
+  if (!isDirectory && (name.endsWith(".pyc") || name.endsWith(".pyo"))) return true;
+  return false;
+}
+
 function createMissionGraph(
   template: ReturnType<typeof loadMissionTemplate>,
   agents: MissionAgent[],
   goal: string,
-  modelOverrides?: Record<string, string>
+  modelOverrides?: Record<string, string>,
+  effortOverrides?: Record<string, string>
 ): MissionGraph {
   const missingRoles = new Set<string>();
   const nodes = template.nodes.map((definition) => {
@@ -1108,6 +1465,10 @@ function createMissionGraph(
     const roleOverride = resolveRoleModelOverride(definition.role, modelOverrides);
     if (roleOverride) {
       providerConfig.modelOverride = roleOverride;
+    }
+    const roleEffortOverride = resolveRoleEffortOverride(definition.role, effortOverrides);
+    if (roleEffortOverride) {
+      providerConfig.effort = roleEffortOverride;
     }
     return {
       id: definition.id,
@@ -1295,6 +1656,7 @@ function scoreMissionAgent(
 
 async function persistMissionRun(runDir: string, run: MissionRun): Promise<void> {
   run.graph.nodes.sort((a, b) => a.id.localeCompare(b.id));
+  run.recovery = buildMissionRecoveryState(run);
   await writeJson(path.join(runDir, "run.json"), run);
 }
 
@@ -1328,6 +1690,253 @@ async function writeArtifact(nodeDir: string, fileName: string, content: string,
     path: fileName,
     mimeType
   };
+}
+
+function buildMissionRecoveryState(run: MissionRun): RunRecoveryState | null {
+  if (run.status === "completed" || run.status === "cancelled") {
+    return null;
+  }
+  const blockingNode = [...run.graph.nodes].reverse().find((node) =>
+    node.status === "blocked" ||
+    node.status === "failed" ||
+    node.status === "waiting_input" ||
+    node.status === "awaiting_approval"
+  ) ?? null;
+  if (run.status === "paused" && blockingNode?.status === "awaiting_approval") {
+    return {
+      status: "attention_required",
+      kind: "approval_pause",
+      summary: blockingNode.approval?.reason ?? "Mission is waiting for operator approval.",
+      guidance: [
+        "Review the generated diff and approval reason for the blocked step.",
+        "Approve the step when the patch is acceptable, then resume the run.",
+        "If the change is unsafe, keep the run paused and request remediation instead."
+      ],
+      artifacts: buildRecoveryArtifacts(blockingNode.artifacts),
+      suggestedActions: [
+        {
+          kind: "resume_run",
+          label: "Resume after approval",
+          detail: "Approve the blocked step first, then resume the mission run.",
+          runId: run.runId
+        }
+      ],
+      updatedAt: run.end ?? nowIso(),
+      blockingStepId: blockingNode.id,
+      blockingStepTitle: blockingNode.title
+    };
+  }
+  if (run.status === "paused" && blockingNode?.status === "waiting_input") {
+    return {
+      status: "attention_required",
+      kind: "input_pause",
+      summary: blockingNode.error ?? "Mission is waiting for external input before it can continue.",
+      guidance: [
+        "Import the requested external handoff or response for the paused step.",
+        "Resume the mission only after the missing input has been recorded.",
+        "Keep the run paused if the external response is still incomplete."
+      ],
+      artifacts: buildRecoveryArtifacts(blockingNode.artifacts),
+      suggestedActions: [
+        {
+          kind: "manual_recover",
+          label: "Import required input",
+          detail: "Record the missing delivery or operator input for the paused step before resuming."
+        }
+      ],
+      updatedAt: run.end ?? nowIso(),
+      blockingStepId: blockingNode.id,
+      blockingStepTitle: blockingNode.title
+    };
+  }
+  if (run.status === "blocked" && blockingNode) {
+    const dirtyTreeBlocked = isDirtyTreeRecovery(blockingNode.error, blockingNode.change?.applyError);
+    const patchBlocked = blockingNode.change?.status === "apply_failed";
+    const validationBlocked = blockingNode.executor === "validate" || run.validation?.status === "failed" || run.validation?.status === "unavailable";
+    const artifacts = buildRecoveryArtifacts(blockingNode.artifacts);
+    const auditFindingsBlocked = isAuditFindingRecoveryNode(blockingNode, artifacts);
+    if (auditFindingsBlocked) {
+      const primaryArtifact = artifacts.find((artifact) => artifact.path === "output.json")
+        ?? artifacts.find((artifact) => artifact.path === "output.md")
+        ?? null;
+      const hasSuggestedFix = artifacts.some((artifact) => artifact.path === "suggested_fix.diff");
+      return {
+        status: "attention_required",
+        kind: "audit_findings",
+        summary: blockingNode.error ?? summarizeAuditFindingCount(blockingNode.findingCount ?? 0),
+        guidance: [
+          "Review the preserved audit findings before treating this as a runtime failure.",
+          "Fix the blocking issues in the workspace and use the suggested diff only after verifying it is still correct.",
+          "Rerun the audit or relaunch the cycle after the findings are addressed."
+        ],
+        artifacts,
+        suggestedActions: [
+          ...(primaryArtifact
+            ? [{
+                kind: "inspect_artifact" as const,
+                label: "Review audit findings",
+                detail: "Open the preserved audit output to inspect every blocking finding.",
+                artifactPath: primaryArtifact.path
+              }]
+            : []),
+          ...(hasSuggestedFix
+            ? [{
+                kind: "inspect_artifact" as const,
+                label: "Inspect suggested fix",
+                detail: "Review the proposed diff before applying any manual remediation.",
+                artifactPath: "suggested_fix.diff"
+              }]
+            : []),
+          {
+            kind: "manual_recover",
+            label: "Fix findings in the workspace",
+            detail: "Address the blocking findings in the repository, then rerun the audit or relaunch the work item."
+          }
+        ],
+        updatedAt: run.end ?? nowIso(),
+        blockingStepId: blockingNode.id,
+        blockingStepTitle: blockingNode.title
+      };
+    }
+    if (patchBlocked) {
+      return {
+        status: "attention_required",
+        kind: dirtyTreeBlocked ? "dirty_tree" : "patch_conflict",
+        summary: blockingNode.change?.applyError ?? blockingNode.error ?? "Patch apply is blocked and needs operator recovery.",
+        guidance: dirtyTreeBlocked
+          ? [
+              "Inspect the current repo status and resolve overlapping local changes before retrying the patch.",
+              "Commit, stash, or discard the conflicting files outside `.orchestrum`.",
+              "Resume the mission run after the repository is clean enough to accept the generated patch."
+            ]
+          : [
+              "Inspect the conflict summary and conflicted files recorded for this step.",
+              "Resolve the merge conflicts in the repository and make sure `git status` is clean enough for retry.",
+              "Resume the mission run to retry patch application from the preserved diff."
+            ],
+        artifacts,
+        suggestedActions: [
+          artifacts.find((artifact) => artifact.path === "conflict-summary.md")
+            ? {
+                kind: "inspect_artifact",
+                label: "Inspect conflict summary",
+                detail: "Review the preserved conflict summary before changing repository state.",
+                artifactPath: "conflict-summary.md"
+              }
+            : {
+                kind: "inspect_artifact",
+                label: "Inspect git status",
+                detail: "Review the preserved repo state before retrying patch application.",
+                artifactPath: "git-status.txt"
+              },
+          {
+            kind: dirtyTreeBlocked ? "clean_repo" : "resolve_conflicts",
+            label: dirtyTreeBlocked ? "Clean overlapping repo state" : "Resolve merge conflicts",
+            detail: dirtyTreeBlocked
+              ? "Commit, stash, or discard the overlapping files so the patch can be retried safely."
+              : "Resolve the conflicted files recorded in the conflict bundle before resuming the run."
+          },
+          {
+            kind: "resume_run",
+            label: "Resume blocked run",
+            detail: "Retry patch application from the preserved diff after the repository state is fixed.",
+            runId: run.runId
+          }
+        ],
+        updatedAt: run.end ?? nowIso(),
+        blockingStepId: blockingNode.id,
+        blockingStepTitle: blockingNode.title
+      };
+    }
+    if (validationBlocked) {
+      return {
+        status: "attention_required",
+        kind: "validation_blocked",
+        summary: blockingNode.error ?? run.validation?.summary ?? "Validation is blocked and needs operator recovery.",
+        guidance: [
+          "Inspect the validation summary and logs for the blocked step.",
+          "Fix the failing or unavailable validation prerequisites in the repository or machine environment.",
+          "Resume the mission run to re-run validation after the environment is ready."
+        ],
+        artifacts,
+        suggestedActions: [
+          {
+            kind: "inspect_artifact",
+            label: "Inspect validation artifacts",
+            detail: "Review the validation summary for the blocked step before retrying."
+          },
+          {
+            kind: "resume_run",
+            label: "Resume blocked run",
+            detail: "Re-run validation after the missing dependency or failing command is fixed.",
+            runId: run.runId
+          }
+        ],
+        updatedAt: run.end ?? nowIso(),
+        blockingStepId: blockingNode.id,
+        blockingStepTitle: blockingNode.title
+      };
+    }
+  }
+  if (run.status === "failed" && blockingNode) {
+    return {
+      status: "attention_required",
+      kind: "unknown",
+      summary: blockingNode.error ?? run.error ?? "Mission failed and needs operator recovery.",
+      guidance: [
+        "Inspect the failed step artifacts and logs to determine the actual failure mode.",
+        "Fix the underlying repository or environment issue before retrying execution.",
+        "Relaunch or manually recover the work item once the failure cause is understood."
+      ],
+      artifacts: buildRecoveryArtifacts(blockingNode.artifacts),
+      suggestedActions: [
+        {
+          kind: "inspect_artifact",
+          label: "Inspect failure artifacts",
+          detail: "Review the preserved step artifacts before retrying."
+        }
+      ],
+      updatedAt: run.end ?? nowIso(),
+      blockingStepId: blockingNode.id,
+      blockingStepTitle: blockingNode.title
+    };
+  }
+  return run.recovery ?? null;
+}
+
+function buildRecoveryArtifacts(artifacts: NodeArtifactRef[]): RunRecoveryState["artifacts"] {
+  const preferred = new Map([
+    ["output.md", { label: "Audit report", mimeType: "text/markdown" }],
+    ["output.json", { label: "Audit findings JSON", mimeType: "application/json" }],
+    ["suggested_fix.diff", { label: "Suggested fix diff", mimeType: "text/x-diff" }],
+    ["conflict-summary.md", { label: "Conflict summary", mimeType: "text/markdown" }],
+    ["recovery-guide.md", { label: "Recovery guide", mimeType: "text/markdown" }],
+    ["git-status.txt", { label: "Git status", mimeType: "text/plain" }],
+    ["conflicts.json", { label: "Conflict details", mimeType: "application/json" }],
+    ["apply.patch", { label: "Preserved patch", mimeType: "text/x-diff" }],
+    ["apply-error.txt", { label: "Apply error", mimeType: "text/plain" }],
+    ["validation/summary.json", { label: "Validation summary", mimeType: "application/json" }]
+  ]);
+  return artifacts
+    .filter((artifact) => preferred.has(artifact.path) || preferred.has(artifact.name))
+    .map((artifact) => {
+      const descriptor = preferred.get(artifact.path) ?? preferred.get(artifact.name) ?? {
+        label: artifact.name,
+        mimeType: artifact.mimeType ?? null
+      };
+      return {
+        label: descriptor.label,
+        path: artifact.path,
+        mimeType: artifact.mimeType ?? descriptor.mimeType ?? null
+      };
+    });
+}
+
+function isDirtyTreeRecovery(...messages: Array<string | null | undefined>): boolean {
+  return messages.some((message) =>
+    typeof message === "string" &&
+    /overlapping uncommitted changes|merge conflicts|commit, stash, or clean/i.test(message)
+  );
 }
 
 function getMissionDeliveryDir(runDir: string): string {
@@ -1457,7 +2066,7 @@ function normalizeMissionTargetTool(value: string): "chatgpt" | "claude" | "curs
 }
 
 async function buildDeliveryPacket(runDir: string, repoPath: string, run: MissionRun, node: MissionNode): Promise<string> {
-  const inputs = await resolveMissionInputs(runDir, repoPath, run, node.inputs ?? []);
+  const inputs = await resolveMissionInputs(runDir, repoPath, run, node, node.inputs ?? []);
   const sections = Object.entries(inputs)
     .map(([key, value]) => `## ${key}\n${value}`)
     .join("\n\n");
@@ -1651,11 +2260,20 @@ function upsertArtifacts(existing: NodeArtifactRef[], incoming: NodeArtifactRef[
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function parseAuditOutput(outputText: string): {
+type AuditIssue = {
+  severity: string;
+  file: string;
+  line: number | null;
+  message: string;
+};
+
+type ParsedAuditOutput = {
   blocking: boolean;
-  issues: Array<{ severity: string; file: string; line: number | null; message: string }>;
+  issues: AuditIssue[];
   suggested_fix?: string;
-} {
+};
+
+function parseAuditOutput(outputText: string): ParsedAuditOutput {
   const jsonText = extractJsonBlock(outputText) ?? outputText.trim();
   try {
     const parsed = JSON.parse(jsonText) as {
@@ -1682,6 +2300,424 @@ function parseAuditOutput(outputText: string): {
       suggested_fix: undefined
     };
   }
+}
+
+async function normalizeAuditOutput(repoPath: string, parsed: ParsedAuditOutput): Promise<ParsedAuditOutput> {
+  if (parsed.issues.length === 0) return parsed;
+
+  const issues: AuditIssue[] = [];
+  for (const issue of parsed.issues) {
+    if (
+      await isResolvableMissingModuleFalsePositive(repoPath, issue)
+      || await isResolvableMissingApiRouteFalsePositive(repoPath, issue)
+      || await isResolvableUnusedImportFalsePositive(repoPath, issue)
+      || await isResolvableLinkedWorkItemTaskFalsePositive(repoPath, issue)
+      || await isResolvableBuildScriptFalsePositive(repoPath, issue)
+    ) {
+      continue;
+    }
+    issues.push(issue);
+  }
+
+  return {
+    blocking: parsed.blocking && issues.length > 0,
+    issues,
+    suggested_fix: issues.length > 0 ? parsed.suggested_fix : undefined
+  };
+}
+
+async function isResolvableMissingModuleFalsePositive(repoPath: string, issue: AuditIssue): Promise<boolean> {
+  if (!issue.file.trim()) return false;
+  if (!/\b(module not found|cannot find module|does not exist)\b/i.test(issue.message)) return false;
+
+  const sourceFilePath = path.resolve(repoPath, issue.file);
+  if (!sourceFilePath.startsWith(path.resolve(repoPath))) return false;
+  if (!await isFile(sourceFilePath)) return false;
+
+  const specifier = await inferAuditIssueModuleSpecifier(repoPath, sourceFilePath, issue);
+  if (!specifier) return false;
+
+  const resolvedModule = await resolveAuditIssueModule(repoPath, sourceFilePath, specifier);
+  return resolvedModule !== null;
+}
+
+async function isResolvableMissingApiRouteFalsePositive(repoPath: string, issue: AuditIssue): Promise<boolean> {
+  if (!issue.message.includes("/api/")) return false;
+  if (!/(route|routes|handler|handlers|404|exist)/i.test(issue.message)) return false;
+
+  const rawRouteMatches = Array.from(new Set(
+    [...issue.message.matchAll(/\/api\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*/g)].map((match) => match[0].replace(/\/+$/u, ""))
+  ));
+  const routeMatches = rawRouteMatches.filter((routePath, _, all) =>
+    !all.some((other) => other !== routePath && other.startsWith(`${routePath}/`))
+  );
+  if (routeMatches.length === 0) return false;
+
+  for (const routePath of routeMatches) {
+    const routeBase = path.join(repoPath, "apps", "ui", "src", "app", routePath.slice(1), "route");
+    const resolvedRoute = await resolveExistingModulePath(repoPath, routeBase);
+    if (!resolvedRoute) return false;
+  }
+
+  return true;
+}
+
+async function isResolvableUnusedImportFalsePositive(repoPath: string, issue: AuditIssue): Promise<boolean> {
+  if (!issue.file.trim()) return false;
+  if (!/\bunused imports?\b/i.test(issue.message)) return false;
+
+  const sourceFilePath = path.resolve(repoPath, issue.file);
+  if (!sourceFilePath.startsWith(path.resolve(repoPath))) return false;
+
+  const source = await readTextIfExists(sourceFilePath);
+  if (!source) return false;
+
+  const sourceLines = source.split(/\r?\n/u);
+  const importBlock = extractImportBlockForIssue(sourceLines, issue);
+  if (!importBlock) return false;
+
+  const importBindings = extractImportBindings(importBlock.text);
+  if (importBindings.length === 0) return false;
+
+  const issueBindings = extractUnusedImportBindingsFromMessage(issue.message);
+  const bindingsToVerify = (issueBindings.length > 0 ? issueBindings : importBindings)
+    .filter((binding) => importBindings.includes(binding));
+  if (bindingsToVerify.length === 0) return false;
+
+  const sourceWithoutImport = [
+    ...sourceLines.slice(0, importBlock.startLine - 1),
+    ...sourceLines.slice(importBlock.endLine)
+  ].join("\n");
+
+  return bindingsToVerify.every((binding) => buildIdentifierUsagePattern(binding).test(sourceWithoutImport));
+}
+
+async function isResolvableLinkedWorkItemTaskFalsePositive(repoPath: string, issue: AuditIssue): Promise<boolean> {
+  if (!/linkedWorkItemId/.test(issue.message) || !/getQueuedTasks/.test(issue.message)) return false;
+
+  const [taskRuntimeSource, agentPlatformSource] = await Promise.all([
+    readTextIfExists(path.join(repoPath, "apps", "ui", "src", "lib", "workRuntime.ts")),
+    readTextIfExists(path.join(repoPath, "packages", "service", "src", "agentPlatform.ts"))
+  ]);
+  if (!taskRuntimeSource || !agentPlatformSource) return false;
+  if (!taskRuntimeSource.includes("linkedWorkItemId")) return false;
+
+  return [
+    /linkedWorkItemId:\s*options\.workItem\.id/,
+    /linkedWorkItemId:\s*input\.linkedWorkItemId/,
+    /linkedWorkItemId:\s*typeof record\.linkedWorkItemId/
+  ].every((pattern) => pattern.test(agentPlatformSource));
+}
+
+async function isResolvableBuildScriptFalsePositive(repoPath: string, issue: AuditIssue): Promise<boolean> {
+  if (!/build:desktop/i.test(issue.message) || !/non-existent script/i.test(issue.message)) return false;
+
+  const issueFilePath = path.resolve(repoPath, issue.file || "");
+  const packageJsonPath = path.resolve(repoPath, "package.json");
+  if (issueFilePath !== packageJsonPath) return false;
+
+  const packageJsonText = await readTextIfExists(packageJsonPath);
+  if (!packageJsonText) return false;
+
+  try {
+    const parsed = JSON.parse(packageJsonText) as { scripts?: Record<string, unknown> };
+    const buildDesktop = parsed.scripts?.["build:desktop"];
+    return typeof buildDesktop === "string" && buildDesktop.includes("npm run build:service");
+  } catch {
+    return false;
+  }
+}
+
+function extractImportBlockForIssue(
+  sourceLines: string[],
+  issue: AuditIssue
+): { startLine: number; endLine: number; text: string } | null {
+  let startIndex = -1;
+  if (typeof issue.line === "number" && issue.line > 0 && issue.line <= sourceLines.length) {
+    startIndex = issue.line - 1;
+    while (startIndex >= 0 && !/\bimport\b/.test(sourceLines[startIndex] ?? "")) {
+      startIndex -= 1;
+    }
+  }
+  if (startIndex < 0) {
+    startIndex = findImportLineIndexForIssue(sourceLines, issue);
+  }
+  if (startIndex < 0) return null;
+
+  let endIndex = startIndex;
+  let text = sourceLines[startIndex] ?? "";
+  while (endIndex + 1 < sourceLines.length && !/;\s*$/u.test(sourceLines[endIndex] ?? "")) {
+    endIndex += 1;
+    text = `${text}\n${sourceLines[endIndex] ?? ""}`;
+  }
+
+  return {
+    startLine: startIndex + 1,
+    endLine: endIndex + 1,
+    text
+  };
+}
+
+function findImportLineIndexForIssue(sourceLines: string[], issue: AuditIssue): number {
+  const importSource = inferAuditIssueImportSource(issue.message);
+  if (importSource) {
+    const matchIndex = sourceLines.findIndex((line) => /\bimport\b/.test(line) && line.includes(importSource));
+    if (matchIndex >= 0) return matchIndex;
+  }
+  return -1;
+}
+
+function inferAuditIssueImportSource(message: string): string | null {
+  const match = message.match(/\bfrom\s+["'`](.+?)["'`]/iu);
+  return match?.[1]?.trim() ?? null;
+}
+
+function extractUnusedImportBindingsFromMessage(message: string): string[] {
+  const match = message.match(/\bUnused imports?:\s*(.+?)(?:\s+from\b|$)/iu);
+  if (!match?.[1]) return [];
+  return match[1]
+    .replace(/[{}]/g, " ")
+    .split(/,|\band\b/iu)
+    .map((value) => value.replace(/["'`]/g, "").trim())
+    .map((value) => value.split(/\s+as\s+/iu).at(-1)?.trim() ?? "")
+    .filter((value) => /^[A-Za-z_$][\w$]*$/u.test(value));
+}
+
+function extractImportBindings(importText: string): string[] {
+  const normalized = importText.replace(/\s+/g, " ").trim();
+  const match = normalized.match(/^import\s+(?:type\s+)?(.+?)\s+from\s+["'`].+?["'`]\s*;?$/u);
+  const clause = match?.[1]?.trim() ?? "";
+  if (!clause) return [];
+
+  const bindings = new Set<string>();
+  const namedMatch = clause.match(/\{([^}]+)\}/u);
+  if (namedMatch?.[1]) {
+    for (const entry of namedMatch[1].split(",")) {
+      const normalizedEntry = entry.replace(/^type\s+/u, "").trim();
+      if (!normalizedEntry) continue;
+      const localName = normalizedEntry.split(/\s+as\s+/iu).at(-1)?.trim() ?? "";
+      if (/^[A-Za-z_$][\w$]*$/u.test(localName)) {
+        bindings.add(localName);
+      }
+    }
+  }
+
+  const namespaceMatch = clause.match(/\*\s+as\s+([A-Za-z_$][\w$]*)/u);
+  if (namespaceMatch?.[1]) {
+    bindings.add(namespaceMatch[1]);
+  }
+
+  const defaultClause = clause
+    .replace(/\{[^}]+\}/u, "")
+    .replace(/\*\s+as\s+[A-Za-z_$][\w$]*/u, "")
+    .replace(/,+/gu, " ")
+    .replace(/^type\s+/u, "")
+    .trim();
+  if (/^[A-Za-z_$][\w$]*$/u.test(defaultClause)) {
+    bindings.add(defaultClause);
+  }
+
+  return [...bindings];
+}
+
+function buildIdentifierUsagePattern(binding: string): RegExp {
+  return new RegExp(`\\b${escapeRegExp(binding)}\\b`, "u");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function inferAuditIssueModuleSpecifier(
+  repoPath: string,
+  sourceFilePath: string,
+  issue: AuditIssue
+): Promise<string | null> {
+  const quotedMatches = [...issue.message.matchAll(/["'`](.+?)["'`]/g)]
+    .map((match) => match[1]?.trim() ?? "")
+    .filter(Boolean);
+  const localSpecifier = quotedMatches.find((value) => isLikelyLocalModuleSpecifier(value));
+  if (localSpecifier) return localSpecifier;
+
+  if (typeof issue.line === "number" && issue.line > 0) {
+    const source = await readTextIfExists(sourceFilePath);
+    const lineText = source?.split(/\r?\n/u)[issue.line - 1] ?? "";
+    const importSpecifier = extractImportSpecifierFromSourceLine(lineText);
+    if (importSpecifier) return importSpecifier;
+  }
+
+  return quotedMatches[0] ?? null;
+}
+
+function isLikelyLocalModuleSpecifier(value: string): boolean {
+  return value.startsWith("./") || value.startsWith("../") || value.startsWith("@/") || value.startsWith("/");
+}
+
+function extractImportSpecifierFromSourceLine(lineText: string): string | null {
+  const importMatch = lineText.match(/from\s+["'`](.+?)["'`]/u)
+    ?? lineText.match(/import\s*\(\s*["'`](.+?)["'`]\s*\)/u)
+    ?? lineText.match(/require\(\s*["'`](.+?)["'`]\s*\)/u);
+  return importMatch?.[1]?.trim() ?? null;
+}
+
+async function resolveAuditIssueModule(repoPath: string, sourceFilePath: string, specifier: string): Promise<string | null> {
+  if (!specifier.trim()) return null;
+
+  if (specifier.startsWith("./") || specifier.startsWith("../")) {
+    return resolveExistingModulePath(repoPath, path.resolve(path.dirname(sourceFilePath), specifier));
+  }
+
+  if (specifier.startsWith("/")) {
+    return resolveExistingModulePath(repoPath, path.join(repoPath, specifier.slice(1)));
+  }
+
+  const tsconfigPath = await findNearestTsconfigPath(repoPath, path.dirname(sourceFilePath));
+  if (!tsconfigPath) return null;
+
+  const tsconfig = await loadTsconfigResolver(tsconfigPath);
+  if (!tsconfig) return null;
+
+  for (const [pattern, replacements] of Object.entries(tsconfig.paths)) {
+    for (const replacement of replacements) {
+      const resolvedPattern = applyTsconfigPathPattern(pattern, replacement, specifier);
+      if (!resolvedPattern) continue;
+      const candidate = path.resolve(tsconfig.baseDir, tsconfig.baseUrl, resolvedPattern);
+      const resolved = await resolveExistingModulePath(repoPath, candidate);
+      if (resolved) return resolved;
+    }
+  }
+
+  const baseUrlCandidate = path.resolve(tsconfig.baseDir, tsconfig.baseUrl, specifier);
+  return resolveExistingModulePath(repoPath, baseUrlCandidate);
+}
+
+async function findNearestTsconfigPath(repoPath: string, startDir: string): Promise<string | null> {
+  const rootDir = path.resolve(repoPath);
+  let currentDir = startDir;
+
+  while (currentDir.startsWith(rootDir)) {
+    const candidate = path.join(currentDir, "tsconfig.json");
+    if (await isFile(candidate)) return candidate;
+    if (currentDir === rootDir) break;
+    currentDir = path.dirname(currentDir);
+  }
+
+  return null;
+}
+
+async function loadTsconfigResolver(tsconfigPath: string): Promise<{
+  baseDir: string;
+  baseUrl: string;
+  paths: Record<string, string[]>;
+} | null> {
+  try {
+    const raw = await fs.readFile(tsconfigPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      compilerOptions?: {
+        baseUrl?: string;
+        paths?: Record<string, string[] | string>;
+      };
+    };
+    const rawPaths = parsed.compilerOptions?.paths ?? {};
+    const normalizedPaths: Record<string, string[]> = {};
+    for (const [pattern, replacements] of Object.entries(rawPaths)) {
+      const values = Array.isArray(replacements)
+        ? replacements.filter((value): value is string => typeof value === "string")
+        : [];
+      if (values.length > 0) {
+        normalizedPaths[pattern] = values;
+      }
+    }
+    return {
+      baseDir: path.dirname(tsconfigPath),
+      baseUrl: parsed.compilerOptions?.baseUrl?.trim() || ".",
+      paths: normalizedPaths
+    };
+  } catch {
+    return null;
+  }
+}
+
+function applyTsconfigPathPattern(pattern: string, replacement: string, specifier: string): string | null {
+  if (pattern === specifier) return replacement;
+  const wildcardIndex = pattern.indexOf("*");
+  if (wildcardIndex === -1) return null;
+
+  const prefix = pattern.slice(0, wildcardIndex);
+  const suffix = pattern.slice(wildcardIndex + 1);
+  if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix)) return null;
+
+  const wildcardValue = specifier.slice(prefix.length, specifier.length - suffix.length);
+  return replacement.includes("*") ? replacement.replace("*", wildcardValue) : replacement;
+}
+
+async function resolveExistingModulePath(repoPath: string, candidateBase: string): Promise<string | null> {
+  const rootDir = path.resolve(repoPath);
+  const candidates = new Set<string>([candidateBase]);
+  if (!path.extname(candidateBase)) {
+    for (const extension of MODULE_RESOLUTION_EXTENSIONS) {
+      candidates.add(`${candidateBase}${extension}`);
+      candidates.add(path.join(candidateBase, `index${extension}`));
+    }
+  }
+
+  for (const candidate of candidates) {
+    const resolvedCandidate = path.resolve(candidate);
+    if (!resolvedCandidate.startsWith(rootDir)) continue;
+    if (await isFile(resolvedCandidate)) return resolvedCandidate;
+  }
+
+  return null;
+}
+
+async function isFile(targetPath: string): Promise<boolean> {
+  try {
+    return (await fs.stat(targetPath)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function summarizeAuditFindingCount(count: number): string {
+  if (count > 0) {
+    return count === 1
+      ? "Audit recorded 1 blocking finding."
+      : `Audit recorded ${count} blocking findings.`;
+  }
+  return "Audit returned blocking findings.";
+}
+
+function summarizeAuditFindings(parsed: ReturnType<typeof parseAuditOutput>): string {
+  const count = parsed.issues.length;
+  if (count === 0) return summarizeAuditFindingCount(0);
+  const lead = parsed.issues[0]!;
+  const location = formatAuditIssueLocation(lead);
+  const detail = [location, trimSentence(lead.message)].filter(Boolean).join(" ");
+  return count === 1
+    ? `Audit recorded 1 blocking finding: ${detail}.`
+    : `Audit recorded ${count} blocking findings. Lead finding: ${detail}.`;
+}
+
+function formatAuditIssueLocation(issue: {
+  file: string;
+  line: number | null;
+}): string {
+  const file = issue.file.trim();
+  if (!file) return "";
+  return typeof issue.line === "number" ? `${file}:${issue.line}` : file;
+}
+
+function trimSentence(value: string): string {
+  return value.trim().replace(/[.]+$/g, "");
+}
+
+function isAuditFindingRecoveryNode(
+  node: MissionNode,
+  artifacts: RunRecoveryState["artifacts"]
+): boolean {
+  if (node.executor !== "audit") return false;
+  if ((node.findingCount ?? 0) > 0) return true;
+  return artifacts.some((artifact) => artifact.path === "output.json" || artifact.path === "output.md");
 }
 
 function extractDiffBlock(outputText: string): string | null {
@@ -1776,6 +2812,175 @@ function buildMissionStepState(node: MissionNode) {
   step.validation = node.validation ?? null;
   step.verdict = node.verdict ?? null;
   return step;
+}
+
+async function appendProviderTrace(options: {
+  repoPath: string;
+  workspaceId: string;
+  runId: string;
+  node: MissionNode;
+  traceContext?: StartMissionOptions["traceContext"];
+  prompt: string;
+  response: string;
+  provider: Awaited<ReturnType<typeof completeWithProvider>>;
+  usage: ReturnType<typeof normalizeUsage>;
+  estimatedCost: number | null;
+}) {
+  const workItemId = options.traceContext?.workItemId?.trim();
+  if (!workItemId) return;
+  const cycleId = options.traceContext?.cycleId ?? null;
+  const workstreamId = options.traceContext?.workstreamId ?? options.node.id;
+  const taskId = options.traceContext?.taskId ?? null;
+  const ownerAgentId = options.node.assignedAgentId ?? options.traceContext?.ownerAgentId ?? null;
+  const ownerAgentName = options.node.assignedAgentName ?? options.traceContext?.ownerAgentName ?? null;
+  const ownerRole = options.traceContext?.ownerRole ?? options.node.role ?? null;
+  const promptTrace = await appendWorkItemTrace(options.repoPath, {
+    workspaceId: options.workspaceId,
+    workItemId,
+    cycleId,
+    workstreamId,
+    taskId,
+    runId: options.runId,
+    nodeId: options.node.id,
+    traceType: "provider_prompt",
+    ownerAgentId,
+    ownerAgentName,
+    ownerRole,
+    providerVendor: options.provider.vendor,
+    providerTransport: options.provider.transport,
+    providerModel: options.provider.model,
+    providerEffort: options.provider.effort ?? null,
+    promptCountDelta: 1,
+    exchangeCountDelta: 0,
+    summary: `${options.node.title} sent a provider prompt.`,
+    promptSummary: summarizeTraceText(options.prompt),
+    promptRaw: options.prompt,
+    workstreamTitle: options.node.title,
+    laneLabel: options.node.role,
+    payload: {
+      executor: options.node.executor,
+      phase: options.node.phase ?? null
+    }
+  }).catch(() => undefined);
+  if (promptTrace) {
+    await appendTraceWorkspaceSignal(options.repoPath, options.workspaceId, promptTrace, "prompt.sent").catch(() => undefined);
+  }
+  const responseTrace = await appendWorkItemTrace(options.repoPath, {
+    workspaceId: options.workspaceId,
+    workItemId,
+    cycleId,
+    workstreamId,
+    taskId,
+    runId: options.runId,
+    nodeId: options.node.id,
+    traceType: "provider_response",
+    ownerAgentId,
+    ownerAgentName,
+    ownerRole,
+    providerVendor: options.provider.vendor,
+    providerTransport: options.provider.transport,
+    providerModel: options.provider.model,
+    providerEffort: options.provider.effort ?? null,
+    promptCountDelta: 0,
+    exchangeCountDelta: 1,
+    summary: `${options.node.title} produced a provider response.`,
+    responseSummary: summarizeTraceText(options.response),
+    responseRaw: options.response,
+    outputSummary: summarizeTraceText(options.response),
+    workstreamTitle: options.node.title,
+    laneLabel: options.node.role,
+    payload: {
+      executor: options.node.executor,
+      phase: options.node.phase ?? null
+    }
+  }).catch(() => undefined);
+  if (responseTrace) {
+    await appendTraceWorkspaceSignal(options.repoPath, options.workspaceId, responseTrace, "response.received").catch(() => undefined);
+  }
+  if (options.usage || typeof options.estimatedCost === "number") {
+    const costTrace = await appendWorkItemTrace(options.repoPath, {
+      workspaceId: options.workspaceId,
+      workItemId,
+      cycleId,
+      workstreamId,
+      taskId,
+      runId: options.runId,
+      nodeId: options.node.id,
+      traceType: "cost_update",
+      ownerAgentId,
+      ownerAgentName,
+      ownerRole,
+      providerVendor: options.provider.vendor,
+      providerTransport: options.provider.transport,
+      providerModel: options.provider.model,
+      providerEffort: options.provider.effort ?? null,
+      promptCountDelta: 0,
+      exchangeCountDelta: 0,
+      inputTokens: options.usage?.prompt_tokens ?? null,
+      outputTokens: options.usage?.completion_tokens ?? null,
+      totalTokens: options.usage?.total_tokens ?? null,
+      estimatedCostUsd: typeof options.estimatedCost === "number"
+        ? Number(options.estimatedCost.toFixed(6))
+        : null,
+      summary: `${options.node.title} updated prompt cost and usage.`,
+      workstreamTitle: options.node.title,
+      laneLabel: options.node.role
+    }).catch(() => undefined);
+    if (costTrace) {
+      await appendTraceWorkspaceSignal(options.repoPath, options.workspaceId, costTrace, "cost.updated").catch(() => undefined);
+    }
+  }
+}
+
+function summarizeTraceText(text: string, maxLength = 220): string {
+  const singleLine = text.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= maxLength) return singleLine;
+  return `${singleLine.slice(0, maxLength - 3).trim()}...`;
+}
+
+async function appendTraceWorkspaceSignal(
+  repoPath: string,
+  workspaceId: string,
+  trace: {
+    id: string;
+    workItemId: string;
+    cycleId?: string | null;
+    workstreamId?: string | null;
+    workstreamTitle?: string | null;
+    laneLabel?: string | null;
+    ownerAgentId?: string | null;
+    ownerAgentName?: string | null;
+    assignmentToAgentId?: string | null;
+    assignmentToAgentName?: string | null;
+    providerModel?: string | null;
+    estimatedCostUsd?: number | null;
+    traceType: string;
+    summary: string;
+  },
+  type: string
+) {
+  await appendWorkspaceSignal(repoPath, {
+    workspaceId,
+    source: "work",
+    type,
+    entityId: trace.id,
+    status: "recorded",
+    summary: trace.summary,
+    payload: {
+      workItemId: trace.workItemId,
+      cycleId: trace.cycleId ?? null,
+      workstreamId: trace.workstreamId ?? null,
+      workstreamTitle: trace.workstreamTitle ?? null,
+      laneLabel: trace.laneLabel ?? null,
+      traceType: trace.traceType,
+      ownerAgentId: trace.ownerAgentId ?? null,
+      ownerAgentName: trace.ownerAgentName ?? null,
+      assignmentToAgentId: trace.assignmentToAgentId ?? null,
+      assignmentToAgentName: trace.assignmentToAgentName ?? null,
+      providerModel: trace.providerModel ?? null,
+      estimatedCostUsd: trace.estimatedCostUsd ?? null
+    }
+  });
 }
 
 async function finalizeMissionSignals(options: {
@@ -1879,6 +3084,71 @@ function resolveRoleModelOverride(role: string, modelOverrides?: Record<string, 
   if (!modelOverrides) return undefined;
   const normalizedRole = role.trim().toLowerCase();
   return modelOverrides[normalizedRole] ?? modelOverrides[normalizedRole.split(/[^a-z]+/)[0] ?? ""];
+}
+
+function resolveRoleEffortOverride(role: string, effortOverrides?: Record<string, string>): MissionNode["effort"] | undefined {
+  if (!effortOverrides) return undefined;
+  const normalizedRole = role.trim().toLowerCase();
+  const value = effortOverrides[normalizedRole] ?? effortOverrides[normalizedRole.split(/[^a-z]+/)[0] ?? ""];
+  if (!value) return undefined;
+  const normalizedValue = value.trim().toLowerCase();
+  return normalizedValue === "minimal"
+    || normalizedValue === "low"
+    || normalizedValue === "medium"
+    || normalizedValue === "high"
+    || normalizedValue === "max"
+    ? normalizedValue
+    : undefined;
+}
+
+function resolveMissionRoleModelOverrides(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  runtimeOverrides?: Record<string, string>
+): Record<string, string> | undefined {
+  const merged = new Map<string, string>();
+  const ingest = (source?: Record<string, string> | null) => {
+    if (!source) return;
+    for (const [key, value] of Object.entries(source)) {
+      const normalizedKey = key.trim().toLowerCase();
+      const normalizedValue = value.trim();
+      if (!normalizedKey || !normalizedValue) continue;
+      if (isLegacyProviderAlias(normalizedValue)) continue;
+      merged.set(normalizedKey, normalizedValue);
+    }
+  };
+  ingest(config?.models ?? undefined);
+  ingest(runtimeOverrides);
+  return merged.size > 0 ? Object.fromEntries(merged.entries()) : undefined;
+}
+
+function resolveMissionRoleEffortOverrides(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  runtimeOverrides?: Record<string, string>
+): Record<string, string> | undefined {
+  const merged = new Map<string, string>();
+  const ingest = (source?: Record<string, string> | null) => {
+    if (!source) return;
+    for (const [key, value] of Object.entries(source)) {
+      const normalizedKey = key.trim().toLowerCase();
+      const normalizedValue = resolveRoleEffortOverride(key, { [key]: value });
+      if (!normalizedKey || !normalizedValue) continue;
+      merged.set(normalizedKey, normalizedValue);
+    }
+  };
+  ingest(config?.efforts as Record<string, string> | undefined);
+  ingest(runtimeOverrides);
+  return merged.size > 0 ? Object.fromEntries(merged.entries()) : undefined;
+}
+
+function isLegacyProviderAlias(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "codex"
+    || normalized === "copilot"
+    || normalized === "claude"
+    || normalized === "cursor"
+    || normalized === "openai"
+    || normalized === "ollama"
+    || normalized === "llama.cpp";
 }
 
 function missionNodeEventType(status: MissionNode["status"]): string {

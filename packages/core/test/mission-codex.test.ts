@@ -45,6 +45,130 @@ test("codex CLI adapter runs non-interactively", async () => {
   assert.match(result.text, /codex execution complete/i);
 });
 
+test("codex CLI caches supported reasoning efforts and avoids repeating rejected effort", async () => {
+  const sandbox = await createMissionSandbox("mission-codex-cli-effort-cache");
+  const cli = await createMockCliSuite();
+  const artifactDir = path.join(sandbox.rootDir, "artifacts");
+  const argsLog = path.join(sandbox.rootDir, "codex-args.ndjson");
+  await fs.mkdir(artifactDir, { recursive: true });
+  const env = {
+    ...process.env,
+    ORCHESTRUM_CODEX_BIN: cli.codex,
+    MOCK_CODEX_AUTH: "1",
+    MOCK_CODEX_REJECT_EFFORT: "xhigh",
+    MOCK_CODEX_INCLUDE_RECEIVED_EFFORT: "1",
+    MOCK_CODEX_ARGS_LOG: argsLog
+  };
+
+  const first = await completeWithProvider({
+    vendor: "codex",
+    transport: "cli",
+    profileId: "codex-cli-balanced",
+    effort: "max",
+    auth: { kind: "cli" }
+  }, "Update the repository.", env, {
+    repoPath: sandbox.repoPath,
+    artifactDir,
+    role: "dev",
+    executor: "patch"
+  });
+
+  assert.equal(first.effort, "high");
+  const firstArgs = (await fs.readFile(argsLog, "utf8"))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as string[]);
+  assert.equal(firstArgs.length, 2);
+  assert.ok(firstArgs.some((args) => args.includes('model_reasoning_effort="xhigh"')));
+  assert.ok(firstArgs.some((args) => args.includes('reasoning.effort="xhigh"')));
+  assert.ok(firstArgs.some((args) => args.includes('model_reasoning_effort="high"')));
+  assert.ok(firstArgs.some((args) => args.includes('reasoning.effort="high"')));
+
+  const capabilityCachePath = path.join(sandbox.repoPath, ".orchestrum", "control", "provider-capabilities.json");
+  const capabilityCache = JSON.parse(await fs.readFile(capabilityCachePath, "utf8")) as {
+    effortSupport?: Array<{ vendor?: string; model?: string; supportedEfforts?: string[] }>;
+  };
+  const codexEntry = capabilityCache.effortSupport?.find((entry) => entry.vendor === "codex" && entry.model === "gpt-5");
+  assert.deepEqual(codexEntry?.supportedEfforts, ["minimal", "low", "medium", "high"]);
+
+  await fs.writeFile(argsLog, "", "utf8");
+  const second = await completeWithProvider({
+    vendor: "codex",
+    transport: "cli",
+    profileId: "codex-cli-balanced",
+    effort: "max",
+    auth: { kind: "cli" }
+  }, "Update the repository again.", env, {
+    repoPath: sandbox.repoPath,
+    artifactDir,
+    role: "dev",
+    executor: "patch"
+  });
+
+  assert.equal(second.effort, "high");
+  const secondArgs = (await fs.readFile(argsLog, "utf8"))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as string[]);
+  assert.equal(secondArgs.length, 1);
+  assert.ok(secondArgs[0]?.includes('model_reasoning_effort="high"'));
+  assert.ok(secondArgs[0]?.includes('reasoning.effort="high"'));
+  assert.ok(!secondArgs[0]?.includes('reasoning.effort="xhigh"'));
+});
+
+test("audit repo context ignores generated cache directories", async () => {
+  const sandbox = await createMissionSandbox("mission-audit-context-ignore");
+  const cli = await createMockCliSuite();
+  await fs.mkdir(path.join(sandbox.repoPath, ".mypy_cache", "3.12"), { recursive: true });
+  await fs.mkdir(path.join(sandbox.repoPath, "artifacts"), { recursive: true });
+  await fs.writeFile(path.join(sandbox.repoPath, ".mypy_cache", "3.12", "cache.data.json"), "{\"noise\":true}\n", "utf8");
+  await fs.writeFile(path.join(sandbox.repoPath, "artifacts", "report.json"), "{\"artifact\":true}\n", "utf8");
+  await fs.writeFile(path.join(sandbox.repoPath, "src", "service.ts"), "export const service = true;\n", "utf8");
+  const originalEnv = {
+    ORCHESTRUM_CLAUDE_BIN: process.env.ORCHESTRUM_CLAUDE_BIN,
+    MOCK_CLAUDE_AUTH: process.env.MOCK_CLAUDE_AUTH
+  };
+  process.env.ORCHESTRUM_CLAUDE_BIN = cli.claude;
+  process.env.MOCK_CLAUDE_AUTH = "1";
+
+  try {
+    const result = await runMissionDetailed({
+      templateId: "audit-only",
+      repoPath: sandbox.repoPath,
+      runsDir: sandbox.runsDir,
+      workspaceId: "demo",
+      goal: "Audit the repo context without generated cache noise.",
+      agents: [
+        {
+          id: "audit-claude",
+          name: "audit claude",
+          role: "audit",
+          provider: {
+            vendor: "claude",
+            transport: "cli",
+            profileId: "claude-cli-sonnet",
+            auth: { kind: "cli" }
+          },
+          capabilities: {
+            fs: true,
+            network: true,
+            shell: false
+          }
+        }
+      ]
+    });
+
+    assert.equal(result.ok, true);
+    const prompt = await fs.readFile(path.join(result.runDir, "nodes", "audit", "prompt.md"), "utf8");
+    assert.doesNotMatch(prompt, /\.mypy_cache/);
+    assert.doesNotMatch(prompt, /artifacts\/report\.json/);
+    assert.match(prompt, /src\/service\.ts/);
+  } finally {
+    process.env.ORCHESTRUM_CLAUDE_BIN = originalEnv.ORCHESTRUM_CLAUDE_BIN;
+    process.env.MOCK_CLAUDE_AUTH = originalEnv.MOCK_CLAUDE_AUTH;
+  }
+});
+
 test("feature-dev mission completes with OpenAI-backed agents", async () => {
   const sandbox = await createMissionSandbox("mission-openai");
   await enablePassingValidationScripts(sandbox.repoPath);

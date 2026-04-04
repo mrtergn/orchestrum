@@ -53,6 +53,47 @@ export type UpdateQuery = {
   allowPrerelease?: boolean;
 };
 
+export type UpdateInstallJournalStatus = "installing" | "completed" | "rolled_back";
+
+export type UpdateInstallJournal = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  status: UpdateInstallJournalStatus;
+  targetDir: string;
+  archivePath: string;
+  downloaded: boolean;
+  impactedFiles: Array<{
+    relativePath: string;
+    existedBeforeInstall: boolean;
+    backupPath?: string | null;
+  }>;
+  backupDir: string;
+  stagedSourceDir: string;
+  failureReason?: string;
+};
+
+export type InstallUpdateResult = {
+  ok: boolean;
+  updatedFiles: number;
+  archivePath: string;
+  downloaded: boolean;
+  journalPath: string;
+  rollbackAvailable: boolean;
+  rolledBack: boolean;
+};
+
+export type RollbackUpdateResult = {
+  ok: boolean;
+  journalPath: string;
+  restoredFiles: number;
+  removedFiles: number;
+};
+
+export type UpdateInstallJournalRecord = UpdateInstallJournal & {
+  journalPath: string;
+};
+
 const DEFAULT_CHANNEL: VersionInfo["channel"] = "stable";
 const DEFAULT_UPDATE_REPO = process.env.ORCHESTRUM_UPDATE_REPO ?? "mrtergn/orchestrum";
 
@@ -140,7 +181,8 @@ export async function installUpdate(options: {
   expectedSha256?: string;
   assetName?: string;
   targetDir: string;
-}): Promise<{ ok: boolean; updatedFiles: number; archivePath: string; downloaded: boolean }> {
+  verify?: (targetDir: string) => Promise<void> | void;
+}): Promise<InstallUpdateResult> {
   let archivePath = options.archivePath ? path.resolve(options.archivePath) : "";
   const targetDir = path.resolve(options.targetDir);
 
@@ -177,13 +219,89 @@ export async function installUpdate(options: {
 
   const sourceRoot = await resolveArchiveRoot(tempDir);
   const files = await collectFiles(sourceRoot);
-  for (const file of files) {
-    const rel = path.relative(sourceRoot, file);
-    const dest = path.join(targetDir, rel);
-    await ensureDir(path.dirname(dest));
-    await fs.copyFile(file, dest);
+  const session = await createInstallSession({
+    archivePath,
+    downloaded: !options.archivePath,
+    sourceRoot,
+    targetDir,
+    files
+  });
+
+  try {
+    for (const file of files) {
+      const rel = path.relative(sourceRoot, file);
+      const dest = path.join(targetDir, rel);
+      await ensureDir(path.dirname(dest));
+      await fs.copyFile(file, dest);
+    }
+
+    await verifyInstalledFiles(targetDir, session.journal.impactedFiles.map((entry) => entry.relativePath));
+    await options.verify?.(targetDir);
+    await finalizeInstallJournal(session.journalPath, session.journal, "completed");
+    return {
+      ok: true,
+      updatedFiles: files.length,
+      archivePath,
+      downloaded: !options.archivePath,
+      journalPath: session.journalPath,
+      rollbackAvailable: true,
+      rolledBack: false
+    };
+  } catch (error) {
+    const failureReason = error instanceof Error ? error.message : String(error);
+    await rollbackJournal(session.journal, failureReason);
+    await finalizeInstallJournal(session.journalPath, session.journal, "rolled_back", failureReason);
+    throw new Error(`Update install failed and rollback completed: ${failureReason}`);
   }
-  return { ok: true, updatedFiles: files.length, archivePath, downloaded: !options.archivePath };
+}
+
+export async function rollbackUpdate(options: {
+  journalPath: string;
+}): Promise<RollbackUpdateResult> {
+  const journalPath = path.resolve(options.journalPath);
+  const raw = await fs.readFile(journalPath, "utf8");
+  const journal = JSON.parse(raw) as UpdateInstallJournal;
+  const restored = await rollbackJournal(journal, "manual rollback");
+  await finalizeInstallJournal(journalPath, journal, "rolled_back", "manual rollback");
+  return {
+    ok: true,
+    journalPath,
+    restoredFiles: restored.restoredFiles,
+    removedFiles: restored.removedFiles
+  };
+}
+
+export async function listUpdateInstallJournals(options: {
+  limit?: number;
+} = {}): Promise<UpdateInstallJournalRecord[]> {
+  const installsRoot = path.join(getAppHome(), "updates", "installs");
+  const entries = await fs.readdir(installsRoot, { withFileTypes: true }).catch(() => []);
+  const records: UpdateInstallJournalRecord[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const journalPath = path.join(installsRoot, entry.name, "journal.json");
+    const raw = await fs.readFile(journalPath, "utf8").catch(() => "");
+    if (!raw) continue;
+    try {
+      const journal = JSON.parse(raw) as UpdateInstallJournal;
+      records.push({
+        ...journal,
+        journalPath
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  records.sort((a, b) => {
+    const aTime = Date.parse(a.updatedAt || a.createdAt || "");
+    const bTime = Date.parse(b.updatedAt || b.createdAt || "");
+    return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+  });
+
+  const limit = Math.max(1, options.limit ?? 10);
+  return records.slice(0, limit);
 }
 
 export function selectUpdateAsset(
@@ -311,6 +429,117 @@ async function collectFiles(root: string): Promise<string[]> {
   };
   await walk(root);
   return results;
+}
+
+async function createInstallSession(options: {
+  archivePath: string;
+  downloaded: boolean;
+  sourceRoot: string;
+  targetDir: string;
+  files: string[];
+}): Promise<{ journalPath: string; journal: UpdateInstallJournal }> {
+  const installsRoot = path.join(getAppHome(), "updates", "installs");
+  const sessionId = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
+  const sessionDir = path.join(installsRoot, sessionId);
+  const backupDir = path.join(sessionDir, "backup");
+  await ensureDir(backupDir);
+
+  const impactedFiles: UpdateInstallJournal["impactedFiles"] = [];
+  for (const file of options.files) {
+    const relativePath = path.relative(options.sourceRoot, file);
+    const targetPath = path.join(options.targetDir, relativePath);
+    const existedBeforeInstall = fsSync.existsSync(targetPath);
+    let backupPath: string | null = null;
+    if (existedBeforeInstall) {
+      backupPath = path.join(backupDir, relativePath);
+      await ensureDir(path.dirname(backupPath));
+      await fs.copyFile(targetPath, backupPath);
+    }
+    impactedFiles.push({
+      relativePath,
+      existedBeforeInstall,
+      backupPath
+    });
+  }
+
+  const now = new Date().toISOString();
+  const journal: UpdateInstallJournal = {
+    id: sessionId,
+    createdAt: now,
+    updatedAt: now,
+    status: "installing",
+    targetDir: options.targetDir,
+    archivePath: options.archivePath,
+    downloaded: options.downloaded,
+    impactedFiles,
+    backupDir,
+    stagedSourceDir: options.sourceRoot
+  };
+  const journalPath = path.join(sessionDir, "journal.json");
+  await fs.writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  return { journalPath, journal };
+}
+
+async function verifyInstalledFiles(targetDir: string, relativePaths: string[]): Promise<void> {
+  const sample = relativePaths.slice(0, 12);
+  for (const relativePath of sample) {
+    const fullPath = path.join(targetDir, relativePath);
+    await fs.access(fullPath);
+  }
+}
+
+async function finalizeInstallJournal(
+  journalPath: string,
+  journal: UpdateInstallJournal,
+  status: UpdateInstallJournalStatus,
+  failureReason?: string
+): Promise<void> {
+  const nextJournal: UpdateInstallJournal = {
+    ...journal,
+    status,
+    updatedAt: new Date().toISOString(),
+    failureReason: failureReason ?? journal.failureReason
+  };
+  Object.assign(journal, nextJournal);
+  await fs.writeFile(journalPath, `${JSON.stringify(nextJournal, null, 2)}\n`, "utf8");
+}
+
+async function rollbackJournal(
+  journal: UpdateInstallJournal,
+  failureReason?: string
+): Promise<{ restoredFiles: number; removedFiles: number }> {
+  let restoredFiles = 0;
+  let removedFiles = 0;
+  for (const entry of [...journal.impactedFiles].reverse()) {
+    const targetPath = path.join(journal.targetDir, entry.relativePath);
+    if (entry.existedBeforeInstall) {
+      if (!entry.backupPath) {
+        throw new Error(`Rollback metadata missing for ${entry.relativePath}.`);
+      }
+      await ensureDir(path.dirname(targetPath));
+      await fs.copyFile(entry.backupPath, targetPath);
+      restoredFiles += 1;
+      continue;
+    }
+    if (fsSync.existsSync(targetPath)) {
+      await fs.rm(targetPath, { force: true });
+      removedFiles += 1;
+      await removeEmptyParentDirs(path.dirname(targetPath), journal.targetDir);
+    }
+  }
+  journal.failureReason = failureReason ?? journal.failureReason;
+  return { restoredFiles, removedFiles };
+}
+
+async function removeEmptyParentDirs(dir: string, stopAt: string): Promise<void> {
+  const resolvedStop = path.resolve(stopAt);
+  let current = path.resolve(dir);
+  while (current.startsWith(resolvedStop) && current !== resolvedStop) {
+    const entries = await fs.readdir(current).catch(() => []);
+    if (entries.length > 0) return;
+    await fs.rmdir(current).catch(() => undefined);
+    current = path.dirname(current);
+  }
 }
 
 function normalizeGitHubRelease(release: any, requestedChannel: VersionInfo["channel"]): VersionInfo {

@@ -8,6 +8,7 @@ export type PatchConflictArtifactBundle = {
   gitStatusPath: string;
   conflictsPath: string;
   summaryPath: string;
+  recoveryGuidePath: string;
 };
 
 export class PatchApplyError extends Error {
@@ -73,26 +74,68 @@ export async function applyPatch(repoPath: string, diffText: string): Promise<vo
   if (dirty.code !== 0) {
     throw new PatchApplyError(`git status failed: ${dirty.stderr.trim()}`, "apply_failed");
   }
+  const artifactsDir = path.join(repoPath, ".orchestrum", "patch-conflicts");
+  await fs.mkdir(artifactsDir, { recursive: true });
+  const patchPath = path.join(artifactsDir, "apply.patch");
+  const gitStatusPath = path.join(artifactsDir, "git-status.txt");
+  const conflictsPath = path.join(artifactsDir, "conflicts.json");
+  const summaryPath = path.join(artifactsDir, "conflict-summary.md");
+  const recoveryGuidePath = path.join(artifactsDir, "recovery-guide.md");
+  const normalizedDiffText = normalizeDiffForGitApply(diffText);
+  await writeText(patchPath, normalizedDiffText);
+
   const dirtyEntries = parseDirtyEntries(dirty.stdout).filter((entry) => !isInternalDirtyPath(entry.path));
   const patchedPaths = extractPatchedPaths(diffText);
   const hasConflict = dirtyEntries.some((entry) => MERGE_CONFLICT_CODES.has(entry.code));
+  const overlappingPaths = dirtyEntries
+    .filter((entry) => {
+      if (patchedPaths.size === 0) return true;
+      if (patchedPaths.has(entry.path)) return true;
+      return entry.originalPath ? patchedPaths.has(entry.originalPath) : false;
+    })
+    .map((entry) => entry.originalPath ? `${entry.originalPath} -> ${entry.path}` : entry.path);
   const overlapsPatchedPath = dirtyEntries.some((entry) => {
     if (patchedPaths.size === 0) return true;
     if (patchedPaths.has(entry.path)) return true;
     return entry.originalPath ? patchedPaths.has(entry.originalPath) : false;
   });
   if (hasConflict || overlapsPatchedPath) {
+    await writeText(gitStatusPath, dirty.stdout.trim());
+    await writeText(conflictsPath, JSON.stringify({
+      reason: "dirty_tree",
+      patchedPaths: Array.from(patchedPaths),
+      dirtyEntries,
+      overlappingPaths,
+      hasMergeConflicts: hasConflict
+    }, null, 2));
+    await writeText(summaryPath, [
+      "# Patch Apply Blocked",
+      "",
+      "Patch apply stopped before execution because the repository already contains conflicting local state.",
+      "",
+      `- overlapping paths: ${overlappingPaths.join(", ") || "none detected"}`,
+      `- merge conflicts present: ${hasConflict ? "yes" : "no"}`
+    ].join("\n"));
+    await writeText(recoveryGuidePath, [
+      "# Recovery Guide",
+      "",
+      "1. Inspect `git-status.txt` and `conflicts.json` to see which files already changed locally.",
+      "2. Commit, stash, discard, or manually resolve the overlapping files outside `.orchestrum`.",
+      "3. Re-run the blocked step or resume the work item after the repository is clean enough to accept the patch.",
+      "4. Keep `apply.patch` as the source diff if you need to apply it manually."
+    ].join("\n"));
     throw new PatchApplyError(
       "Patch apply blocked because the repository has overlapping uncommitted changes or merge conflicts. Commit, stash, or clean the affected files first.",
-      "dirty_tree"
+      "dirty_tree",
+      {
+        patchPath,
+        gitStatusPath,
+        conflictsPath,
+        summaryPath,
+        recoveryGuidePath
+      }
     );
   }
-
-  const artifactsDir = path.join(repoPath, ".orchestrum", "patch-conflicts");
-  await fs.mkdir(artifactsDir, { recursive: true });
-  const patchPath = path.join(artifactsDir, "apply.patch");
-  const normalizedDiffText = normalizeDiffForGitApply(diffText);
-  await writeText(patchPath, normalizedDiffText);
 
   const gitApply = await run("git", ["apply", "--3way", "--whitespace=fix", patchPath], repoPath);
   if (gitApply.code === 0) {
@@ -101,9 +144,6 @@ export async function applyPatch(repoPath: string, diffText: string): Promise<vo
 
   const status = await run("git", ["status", "--short"], repoPath);
   const conflicts = await run("git", ["diff", "--name-only", "--diff-filter=U"], repoPath);
-  const gitStatusPath = path.join(artifactsDir, "git-status.txt");
-  const conflictsPath = path.join(artifactsDir, "conflicts.json");
-  const summaryPath = path.join(artifactsDir, "conflict-summary.md");
   await writeText(gitStatusPath, `${status.stdout}${status.stderr}`.trim());
   await writeText(conflictsPath, JSON.stringify({
     conflictedFiles: conflicts.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
@@ -118,6 +158,14 @@ export async function applyPatch(repoPath: string, diffText: string): Promise<vo
     `- stderr: ${gitApply.stderr.trim() || "n/a"}`,
     `- conflicted files: ${conflicts.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(", ") || "none detected"}`
   ].join("\n"));
+  await writeText(recoveryGuidePath, [
+    "# Recovery Guide",
+    "",
+    "1. Inspect `conflict-summary.md` and `conflicts.json` for the exact conflict set.",
+    "2. Resolve the conflicted files in the repository and make sure `git status` no longer shows merge conflicts.",
+    "3. Retry the blocked step or resume the run once the repository can accept the patch cleanly.",
+    "4. Use `apply.patch` if you need to inspect or re-apply the original diff manually."
+  ].join("\n"));
   throw new PatchApplyError(
     `Patch apply failed after 3-way merge attempt: ${gitApply.stderr.trim() || gitApply.stdout.trim() || "unknown error"}`,
     "apply_failed",
@@ -125,7 +173,8 @@ export async function applyPatch(repoPath: string, diffText: string): Promise<vo
       patchPath,
       gitStatusPath,
       conflictsPath,
-      summaryPath
+      summaryPath,
+      recoveryGuidePath
     }
   );
 }
@@ -223,6 +272,14 @@ export async function gitDiff(repoPath: string): Promise<string> {
   const result = await run("git", ["diff"], repoPath);
   if (result.code !== 0) {
     throw new Error(`git diff failed: ${result.stderr.trim()}`);
+  }
+  return result.stdout;
+}
+
+export async function gitDiffStat(repoPath: string): Promise<string> {
+  const result = await run("git", ["diff", "--stat"], repoPath);
+  if (result.code !== 0) {
+    throw new Error(`git diff --stat failed: ${result.stderr.trim()}`);
   }
   return result.stdout;
 }

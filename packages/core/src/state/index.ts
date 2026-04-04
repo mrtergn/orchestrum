@@ -22,6 +22,7 @@ import {
   shouldReplaceLatestImport,
   toDeliverySummaryLatestImport
 } from "../delivery/sessionState.js";
+import type { RunRecoveryState } from "../runner/types.js";
 
 type SqlJsDatabase = any;
 type SqlJsModule = {
@@ -50,6 +51,8 @@ export type IndexedRunRecord = {
   changeStatus: string | null;
   validationStatus: string | null;
   verdict: string | null;
+  error: string | null;
+  recovery: RunRecoveryState | null;
 };
 
 export type IndexedDeliverySessionRecord = {
@@ -142,7 +145,7 @@ export class StateIndex {
     for (const workspace of workspaces) {
       const db = await this.ensureWorkspaceDb(workspace);
       const statement = db.prepare(
-        "SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict FROM runs WHERE workspace_id = ? ORDER BY start DESC"
+        "SELECT workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict, error, recovery FROM runs WHERE workspace_id = ? ORDER BY start DESC"
       );
       statement.bind([workspace.id]);
       while (statement.step()) {
@@ -160,7 +163,9 @@ export class StateIndex {
           pauseReason: row.pause_reason == null ? null : String(row.pause_reason),
           changeStatus: row.change_status == null ? null : String(row.change_status),
           validationStatus: row.validation_status == null ? null : String(row.validation_status),
-          verdict: row.verdict == null ? null : String(row.verdict)
+          verdict: row.verdict == null ? null : String(row.verdict),
+          error: row.error == null ? null : String(row.error),
+          recovery: parseJsonObject<RunRecoveryState>(row.recovery)
         });
       }
       statement.free();
@@ -323,7 +328,7 @@ export class StateIndex {
       const runMeta = await readJsonIfExists<any>(path.join(record.runDir, "run.json"));
       if (!runMeta) continue;
       db.run(
-        "INSERT OR REPLACE INTO runs (workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO runs (workspace_id, run_id, kind, status, start, end, repo_path, readiness_score, readiness_blocking, pause_reason, change_status, validation_status, verdict, error, recovery) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           record.workspaceId,
           runMeta.runId ?? record.runId,
@@ -337,7 +342,9 @@ export class StateIndex {
           runMeta.pauseReason ?? null,
           runMeta.change?.status ?? null,
           runMeta.validation?.status ?? null,
-          runMeta.verdict ?? null
+          runMeta.verdict ?? null,
+          typeof runMeta.error === "string" ? runMeta.error : null,
+          runMeta.recovery ? JSON.stringify(runMeta.recovery) : null
         ]
       );
 
@@ -463,6 +470,8 @@ export class StateIndex {
         change_status TEXT,
         validation_status TEXT,
         verdict TEXT,
+        error TEXT,
+        recovery TEXT,
         PRIMARY KEY (workspace_id, run_id)
       );
     `);
@@ -470,7 +479,9 @@ export class StateIndex {
       "ALTER TABLE runs ADD COLUMN pause_reason TEXT",
       "ALTER TABLE runs ADD COLUMN change_status TEXT",
       "ALTER TABLE runs ADD COLUMN validation_status TEXT",
-      "ALTER TABLE runs ADD COLUMN verdict TEXT"
+      "ALTER TABLE runs ADD COLUMN verdict TEXT",
+      "ALTER TABLE runs ADD COLUMN error TEXT",
+      "ALTER TABLE runs ADD COLUMN recovery TEXT"
     ]) {
       try {
         db.run(column);

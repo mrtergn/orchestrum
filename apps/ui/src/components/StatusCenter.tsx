@@ -65,12 +65,6 @@ export function StatusCenter() {
     staleTime: 5000
   });
 
-  const { data: orgData } = useQuery({
-    queryKey: ["org"],
-    queryFn: () => fetchJson<{ nodes?: unknown[] }>("/api/org"),
-    staleTime: 5000
-  });
-
   const { data: tasksData } = useQuery({
     queryKey: ["tasks"],
     queryFn: () => fetchJson<{ tasks?: PlatformTaskSummary[] }>("/api/tasks"),
@@ -92,7 +86,6 @@ export function StatusCenter() {
     void queryClient.invalidateQueries({ queryKey: ["runs"] });
     void queryClient.invalidateQueries({ queryKey: ["tasks"] });
     void queryClient.invalidateQueries({ queryKey: ["agents"] });
-    void queryClient.invalidateQueries({ queryKey: ["org"] });
     void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
   }, [queryClient]);
 
@@ -120,7 +113,6 @@ export function StatusCenter() {
   const hasProviderKey = Boolean(secretsData?.keys?.OPENAI_API_KEY || secretsData?.keys?.ANTHROPIC_API_KEY);
   const agentCount = agents.length;
   const workspaceCount = workspaces.length;
-  const orgNodeCount = Array.isArray(orgData?.nodes) ? orgData.nodes.length : 0;
   const tasks = Array.isArray(tasksData?.tasks) ? tasksData.tasks : [];
   const latestPlatformFailure = tasks.find((task) => task.status === "failed" && typeof task.resultSummary === "string" && task.resultSummary.trim());
   const platformError = latestPlatformFailure?.resultSummary?.trim() ?? "";
@@ -134,7 +126,7 @@ export function StatusCenter() {
     record.transports.some((transport) => transport.available && (transport.transport === "cli" || transport.transport === "local_http"))
   );
   const isFreshSetup = !onboardingSkipped && workspaceCount === 0 && agentCount === 0;
-  const coreSetupReady = workspaceCount > 0 && hasAnyConfiguredProvider && agentCount > 0;
+  const coreSetupReady = workspaceCount > 0 && hasAnyConfiguredProvider;
   const isHome = pathname === "/";
 
   const selectedWorkspace = useMemo(
@@ -147,11 +139,7 @@ export function StatusCenter() {
     const providerSettingsHref = selectedWorkspaceId
       ? `/settings?tab=Providers&scope=workspace&workspace=${encodeURIComponent(selectedWorkspaceId)}`
       : "/settings?tab=Providers&scope=workspace";
-    const createAgentHref = selectedWorkspaceId
-      ? `/agents?intent=create&preset=fullstack&workspace=${encodeURIComponent(selectedWorkspaceId)}`
-      : "/agents?intent=create&preset=fullstack";
-
-    if (!isFreshSetup && !isHome && providerDiscoveryReady && !hasAnyConfiguredProvider) {
+    if (!isFreshSetup && providerDiscoveryReady && !hasAnyConfiguredProvider) {
       list.push({
         id: "missing-provider-key",
         tone: hasAnyLocalProvider ? "info" : "warning",
@@ -162,24 +150,6 @@ export function StatusCenter() {
         actionHref: providerSettingsHref
       });
     }
-    if (!isHome && agentCount === 0 && workspaceCount > 0) {
-      list.push({
-        id: "no-agents",
-        tone: "info",
-        message: "No specialists registered yet. Create your first specialist in the team registry.",
-        actionLabel: "Open Specialists",
-        actionHref: createAgentHref
-      });
-    }
-    if (!isHome && coreSetupReady && orgNodeCount === 0) {
-      list.push({
-        id: "no-org",
-        tone: "info",
-        message: "Org structure is optional coordination metadata. Mission execution works without it.",
-        actionLabel: "Open Org",
-        actionHref: "/org"
-      });
-    }
     if (selectedWorkspace && selectedWorkspace.validation && selectedWorkspace.status === "invalid") {
       list.push({
         id: "invalid-workspace",
@@ -187,15 +157,6 @@ export function StatusCenter() {
         message: selectedWorkspace.validation.error ?? "Selected workspace path is invalid or unreadable.",
         actionLabel: "Fix Workspace",
         actionHref: "/workspaces"
-      });
-    }
-    if (onboardingSkipped && !isHome) {
-      list.push({
-        id: "onboarding-skipped",
-        tone: "info",
-        message: "Onboarding was skipped. You can reopen it from Help.",
-        actionLabel: "Open Help",
-        actionHref: "/help"
       });
     }
     const lowerError = platformError.toLowerCase();
@@ -212,25 +173,19 @@ export function StatusCenter() {
         id: "patch-error",
         tone: "danger",
         message: `Patch apply error: ${platformError}`,
-        actionLabel: "Open Tasks",
-        actionHref: "/tasks"
+        actionLabel: "Open Runs",
+        actionHref: "/runs"
       });
     }
     return list;
   }, [
-    agentCount,
-    coreSetupReady,
     hasAnyConfiguredProvider,
     hasAnyLocalProvider,
     isFreshSetup,
-    isHome,
-    onboardingSkipped,
-    orgNodeCount,
     platformError,
     providerDiscoveryReady,
     selectedWorkspace,
-    selectedWorkspaceId,
-    workspaceCount
+    selectedWorkspaceId
   ]);
 
   const runToastAction = async (toast: AppToast) => {

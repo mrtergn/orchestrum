@@ -2,105 +2,22 @@
   "name": "@orchestrum/desktop",
   "version": "0.4.0",
   "private": true,
-  "description": "Desktop preview shell for the local-first Orchestrum control plane.",
+  "description": "Desktop operator shell for Orchestrum. Preview until signing and hardening are enabled.",
   "author": "Murat Ergin",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
     "dev": "electron .",
-    "build": "electron-builder --dir",
-    "dist": "electron-builder --publish never",
-    "dist:mac": "electron-builder --mac dmg zip --publish never",
-    "dist:linux": "electron-builder --linux AppImage tar.gz --publish never",
-    "dist:win": "electron-builder --win nsis zip --publish never"
+    "prepare-bundle": "node scripts/prepare-bundle.mjs",
+    "smoke:packaged": "node scripts/packaged-smoke.mjs",
+    "build": "npm run prepare-bundle && electron-builder --dir --config electron-builder.config.cjs",
+    "dist": "npm run prepare-bundle && electron-builder --publish never --config electron-builder.config.cjs",
+    "dist:mac": "npm run prepare-bundle && electron-builder --mac dmg zip --publish never --config electron-builder.config.cjs",
+    "dist:linux": "npm run prepare-bundle && electron-builder --linux AppImage tar.gz --publish never --config electron-builder.config.cjs",
+    "dist:win": "npm run prepare-bundle && electron-builder --win nsis zip --publish never --config electron-builder.config.cjs"
   },
   "devDependencies": {
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
-  },
-  "build": {
-    "appId": "local.orchestrum.desktop",
-    "productName": "Orchestrum",
-    "artifactName": "orchestrum-${version}-${os}-${arch}.${ext}",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "main.js",
-      "preload.js"
-    ],
-    "extraResources": [
-      {
-        "from": "../ui/.next/standalone",
-        "to": "bundle/ui",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "../ui/.next/static",
-        "to": "bundle/ui/.next/static",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "../ui/public",
-        "to": "bundle/ui/public",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "../../packages/service",
-        "to": "bundle/service",
-        "filter": [
-          "dist/**/*",
-          "package.json",
-          "node_modules/**/*"
-        ]
-      },
-      {
-        "from": "../../packages/core",
-        "to": "bundle/core",
-        "filter": [
-          "src/**/*",
-          "package.json",
-          "node_modules/**/*"
-        ]
-      },
-      {
-        "from": "../..",
-        "to": "bundle",
-        "filter": [
-          "version.json",
-          "CHANGELOG.md",
-          "LICENSE",
-          "EULA.md"
-        ]
-      }
-    ],
-    "asar": true,
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "identity": null,
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "tar.gz"
-      ]
-    },
-    "win": {
-      "target": [
-        "nsis",
-        "zip"
-      ]
-    }
   }
 }

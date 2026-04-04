@@ -35,6 +35,18 @@ export function getWorkspaceLearningsPath(repoPath: string): string {
   return path.join(getWorkspaceControlDir(repoPath), "learnings.ndjson");
 }
 
+export function getWorkspaceTracesRoot(repoPath: string): string {
+  return path.join(getWorkspaceControlDir(repoPath), "traces");
+}
+
+export function getWorkspaceProviderCapabilitiesPath(repoPath: string): string {
+  return path.join(getWorkspaceControlDir(repoPath), "provider-capabilities.json");
+}
+
+export function getWorkItemTracesRoot(repoPath: string, workItemId: string): string {
+  return path.join(getWorkspaceTracesRoot(repoPath), workItemId);
+}
+
 export function getWorkspacePluginsDir(repoPath: string): string {
   return path.join(getWorkspaceControlDir(repoPath), "plugins");
 }

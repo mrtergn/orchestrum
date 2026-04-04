@@ -4,8 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import type { DeliverySummary, LearningEntry, ReleaseReadiness } from "@orchestrum/core";
 import { useAppUi } from "@/components/AppUiProvider";
 import { toolLabel } from "@/lib/delivery";
+import {
+  EmptyState,
+  MetricStrip,
+  NoticePanel,
+  PageHeader,
+  SegmentedTabs,
+  SurfacePanel
+} from "@/components/ui/PagePrimitives";
 
-/* ---------- types ---------- */
 type AnalyticsData = {
   runs: number;
   successes: number;
@@ -28,24 +35,29 @@ type AnalyticsData = {
   modelUsage: Record<string, number>;
 };
 
-/* ---------- page ---------- */
+type MetricsView = "overview" | "inspect";
+
 export default function MetricsPage() {
   const { selectedWorkspaceId: workspaceId } = useAppUi();
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [learnings, setLearnings] = useState<LearningEntry[]>([]);
   const [readiness, setReadiness] = useState<ReleaseReadiness | null>(null);
   const [deliverySummary, setDeliverySummary] = useState<DeliverySummary | null>(null);
+  const [view, setView] = useState<MetricsView>("overview");
 
   useEffect(() => {
     const load = async () => {
-      if (!workspaceId) { setAnalytics(null); return; }
+      if (!workspaceId) {
+        setAnalytics(null);
+        return;
+      }
       const res = await fetch(`/api/analytics?workspace=${encodeURIComponent(workspaceId)}`);
       if (res.ok) {
         const data = await res.json();
         setAnalytics(normalizeAnalytics(data.analytics ?? data));
       }
     };
-    load();
+    void load();
   }, [workspaceId]);
 
   useEffect(() => {
@@ -75,15 +87,8 @@ export default function MetricsPage() {
     void load();
   }, [workspaceId]);
 
-  const successRate = analytics
-    ? analytics.runs === 0 ? 0 : Math.round((analytics.successes / analytics.runs) * 100)
-    : 0;
-
-  const modelUsageList = useMemo(
-    () => Object.entries(analytics?.modelUsage ?? {}).sort((a, b) => b[1] - a[1]),
-    [analytics?.modelUsage]
-  );
-  const modelMax = useMemo(() => Math.max(...modelUsageList.map(([, c]) => c), 1), [modelUsageList]);
+  const successRate = analytics ? (analytics.runs === 0 ? 0 : Math.round((analytics.successes / analytics.runs) * 100)) : 0;
+  const modelUsageList = useMemo(() => Object.entries(analytics?.modelUsage ?? {}).sort((a, b) => b[1] - a[1]), [analytics?.modelUsage]);
   const deliveryResolution = useMemo(() => {
     if (!deliverySummary) return null;
     const total = deliverySummary.openFindings + deliverySummary.resolvedFindings;
@@ -91,281 +96,241 @@ export default function MetricsPage() {
     return Math.round((deliverySummary.resolvedFindings / total) * 100);
   }, [deliverySummary]);
 
-  const failureMax = analytics
-    ? Math.max(to(analytics.failureTypes?.policy), to(analytics.failureTypes?.audit), to(analytics.failureTypes?.test), to(analytics.failureTypes?.security), 1)
-    : 1;
+  const nextSignal = useMemo(() => {
+    if (!workspaceId) return "Select a workspace to see its current signals.";
+    if (!analytics) return "Run a mission, work item, or browser pass to populate workspace signals.";
+    if ((readiness?.blocking?.length ?? 0) > 0) return "Readiness is blocked. Review the blocking signals before trusting the workspace state.";
+    if ((deliverySummary?.openFindings ?? 0) > 0) return "Delivery still has open findings. Review those before treating the workspace as stable.";
+    return "Workspace signals look healthy. Use Inspect only if you need historical charts or model breakdowns.";
+  }, [analytics, deliverySummary?.openFindings, readiness?.blocking, workspaceId]);
 
   return (
-    <main className="space-y-6">
-      {/* Header */}
-      <section className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-semibold text-white">Metrics</h2>
-          <p className="text-sm text-slate-400">Analytics, trends, and performance signals.</p>
-        </div>
-        {workspaceId && (
-          <span className="rounded-full border border-slate-700 bg-slate-900/60 px-3 py-1 text-[10px] text-slate-500">
-            {workspaceId}
-          </span>
-        )}
-      </section>
+    <main className="page-shell">
+      <PageHeader
+        eyebrow="Signals"
+        title="Workspace signals, not an analytics wall"
+        description="This page is for operator-level signal reading: readiness, learnings, delivery state, and basic run health. Deep charts remain available in Inspect."
+        actions={
+          <SegmentedTabs
+            value={view}
+            onChange={setView}
+            options={[
+              { value: "overview", label: "Overview" },
+              { value: "inspect", label: "Inspect" }
+            ]}
+          />
+        }
+      />
 
-      {/* Empty states */}
-      {!workspaceId && (
-        <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 text-2xl text-slate-500">◈</div>
-          <h3 className="mt-3 text-base font-semibold text-white">No workspace selected</h3>
-          <p className="mt-1 text-sm text-slate-400">Select a workspace from the sidebar to view metrics.</p>
-        </section>
-      )}
-
-      {workspaceId && !analytics && (
-        <section className="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-500/20 to-amber-500/5 text-2xl text-amber-400">▤</div>
-          <h3 className="mt-3 text-base font-semibold text-white">No analytics yet</h3>
-          <p className="mt-1 text-sm text-slate-400">Run a mission, delivery session, or QA pass to populate metrics.</p>
-        </section>
-      )}
-
-      {analytics && (
+      {!workspaceId ? (
+        <EmptyState
+          icon="▤"
+          title="No workspace selected"
+          description="Select a workspace from the sidebar to read its readiness and runtime signals."
+        />
+      ) : !analytics ? (
+        <EmptyState
+          icon="▤"
+          title="No signals yet"
+          description="Run a mission, delivery session, or browser pass to populate workspace signals."
+        />
+      ) : (
         <>
-          {/* KPI cards */}
-          <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <KPICard icon="▶" label="Total Runs" value={String(analytics.runs)} accent="cyan" sub={`${analytics.successes} passed · ${analytics.failures} failed`} />
-            <KPICard icon="✓" label="Success Rate" value={`${successRate}%`} accent={successRate >= 80 ? "emerald" : successRate >= 50 ? "amber" : "rose"} bar={successRate} />
-            <KPICard icon="$" label="Total Cost" value={`$${to(analytics.totalCost).toFixed(2)}`} accent="violet" sub={`$${to(analytics.costPerFeature).toFixed(2)} per feature`} />
-            <KPICard icon="↻" label="Avg Loops" value={to(analytics.loopCounts?.avg).toFixed(1)} accent="sky" sub={`${to(analytics.loopCounts?.total)} total loops`} />
-          </section>
+          <MetricStrip
+            items={[
+              { label: "Runs", value: analytics.runs },
+              { label: "Success rate", value: `${successRate}%`, accentClassName: successRate >= 80 ? "text-emerald-300" : "text-amber-200" },
+              { label: "Readiness", value: `${readiness?.score ?? 0}/100` },
+              { label: "Open findings", value: deliverySummary?.openFindings ?? 0, accentClassName: "text-rose-300" }
+            ]}
+          />
 
-          {(readiness || learnings.length > 0 || deliverySummary) && (
-            <section className="grid gap-4 lg:grid-cols-[0.75fr_1fr_0.85fr]">
-              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Release Readiness</div>
-                  <span className="text-lg font-semibold text-white">{readiness?.score ?? 0}/100</span>
-                </div>
-                <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-amber-500 to-cyan-400 transition-all"
-                    style={{ width: `${Math.max(0, Math.min(100, readiness?.score ?? 0))}%` }}
-                  />
-                </div>
-                <div className="space-y-1 text-xs text-slate-400">
-                  {(readiness?.blocking ?? []).length === 0 ? (
-                    <div className="text-emerald-300">No blocking signals detected.</div>
+          <NoticePanel tone="info" title="Current read">
+            {nextSignal}
+          </NoticePanel>
+
+          {view === "overview" ? (
+            <section className="page-columns">
+              <div className="summary-stack">
+                <SurfacePanel
+                  title="Operator readiness signal"
+                  description="A quick read on whether the workspace is safe to trust right now."
+                >
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-base font-semibold text-white">{readiness?.score ?? 0}/100</div>
+                        <span className={`rounded-full border px-3 py-1 text-xs ${
+                          (readiness?.blocking?.length ?? 0) === 0
+                            ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                            : "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                        }`}>
+                          {(readiness?.blocking?.length ?? 0) === 0 ? "No blockers" : "Needs review"}
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-2">
+                        {(readiness?.blocking ?? []).length === 0 ? (
+                          <div className="text-sm text-emerald-300">No blocking signals detected.</div>
+                        ) : (
+                          readiness?.blocking?.map((item) => (
+                            <div key={item} className="text-sm text-slate-300">
+                              {item}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </SurfacePanel>
+
+                <SurfacePanel
+                  title="Recent learnings"
+                  description="Short heuristics and observations surfaced from recent workspace activity."
+                >
+                  {learnings.length === 0 ? (
+                    <div className="text-sm text-slate-500">No workspace learnings yet.</div>
                   ) : (
-                    readiness?.blocking.map((item) => <div key={item}>{item}</div>)
+                    <div className="space-y-3">
+                      {learnings.map((learning) => (
+                        <div key={learning.id} className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-300">{learning.category}</div>
+                            <div className="text-xs text-slate-500">{Math.round(learning.confidence * 100)}%</div>
+                          </div>
+                          <div className="mt-2 text-sm text-slate-200">{learning.insight}</div>
+                          {learning.relatedFiles.length > 0 ? (
+                            <div className="mt-2 text-xs text-slate-500">{learning.relatedFiles.join(", ")}</div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
                   )}
-                </div>
+                </SurfacePanel>
               </div>
 
-              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Recent Learnings</div>
-                {learnings.length === 0 ? (
-                  <div className="text-xs text-slate-500 py-4 text-center">No workspace learnings yet.</div>
-                ) : (
-                  <div className="space-y-2">
-                    {learnings.map((learning) => (
-                      <div key={learning.id} className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs font-medium uppercase tracking-[0.18em] text-cyan-300">{learning.category}</div>
-                          <div className="text-[10px] text-slate-500">{Math.round(learning.confidence * 100)}%</div>
+              <div className="summary-stack">
+                <SurfacePanel
+                  title="Delivery signal"
+                  description="Delivery health matters here only as an operator signal, not as a separate analytics product."
+                >
+                  {!deliverySummary ? (
+                    <div className="text-sm text-slate-500">No delivery data yet.</div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Active sessions</div>
+                            <div className="mt-2 text-lg font-semibold text-cyan-300">{deliverySummary.activeSessions}</div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Resolution</div>
+                            <div className="mt-2 text-lg font-semibold text-white">
+                              {deliveryResolution == null ? "n/a" : `${deliveryResolution}%`}
+                            </div>
+                          </div>
                         </div>
-                        <div className="mt-2 text-sm text-slate-200">{learning.insight}</div>
-                        {learning.relatedFiles.length > 0 && (
-                          <div className="mt-2 text-[11px] text-slate-500">{learning.relatedFiles.join(", ")}</div>
-                        )}
+                      </div>
+                      <div className="space-y-2">
+                        {Object.entries(deliverySummary.toolUsage)
+                          .sort((a, b) => b[1] - a[1])
+                          .slice(0, 4)
+                          .map(([tool, count]) => (
+                            <div key={tool} className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-3 text-sm">
+                              <span className="text-slate-300">{toolLabel(tool)}</span>
+                              <span className="text-slate-500">{count} export(s)</span>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </SurfacePanel>
+
+                <SurfacePanel
+                  title="Run health"
+                  description="A small execution snapshot. Use Inspect if you need trend lines or model call detail."
+                >
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Average loops</div>
+                      <div className="mt-2 text-lg font-semibold text-white">{to(analytics.loopCounts?.avg).toFixed(1)}</div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Total cost</div>
+                      <div className="mt-2 text-lg font-semibold text-white">${to(analytics.totalCost).toFixed(2)}</div>
+                    </div>
+                  </div>
+                </SurfacePanel>
+              </div>
+            </section>
+          ) : (
+            <section className="page-columns">
+              <div className="summary-stack">
+                <SurfacePanel title="Trend charts" description="Historical charts stay behind Inspect so the page remains readable by default.">
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <TrendCard title="Cost trend" data={(analytics.trends?.cost ?? []).map((item) => to(item?.cost))} color="violet" unit="$" />
+                    <TrendCard title="Success rate" data={(analytics.trends?.successRate ?? []).map((item) => to(item?.rate))} color="emerald" unit="%" />
+                    <TrendCard title="Reward score" data={(analytics.trends?.reward ?? []).map((item) => to(item?.reward))} color="amber" />
+                    <TrendCard title="Loop frequency" data={(analytics.trends?.loops ?? []).map((item) => to(item?.avg))} color="sky" />
+                  </div>
+                </SurfacePanel>
+              </div>
+
+              <div className="summary-stack">
+                <SurfacePanel title="Failure and model breakdown" description="Use this only when you need to explain why the signal changed.">
+                  <div className="space-y-3">
+                    {[
+                      ["Policy", to(analytics.failureTypes?.policy)],
+                      ["Audit", to(analytics.failureTypes?.audit)],
+                      ["Tests", to(analytics.failureTypes?.test)],
+                      ["Security", to(analytics.failureTypes?.security)]
+                    ].map(([label, count]) => (
+                      <div key={label} className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-3 text-sm">
+                        <span className="text-slate-300">{label}</span>
+                        <span className="text-slate-500">{count}</span>
                       </div>
                     ))}
                   </div>
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Delivery Summary</div>
-                {!deliverySummary ? (
-                  <div className="text-xs text-slate-500 py-4 text-center">No delivery data yet.</div>
-                ) : (
-                  <>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Active Sessions</div>
-                        <div className="mt-2 text-xl font-semibold text-cyan-300">{deliverySummary.activeSessions}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Open Findings</div>
-                        <div className="mt-2 text-xl font-semibold text-rose-300">{deliverySummary.openFindings}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Manual Packets</div>
-                        <div className="mt-2 text-xl font-semibold text-amber-300">{deliverySummary.unresolvedManualPackets}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-900/30 px-4 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Imports to Match</div>
-                        <div className="mt-2 text-xl font-semibold text-white">{deliverySummary.unmatchedImportAttempts}</div>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {Object.entries(deliverySummary.toolUsage)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 4)
-                        .map(([tool, count]) => (
-                          <div key={tool} className="flex items-center justify-between text-xs text-slate-300">
-                            <span>{toolLabel(tool)}</span>
-                            <span className="text-slate-500">{count} export(s)</span>
-                          </div>
-                        ))}
-                    </div>
-                  </>
-                )}
+                  <div className="mt-4 space-y-2">
+                    {modelUsageList.length === 0 ? (
+                      <div className="text-sm text-slate-500">No model data yet.</div>
+                    ) : (
+                      modelUsageList.map(([model, count]) => (
+                        <div key={model} className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-3 text-sm">
+                          <span className="text-slate-300">{model}</span>
+                          <span className="text-slate-500">{count} calls</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </SurfacePanel>
               </div>
             </section>
           )}
-
-          {/* Trend charts */}
-          <section className="grid gap-4 lg:grid-cols-2">
-            <TrendCard title="Cost Trend" data={(analytics.trends?.cost ?? []).map((d) => to(d?.cost))} color="violet" unit="$" />
-            <TrendCard title="Success Rate" data={(analytics.trends?.successRate ?? []).map((d) => to(d?.rate))} color="emerald" unit="%" />
-            <TrendCard title="Reward Score" data={(analytics.trends?.reward ?? []).map((d) => to(d?.reward))} color="amber" />
-            <TrendCard title="Loop Frequency" data={(analytics.trends?.loops ?? []).map((d) => to(d?.avg))} color="sky" />
-          </section>
-
-          {/* Stability row */}
-          <section className="grid gap-4 lg:grid-cols-3">
-            {/* Test Stability */}
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Test Stability</div>
-                <span className="text-lg font-semibold text-white">{(to(analytics.testStability?.index) * 100).toFixed(0)}%</span>
-              </div>
-              <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-emerald-400 transition-all"
-                  style={{ width: `${to(analytics.testStability?.index) * 100}%` }}
-                />
-              </div>
-              <div className="text-[10px] text-slate-500">
-                {to(analytics.testStability?.failed)} failed of {to(analytics.testStability?.total)} tests
-              </div>
-            </div>
-
-            {/* Delivery Resolution */}
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Finding Resolution</div>
-                <span className="text-lg font-semibold text-white">
-                  {deliveryResolution == null ? "n/a" : `${deliveryResolution}%`}
-                </span>
-              </div>
-              {deliveryResolution != null && (
-                <>
-                  <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all"
-                      style={{ width: `${deliveryResolution}%` }}
-                    />
-                  </div>
-                  <div className="text-[10px] text-slate-500">
-                    {deliverySummary?.resolvedFindings ?? 0} resolved of {(deliverySummary?.openFindings ?? 0) + (deliverySummary?.resolvedFindings ?? 0)} findings
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* Failure Types */}
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Failure Breakdown</div>
-              <div className="space-y-2">
-                {[
-                  { label: "Policy", value: to(analytics.failureTypes?.policy), color: "bg-violet-400" },
-                  { label: "Audit", value: to(analytics.failureTypes?.audit), color: "bg-amber-400" },
-                  { label: "Tests", value: to(analytics.failureTypes?.test), color: "bg-rose-400" },
-                  { label: "Security", value: to(analytics.failureTypes?.security), color: "bg-red-400" },
-                ].map((f) => (
-                  <div key={f.label} className="flex items-center gap-2 text-xs">
-                    <span className="w-14 text-slate-500">{f.label}</span>
-                    <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                      <div className={`h-full rounded-full ${f.color} transition-all`} style={{ width: `${(f.value / failureMax) * 100}%` }} />
-                    </div>
-                    <span className="w-6 text-right text-slate-400">{f.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          {/* Model usage */}
-          <section className="grid gap-4 lg:grid-cols-1">
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-5 space-y-3">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Model Usage</div>
-              {modelUsageList.length === 0 && (
-                <div className="text-xs text-slate-500 py-4 text-center">No model data yet.</div>
-              )}
-              <div className="space-y-2.5">
-                {modelUsageList.map(([model, count]) => (
-                  <div key={model} className="space-y-1">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-slate-300 font-medium">{model}</span>
-                      <span className="text-slate-500">{count} calls</span>
-                    </div>
-                    <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                      <div
-                        className="h-full rounded-full bg-gradient-to-r from-cyan-500/80 to-cyan-400/60 transition-all"
-                        style={{ width: `${(count / modelMax) * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
         </>
       )}
     </main>
   );
 }
 
-/* ============= sub-components ============= */
-
-const ACCENT_MAP: Record<string, { border: string; icon: string; bar: string }> = {
-  cyan:    { border: "border-cyan-500/20",    icon: "text-cyan-400 bg-cyan-500/10",    bar: "from-cyan-500 to-cyan-400" },
-  emerald: { border: "border-emerald-500/20", icon: "text-emerald-400 bg-emerald-500/10", bar: "from-emerald-500 to-emerald-400" },
-  amber:   { border: "border-amber-500/20",   icon: "text-amber-400 bg-amber-500/10",   bar: "from-amber-500 to-amber-400" },
-  violet:  { border: "border-violet-500/20",  icon: "text-violet-400 bg-violet-500/10",  bar: "from-violet-500 to-violet-400" },
-  sky:     { border: "border-sky-500/20",     icon: "text-sky-400 bg-sky-500/10",     bar: "from-sky-500 to-sky-400" },
-  rose:    { border: "border-rose-500/20",    icon: "text-rose-400 bg-rose-500/10",    bar: "from-rose-500 to-rose-400" },
+const ACCENT_MAP: Record<string, { border: string; bar: string }> = {
+  cyan: { border: "border-cyan-500/20", bar: "from-cyan-500 to-cyan-400" },
+  emerald: { border: "border-emerald-500/20", bar: "from-emerald-500 to-emerald-400" },
+  amber: { border: "border-amber-500/20", bar: "from-amber-500 to-amber-400" },
+  violet: { border: "border-violet-500/20", bar: "from-violet-500 to-violet-400" },
+  sky: { border: "border-sky-500/20", bar: "from-sky-500 to-sky-400" }
 };
 
-function KPICard({ icon, label, value, accent, sub, bar }: {
-  icon: string; label: string; value: string; accent: string; sub?: string; bar?: number;
-}) {
-  const a = ACCENT_MAP[accent] ?? ACCENT_MAP["cyan"]!;
-  return (
-    <div className={`rounded-2xl border ${a.border} bg-slate-950/40 p-5 space-y-3`}>
-      <div className="flex items-center gap-3">
-        <div className={`flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold ${a.icon}`}>{icon}</div>
-        <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">{label}</div>
-      </div>
-      <div className="text-2xl font-semibold text-white">{value}</div>
-      {typeof bar === "number" && (
-        <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
-          <div className={`h-full rounded-full bg-gradient-to-r ${a.bar} transition-all`} style={{ width: `${bar}%` }} />
-        </div>
-      )}
-      {sub && <div className="text-[10px] text-slate-500">{sub}</div>}
-    </div>
-  );
-}
-
 function TrendCard({ title, data, color, unit }: { title: string; data: number[]; color: string; unit?: string }) {
-  const a = ACCENT_MAP[color] ?? ACCENT_MAP["cyan"]!;
-  const max = Math.max(...data, 1);
-  const latest = data.length > 0 ? data[data.length - 1]! : 0;
+  const accent = ACCENT_MAP[color] ?? ACCENT_MAP.cyan!;
+  const latest = data.length > 0 ? data[data.length - 1] ?? 0 : 0;
   return (
-    <div className={`rounded-2xl border ${a.border} bg-slate-950/40 p-5 space-y-3`}>
+    <div className={`rounded-2xl border ${accent.border} bg-slate-950/40 p-4`}>
       <div className="flex items-center justify-between">
-        <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">{title}</div>
-        <span className="text-xs font-medium text-slate-400">{unit === "$" ? `$${latest.toFixed(2)}` : unit === "%" ? `${(latest * 100).toFixed(0)}%` : latest.toFixed(2)}</span>
+        <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
+        <div className="text-xs text-slate-400">
+          {unit === "$" ? `$${latest.toFixed(2)}` : unit === "%" ? `${(latest * 100).toFixed(0)}%` : latest.toFixed(2)}
+        </div>
       </div>
       <SparkBars data={data} color={color} />
     </div>
@@ -374,25 +339,24 @@ function TrendCard({ title, data, color, unit }: { title: string; data: number[]
 
 function SparkBars({ data, color = "amber" }: { data: number[]; color?: string }) {
   const max = Math.max(...data, 1);
-  const gradientClass = ACCENT_MAP[color]?.bar ?? "from-amber-500 to-amber-400";
+  const gradientClass = ACCENT_MAP[color]?.bar ?? ACCENT_MAP.amber!.bar;
   return (
-    <div className="flex h-20 items-end gap-[3px]">
-      {data.map((value, idx) => (
-        <div
-          key={`${idx}-${value}`}
-          className={`flex-1 min-w-[4px] max-w-3 rounded-t bg-gradient-to-t ${gradientClass} opacity-70 hover:opacity-100 transition-opacity`}
-          style={{ height: `${Math.max(6, (value / max) * 100)}%` }}
-          title={`${value.toFixed(2)}`}
-        />
-      ))}
-      {data.length === 0 && (
-        <div className="flex-1 flex items-center justify-center text-[10px] text-slate-600">No data</div>
+    <div className="mt-4 flex h-20 items-end gap-[3px]">
+      {data.length === 0 ? (
+        <div className="flex h-full w-full items-center justify-center text-xs text-slate-600">No data</div>
+      ) : (
+        data.map((value, index) => (
+          <div
+            key={`${index}-${value}`}
+            className={`min-w-[4px] flex-1 rounded-t bg-gradient-to-t ${gradientClass} opacity-80`}
+            style={{ height: `${Math.max(6, (value / max) * 100)}%` }}
+          />
+        ))
       )}
     </div>
   );
 }
 
-/* ---------- helpers ---------- */
 function to(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -410,19 +374,19 @@ function normalizeAnalytics(input: any): AnalyticsData {
       policy: to(input?.failureTypes?.policy),
       audit: to(input?.failureTypes?.audit),
       test: to(input?.failureTypes?.test),
-      security: to(input?.failureTypes?.security),
+      security: to(input?.failureTypes?.security)
     },
     trends: {
       cost: Array.isArray(input?.trends?.cost) ? input.trends.cost : [],
       successRate: Array.isArray(input?.trends?.successRate) ? input.trends.successRate : [],
       loops: Array.isArray(input?.trends?.loops) ? input.trends.loops : [],
-      reward: Array.isArray(input?.trends?.reward) ? input.trends.reward : [],
+      reward: Array.isArray(input?.trends?.reward) ? input.trends.reward : []
     },
     testStability: {
       total: to(input?.testStability?.total),
       failed: to(input?.testStability?.failed),
-      index: to(input?.testStability?.index),
+      index: to(input?.testStability?.index)
     },
-    modelUsage: (input?.modelUsage ?? {}) as Record<string, number>,
+    modelUsage: (input?.modelUsage ?? {}) as Record<string, number>
   };
 }

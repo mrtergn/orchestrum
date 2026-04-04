@@ -2,6 +2,9 @@ import type {
   GovernanceProfile,
   RepoExecutionProfile,
   RunKind,
+  RunRecoveryAction,
+  RunRecoveryArtifact,
+  RunRecoveryState,
   RunReadiness,
   RunState,
   StepState
@@ -44,6 +47,7 @@ export type AgentRuntimeState = "active" | "idle" | "sleeping" | "error";
 
 export const WORK_ITEM_SOURCE_TYPES = [
   "feature",
+  "audit",
   "pbi",
   "bug",
   "pr_hardening"
@@ -136,6 +140,7 @@ export const WORK_ITEM_WORKSTREAM_STATUSES = [
   "planned",
   "queued",
   "running",
+  "paused",
   "blocked",
   "succeeded",
   "failed",
@@ -143,6 +148,15 @@ export const WORK_ITEM_WORKSTREAM_STATUSES = [
 ] as const;
 
 export type WorkItemWorkstreamStatus = typeof WORK_ITEM_WORKSTREAM_STATUSES[number];
+
+export const WORK_ITEM_TEAM_SELECTION_DECISIONS = [
+  "selected",
+  "standby",
+  "omitted",
+  "missing"
+] as const;
+
+export type WorkItemTeamSelectionDecision = typeof WORK_ITEM_TEAM_SELECTION_DECISIONS[number];
 
 export const WORK_ITEM_GATE_TYPES = [
   "validation",
@@ -163,6 +177,10 @@ export const WORK_ITEM_GATE_STATUSES = [
 
 export type WorkItemGateStatus = typeof WORK_ITEM_GATE_STATUSES[number];
 
+export const WORK_ITEM_AUDIT_RISK_LEVELS = ["low", "medium", "high"] as const;
+
+export type WorkItemAuditRiskLevel = typeof WORK_ITEM_AUDIT_RISK_LEVELS[number];
+
 export const WORK_ITEM_OPTIMIZATION_STATUSES = [
   "pending",
   "approved",
@@ -171,6 +189,18 @@ export const WORK_ITEM_OPTIMIZATION_STATUSES = [
 ] as const;
 
 export type WorkItemOptimizationStatus = typeof WORK_ITEM_OPTIMIZATION_STATUSES[number];
+
+export const WORK_ITEM_TRACE_TYPES = [
+  "selection",
+  "assignment",
+  "provider_prompt",
+  "provider_response",
+  "handoff",
+  "gate_update",
+  "cost_update"
+] as const;
+
+export type WorkItemTraceType = typeof WORK_ITEM_TRACE_TYPES[number];
 
 export type WorkItemBrief = {
   workspaceId: string;
@@ -218,6 +248,7 @@ export type WorkItemCreateRequest = {
   sourceRef?: string;
   acceptanceCriteria?: string[];
   constraints?: string[];
+  recommendedTemplateId?: string;
 };
 
 export type WorkItemStartRequest = {
@@ -233,6 +264,8 @@ export type WorkItemReviewRequest = {
   workspaceId?: string;
   decision: WorkItemReviewAction;
   note?: string;
+  targetRunId?: string;
+  targetTaskId?: string;
 };
 
 export type WorkItemReviewSignal = {
@@ -347,6 +380,46 @@ export type WorkItemWorkstream = {
   ownerRole?: string | null;
 };
 
+export type WorkItemTeamSelectionLane = {
+  laneId: string;
+  laneLabel: string;
+  required: boolean;
+  decision: WorkItemTeamSelectionDecision;
+  preferredRole: string;
+  preferredSpecializations: string[];
+  selectionReason?: string | null;
+  omissionReason?: string | null;
+  chosenAgentId?: string | null;
+  chosenAgentName?: string | null;
+  chosenRole?: string | null;
+  fallbackAgentId?: string | null;
+  fallbackReason?: string | null;
+  expectedWorkstreams: string[];
+  expectedGates: string[];
+  matches: WorkPlanLaneMatch[];
+};
+
+export type WorkItemValidationContract = {
+  required: boolean;
+  source: "explicit" | "risk_based" | "not_required";
+  commands: string[];
+  requirements: string[];
+  rationale: string[];
+};
+
+export type WorkItemAuditRisk = {
+  level: WorkItemAuditRiskLevel;
+  reasons: string[];
+};
+
+export type WorkItemMinimalTeamMember = {
+  laneId: string;
+  laneLabel: string;
+  agentId?: string | null;
+  agentName?: string | null;
+  role?: string | null;
+};
+
 export type WorkItemGate = {
   id: string;
   type: WorkItemGateType;
@@ -361,6 +434,19 @@ export type WorkItemGateRuntime = WorkItemGate & {
   cycleId?: string | null;
   evidenceTaskIds?: string[];
   blockingFindingIds?: string[];
+  requiredBecause?: string | null;
+  satisfiedBy?: string | null;
+  blockedBy?: string | null;
+  contractItems?: string[];
+  evidenceRunId?: string | null;
+  evidenceArtifactSummary?: string | null;
+  assertionTotals?: {
+    passed: number;
+    failed: number;
+    total: number;
+  } | null;
+  riskLevel?: WorkItemAuditRiskLevel | null;
+  riskReasons?: string[];
 };
 
 export type WorkItemWorkstreamRuntime = WorkItemWorkstream & {
@@ -368,6 +454,19 @@ export type WorkItemWorkstreamRuntime = WorkItemWorkstream & {
   activeTaskId?: string | null;
   activeTaskTitle?: string | null;
   summary: string;
+  selectionReason?: string | null;
+  providerVendor?: string | null;
+  providerTransport?: string | null;
+  providerModel?: string | null;
+  providerEffort?: string | null;
+  providerReadiness?: "usable_now" | "detected_needs_setup" | "fallback_default" | null;
+  providerReadinessReason?: string | null;
+  promptCount: number;
+  exchangeCount: number;
+  estimatedCostUsd?: number | null;
+  lastAssignmentAt?: string | null;
+  lastResponseAt?: string | null;
+  handoffToWorkstreamId?: string | null;
 };
 
 export type WorkItemSourceSnapshot = {
@@ -424,7 +523,11 @@ export type WorkItemCyclePlan = {
   tasks: WorkPlanTask[];
   workstreams: WorkItemWorkstream[];
   gates: WorkItemGate[];
+  validationContract?: WorkItemValidationContract | null;
+  auditRisk?: WorkItemAuditRisk | null;
   teamAssignments: WorkPlanLaneAssignment[];
+  teamSelection: WorkItemTeamSelectionLane[];
+  recommendedMinimalTeam: WorkItemMinimalTeamMember[];
   executionSteps: WorkItemExecutionStep[];
 };
 
@@ -437,7 +540,13 @@ export type WorkItemPlanningDetail = {
   workstreams: WorkItemWorkstream[];
   gates: WorkItemGate[];
   qaCoverage: "none" | "scenario";
+  validationContract?: WorkItemValidationContract | null;
+  auditRisk?: WorkItemAuditRisk | null;
   teamAssignments: WorkPlanLaneAssignment[];
+  teamSelection: WorkItemTeamSelectionLane[];
+  omittedLanes: string[];
+  missingCapabilities: string[];
+  selectionRationale: string[];
   executionSteps: WorkItemExecutionStep[];
   template: {
     id: string;
@@ -457,6 +566,10 @@ export type WorkItemTeamRuntimeLane = {
   status: WorkItemWorkstreamStatus | "missing";
   ownerAgentId?: string | null;
   ownerAgentName?: string | null;
+  providerSummary?: string | null;
+  currentModel?: string | null;
+  providerReadiness?: "usable_now" | "detected_needs_setup" | "fallback_default" | null;
+  providerReadinessReason?: string | null;
   summary: string;
 };
 
@@ -468,7 +581,139 @@ export type WorkItemTeamRuntime = {
   blockedLanes: number;
   completedLanes: number;
   missingCoverage: number;
+  // Convenience fields for the live session header
+  // Identify which lane is currently active and who holds the baton
+  activeLaneId?: string | null;
+  activeLaneLabel?: string | null;
+  activeWorkstreamId?: string | null;
+  batonOwnerAgentId?: string | null;
+  batonOwnerAgentName?: string | null;
   lanes: WorkItemTeamRuntimeLane[];
+};
+
+export type WorkItemTraceArtifact = {
+  label: string;
+  fileName: string;
+  mimeType: string;
+};
+
+export type WorkItemTraceRecord = {
+  id: string;
+  ts: string;
+  workspaceId: string;
+  workItemId: string;
+  cycleId?: string | null;
+  workstreamId?: string | null;
+  taskId?: string | null;
+  runId?: string | null;
+  nodeId?: string | null;
+  traceType: WorkItemTraceType;
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  ownerRole?: string | null;
+  assignmentToAgentId?: string | null;
+  assignmentToAgentName?: string | null;
+  providerVendor?: string | null;
+  providerTransport?: string | null;
+  providerModel?: string | null;
+  providerEffort?: string | null;
+  promptCountDelta?: number;
+  exchangeCountDelta?: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  estimatedCostUsd?: number | null;
+  summary: string;
+  selectionReason?: string | null;
+  omissionReason?: string | null;
+  expectedOutput?: string | null;
+  gateRefs?: string[];
+  handoffToWorkstreamId?: string | null;
+  workstreamTitle?: string | null;
+  laneLabel?: string | null;
+  assignmentPrompt?: string | null;
+  promptSummary?: string | null;
+  promptRaw?: string | null;
+  responseSummary?: string | null;
+  responseRaw?: string | null;
+  outputSummary?: string | null;
+  artifacts?: WorkItemTraceArtifact[];
+  payload?: Record<string, unknown>;
+};
+
+export type WorkItemTraceSummary = {
+  promptCount: number;
+  exchangeCount: number;
+  estimatedCostUsd?: number | null;
+  perAgent: Array<{
+    agentId: string;
+    agentName?: string | null;
+    role?: string | null;
+    providerModel?: string | null;
+    promptCount: number;
+    exchangeCount: number;
+    estimatedCostUsd?: number | null;
+    recentAssignmentSummary?: string | null;
+  }>;
+  perWorkstream: Array<{
+    workstreamId: string;
+    workstreamTitle?: string | null;
+    providerModel?: string | null;
+    promptCount: number;
+    exchangeCount: number;
+    estimatedCostUsd?: number | null;
+    lastAssignmentAt?: string | null;
+    lastResponseAt?: string | null;
+  }>;
+};
+
+export type WorkItemTraceGroup = {
+  cycleId?: string | null;
+  workstreamId?: string | null;
+  workstreamTitle?: string | null;
+  laneLabel?: string | null;
+  ownerAgentId?: string | null;
+  ownerAgentName?: string | null;
+  traces: WorkItemTraceRecord[];
+};
+
+export type WorkItemHandoffRuntime = {
+  id: string;
+  at: string;
+  fromWorkstreamId?: string | null;
+  fromWorkstreamTitle?: string | null;
+  toWorkstreamId?: string | null;
+  toWorkstreamTitle?: string | null;
+  ownerAgentName?: string | null;
+  targetAgentName?: string | null;
+  summary: string;
+};
+
+export type WorkItemRecoveryAction = RunRecoveryAction & {
+  runId?: string | null;
+  taskId?: string | null;
+};
+
+export type WorkItemRecoveryArtifact = RunRecoveryArtifact & {
+  source: "run" | "task";
+  runId?: string | null;
+  taskId?: string | null;
+  stepId?: string | null;
+};
+
+export type WorkItemRecoveryRuntime = {
+  status: "attention_required" | "interrupted";
+  source: "mission_run" | "task_graph" | "none";
+  kind: RunRecoveryState["kind"];
+  headline: string;
+  summary: string;
+  guidance: string[];
+  runId?: string | null;
+  taskIds: string[];
+  blockingStepId?: string | null;
+  blockingStepTitle?: string | null;
+  artifacts: WorkItemRecoveryArtifact[];
+  suggestedActions: WorkItemRecoveryAction[];
 };
 
 export type WorkItemOptimizationPromptSuggestion = {
@@ -539,6 +784,11 @@ export type WorkItemDetailResponse = {
   teamRuntime?: WorkItemTeamRuntime | null;
   workstreamRuntime?: WorkItemWorkstreamRuntime[];
   gateRuntime?: WorkItemGateRuntime[];
+  teamSelection?: WorkItemTeamSelectionLane[];
+  traceSummary?: WorkItemTraceSummary | null;
+  workstreamTrace?: WorkItemTraceGroup[];
+  handoffRuntime?: WorkItemHandoffRuntime[];
+  recovery?: WorkItemRecoveryRuntime | null;
 };
 
 export type WorkItemPbiPreviewResponse = {
@@ -890,6 +1140,33 @@ export type RunSummary = RunState & {
   error?: string;
 };
 
+export type RunOverviewWorkItem = {
+  itemType: "work_item";
+  id: string;
+  workspaceId: string;
+  title: string;
+  sourceType: WorkItemSourceType;
+  status: WorkItemStatus;
+  executionMode: WorkItemExecutionMode | "not_started";
+  reviewStatus?: WorkItemReviewStatus | null;
+  summary: string;
+  recommendedAction: string;
+  lastActivityAt: string;
+  childRunCount: number;
+  childTaskCount: number;
+};
+
+export type RunOverviewRun = RunSummary & {
+  itemType: "run";
+  summary?: string;
+  recommendedAction?: string;
+  lastActivityAt?: string;
+  parentWorkItemId?: string | null;
+  parentWorkItemTitle?: string | null;
+};
+
+export type RunOverviewItem = RunOverviewWorkItem | RunOverviewRun;
+
 export type RunDetail = {
   run: RunSummary;
   steps: StepState[];
@@ -911,6 +1188,7 @@ export type RunProgressSnapshot = {
 export type RunStartOptions = {
   concurrency?: number;
   modelOverrides?: Record<string, string>;
+  effortOverrides?: Record<string, string>;
   strategyMode?: string;
   passphrase?: string;
 };

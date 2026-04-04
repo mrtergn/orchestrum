@@ -59,6 +59,58 @@ test("state index SQL statements avoid template interpolation", async () => {
   assert.equal(/INSERT[\\s\\S]{0,200}\\$\\{/.test(source), false);
 });
 
+test("state index preserves run recovery and error metadata", async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-state-recovery-"));
+  const runsDir = path.join(rootDir, "runs");
+  const repoPath = path.join(rootDir, "repo");
+  await fs.mkdir(path.join(repoPath, ".orchestrum", "control"), { recursive: true });
+  await fs.writeFile(
+    path.join(repoPath, ".orchestrum", "control", "workspace.json"),
+    JSON.stringify({ id: "demo", path: repoPath, name: "Demo" }, null, 2),
+    "utf8"
+  );
+  await fs.writeFile(path.join(repoPath, ".orchestrum", "control", "learnings.ndjson"), "", "utf8");
+  await fs.mkdir(path.join(runsDir, "demo", "run-failed"), { recursive: true });
+  await fs.writeFile(
+    path.join(runsDir, "demo", "run-failed", "run.json"),
+    JSON.stringify({
+      runId: "run-failed",
+      kind: "mission",
+      status: "failed",
+      start: new Date().toISOString(),
+      end: new Date().toISOString(),
+      repoPath,
+      verdict: "failed",
+      error: "Mission failed.",
+      recovery: {
+        status: "attention_required",
+        kind: "unknown",
+        summary: "Codex cli (gpt-5) timed out after 90000ms.",
+        guidance: ["Inspect the failed step artifacts and logs to determine the actual failure mode."],
+        artifacts: [],
+        suggestedActions: [],
+        updatedAt: new Date().toISOString(),
+        blockingStepId: "audit",
+        blockingStepTitle: "Audit work"
+      }
+    }, null, 2),
+    "utf8"
+  );
+
+  const index = new StateIndex({
+    rootDir,
+    runsDir,
+    listWorkspacePaths: async () => [repoPath]
+  });
+  await index.rebuild();
+
+  const runs = await index.queryRuns("demo");
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]!.error, "Mission failed.");
+  assert.equal(runs[0]!.recovery?.kind, "unknown");
+  assert.match(runs[0]!.recovery?.summary ?? "", /timed out after 90000ms/i);
+});
+
 test("state index exposes latest delivery import analysis in summary", async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestrum-state-delivery-"));
   const runsDir = path.join(rootDir, "runs");

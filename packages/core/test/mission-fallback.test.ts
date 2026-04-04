@@ -2,6 +2,7 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import fsSync from "node:fs";
 import { importMissionNodeInput, loadMissionRun, resumeMissionRun, runMissionDetailed } from "../src/mission/runtime.js";
+import { completeWithProvider } from "../src/mission/providers.js";
 import {
   buildCliFeatureAgents,
   buildDeliveryAgents,
@@ -54,6 +55,95 @@ test("feature-dev mission falls back from Claude CLI to Claude API", async () =>
     process.env.MOCK_CLAUDE_AUTH = originalEnv.MOCK_CLAUDE_AUTH;
     process.env.MOCK_COPILOT_AUTH = originalEnv.MOCK_COPILOT_AUTH;
     process.env.ANTHROPIC_API_KEY = originalEnv.ANTHROPIC_API_KEY;
+  }
+});
+
+test("provider execution falls back after codex audit timeout", async () => {
+  const sandbox = await createMissionSandbox("mission-provider-timeout-fallback");
+  const cli = await createMockCliSuite();
+  const originalEnv = {
+    ORCHESTRUM_CODEX_BIN: process.env.ORCHESTRUM_CODEX_BIN,
+    ORCHESTRUM_CLAUDE_BIN: process.env.ORCHESTRUM_CLAUDE_BIN,
+    MOCK_CODEX_AUTH: process.env.MOCK_CODEX_AUTH,
+    MOCK_CLAUDE_AUTH: process.env.MOCK_CLAUDE_AUTH,
+    MOCK_CODEX_FAIL_MESSAGE: process.env.MOCK_CODEX_FAIL_MESSAGE,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY
+  };
+  process.env.ORCHESTRUM_CODEX_BIN = cli.codex;
+  process.env.ORCHESTRUM_CLAUDE_BIN = cli.claude;
+  process.env.MOCK_CODEX_AUTH = "1";
+  process.env.MOCK_CLAUDE_AUTH = "1";
+  process.env.MOCK_CODEX_FAIL_MESSAGE = "mock codex audit timed out after 10ms";
+  delete process.env.ANTHROPIC_API_KEY;
+
+  try {
+    const result = await completeWithProvider({
+      vendor: "codex",
+      transport: "cli",
+      profileId: "codex-cli-balanced",
+      auth: { kind: "cli" },
+      fallback: {
+        vendor: "claude",
+        transport: "api",
+        profileId: "claude-api-sonnet",
+        auth: { kind: "api_key", secretRef: "ANTHROPIC_API_KEY" }
+      }
+    }, "# Role: AUDIT\nProduce JSON ONLY with this shape:", process.env, {
+      repoPath: sandbox.repoPath,
+      role: "audit",
+      executor: "audit"
+    });
+
+    assert.equal(result.vendor, "claude");
+    assert.equal(result.transport, "cli");
+    assert.equal(result.model, "sonnet");
+  } finally {
+    process.env.ORCHESTRUM_CODEX_BIN = originalEnv.ORCHESTRUM_CODEX_BIN;
+    process.env.ORCHESTRUM_CLAUDE_BIN = originalEnv.ORCHESTRUM_CLAUDE_BIN;
+    process.env.MOCK_CODEX_AUTH = originalEnv.MOCK_CODEX_AUTH;
+    process.env.MOCK_CLAUDE_AUTH = originalEnv.MOCK_CLAUDE_AUTH;
+    process.env.MOCK_CODEX_FAIL_MESSAGE = originalEnv.MOCK_CODEX_FAIL_MESSAGE;
+    process.env.ANTHROPIC_API_KEY = originalEnv.ANTHROPIC_API_KEY;
+  }
+});
+
+test("provider execution falls back to role default after codex timeout", async () => {
+  const sandbox = await createMissionSandbox("mission-provider-role-default-fallback");
+  const cli = await createMockCliSuite();
+  const originalEnv = {
+    ORCHESTRUM_CODEX_BIN: process.env.ORCHESTRUM_CODEX_BIN,
+    ORCHESTRUM_CLAUDE_BIN: process.env.ORCHESTRUM_CLAUDE_BIN,
+    MOCK_CODEX_AUTH: process.env.MOCK_CODEX_AUTH,
+    MOCK_CLAUDE_AUTH: process.env.MOCK_CLAUDE_AUTH,
+    MOCK_CODEX_FAIL_MESSAGE: process.env.MOCK_CODEX_FAIL_MESSAGE
+  };
+  process.env.ORCHESTRUM_CODEX_BIN = cli.codex;
+  process.env.ORCHESTRUM_CLAUDE_BIN = cli.claude;
+  process.env.MOCK_CODEX_AUTH = "1";
+  process.env.MOCK_CLAUDE_AUTH = "1";
+  process.env.MOCK_CODEX_FAIL_MESSAGE = "mock codex plan timed out after 10ms";
+
+  try {
+    const result = await completeWithProvider({
+      vendor: "codex",
+      transport: "cli",
+      profileId: "codex-cli-balanced",
+      auth: { kind: "cli" }
+    }, "Create a concise plan.", process.env, {
+      repoPath: sandbox.repoPath,
+      role: "pm",
+      executor: "prompt"
+    });
+
+    assert.equal(result.vendor, "claude");
+    assert.equal(result.transport, "cli");
+    assert.equal(result.model, "sonnet");
+  } finally {
+    process.env.ORCHESTRUM_CODEX_BIN = originalEnv.ORCHESTRUM_CODEX_BIN;
+    process.env.ORCHESTRUM_CLAUDE_BIN = originalEnv.ORCHESTRUM_CLAUDE_BIN;
+    process.env.MOCK_CODEX_AUTH = originalEnv.MOCK_CODEX_AUTH;
+    process.env.MOCK_CLAUDE_AUTH = originalEnv.MOCK_CLAUDE_AUTH;
+    process.env.MOCK_CODEX_FAIL_MESSAGE = originalEnv.MOCK_CODEX_FAIL_MESSAGE;
   }
 });
 

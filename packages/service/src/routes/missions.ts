@@ -18,6 +18,7 @@ type MissionAgentPlatform = {
     runOptions?: {
       concurrency?: number;
       modelOverrides?: Record<string, string>;
+      effortOverrides?: Record<string, string>;
       strategyMode?: string;
     };
   }): Promise<Record<string, unknown>>;
@@ -80,6 +81,7 @@ export function registerMissionRoutes(
         runOptions: {
           concurrency: startOptions.concurrency,
           modelOverrides: startOptions.modelOverrides,
+          effortOverrides: startOptions.effortOverrides,
           strategyMode: startOptions.strategyMode
         }
       });
@@ -137,6 +139,7 @@ export function registerMissionRoutes(
 function normalizeRunStartOptions(raw: unknown): {
   concurrency?: number;
   modelOverrides?: Record<string, string>;
+  effortOverrides?: Record<string, string>;
   strategyMode?: string;
   passphrase?: string;
 } {
@@ -159,9 +162,18 @@ function normalizeRunStartOptions(raw: unknown): {
       }
     }
   }
+  const effortOverrides: Record<string, string> = {};
+  if (parsed.effortOverrides && typeof parsed.effortOverrides === "object") {
+    for (const [key, value] of Object.entries(parsed.effortOverrides as Record<string, unknown>)) {
+      if (typeof value === "string" && /^(minimal|low|medium|high|max)$/i.test(value.trim())) {
+        effortOverrides[key] = value.trim().toLowerCase();
+      }
+    }
+  }
   return {
     concurrency,
     modelOverrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
+    effortOverrides: Object.keys(effortOverrides).length > 0 ? effortOverrides : undefined,
     strategyMode,
     passphrase
   };

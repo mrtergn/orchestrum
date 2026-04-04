@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { PageHeader, SurfacePanel } from "@/components/ui/PagePrimitives";
 
 export default function EulaPage() {
   const [content, setContent] = useState("");
@@ -12,19 +13,22 @@ export default function EulaPage() {
       const data = await res.json();
       setContent(data.content ?? "");
     };
-    load();
+    void load();
   }, []);
 
   return (
-    <main className="space-y-6">
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-        <h2 className="text-xl font-semibold text-white">License</h2>
-        <p className="text-sm text-slate-400">Open source license</p>
-      </section>
+    <main className="page-shell">
+      <PageHeader
+        eyebrow="Support"
+        title="License"
+        description="Open-source license text for the current Orchestrum build."
+      />
 
-      <section className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6">
-        <pre className="whitespace-pre-wrap text-xs text-slate-200">{content || "License not found."}</pre>
-      </section>
+      <SurfacePanel title="MIT license">
+        <pre className="inspect-scroll max-h-[720px] whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-slate-200">
+          {content || "License not found."}
+        </pre>
+      </SurfacePanel>
     </main>
   );
 }

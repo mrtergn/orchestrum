@@ -203,6 +203,10 @@ async function buildProviderDiscovery(options: {
     apiSecrets: {
       openai: Boolean(openAiKey),
       claude: Boolean(claudeKey)
+    },
+    apiKeys: {
+      openai: openAiKey ?? undefined,
+      claude: claudeKey ?? undefined
     }
   });
 }

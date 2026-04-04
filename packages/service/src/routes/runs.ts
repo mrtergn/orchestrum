@@ -8,12 +8,17 @@ import {
   cancelRun,
   exportRunBundle,
   getWorkspaceSignalsPath,
+  getWorkspaceWorkItemsPath,
   importRunBundle,
+  loadWorkspaces,
   loadDeliverySession,
   loadMissionRun,
   missionGraphToStepStates,
   readAppendedLines,
   readTailLines,
+  type RunOverviewItem,
+  type RunSummary,
+  type WorkItemRecord,
   writeJson,
   writeText,
   type MissionGraph,
@@ -31,6 +36,7 @@ type RunIndexLike = {
   list(filter?: { workspaceId?: string; status?: string; tag?: string; search?: string }): any[];
   get(runId: string, workspaceId?: string): RunRecordLike | null;
   update(runId: string, workspaceId: string, meta: any): void;
+  sync(filter?: { workspaceId?: string; runId?: string }): Promise<void>;
 };
 
 type AgentPlatformLike = {
@@ -39,6 +45,13 @@ type AgentPlatformLike = {
     runsDir: string;
     workspaceId: string;
   }): Promise<{ ok: boolean }>;
+  listTasks(options?: { workspaceId?: string; workItemId?: string }): Array<{
+    id: string;
+    workspaceId?: string;
+    linkedWorkItemId?: string;
+    linkedRunId?: string;
+    status: string;
+  }>;
   importMissionNode(options: {
     runsDir: string;
     workspaceId: string;
@@ -52,6 +65,7 @@ type AgentPlatformLike = {
 export function registerRunRoutes(
   app: express.Express,
   options: {
+    rootDir: string;
     runsDir: string;
     stateIndex: StateIndex;
     runIndex: RunIndexLike;
@@ -64,12 +78,40 @@ export function registerRunRoutes(
     void options.stateIndex.rebuild().catch(() => undefined);
   };
 
+  const loadRunWithSync = async (runId: string, workspaceId?: string) => {
+    let run = options.runIndex.get(runId, workspaceId);
+    if (!run) {
+      await options.runIndex.sync({ workspaceId, runId });
+      run = options.runIndex.get(runId, workspaceId);
+    }
+    return run;
+  };
+
   app.get("/runs", async (req, res) => {
+    const view = req.query.view === "overview" ? "overview" : "raw";
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
     const status = req.query.status ? String(req.query.status) : undefined;
     const tag = req.query.tag ? String(req.query.tag) : undefined;
     const search = req.query.search ? String(req.query.search).toLowerCase() : undefined;
-    const runs = options.runIndex.list({ workspaceId, status, tag, search });
+    let runs = options.runIndex.list({ workspaceId, status, tag, search });
+    if (runs.length === 0) {
+      await options.runIndex.sync({ workspaceId });
+      runs = options.runIndex.list({ workspaceId, status, tag, search });
+    }
+    if (view === "overview") {
+      const overview = await buildRunOverview({
+        rootDir: options.rootDir,
+        workspaceId,
+        status,
+        tag,
+        search,
+        runs,
+        listWorkspacePaths: options.listWorkspacePaths,
+        resolveWorkspacePath: options.resolveWorkspacePath,
+        agentPlatform: options.agentPlatform
+      });
+      return res.json(overview);
+    }
     res.json(runs);
   });
 
@@ -82,7 +124,7 @@ export function registerRunRoutes(
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
     const tailRaw = req.query.tail ? Number(req.query.tail) : 200;
     const tail = Number.isFinite(tailRaw) && tailRaw > 0 ? tailRaw : 200;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const logPath = resolveRunLogPath(run.runDir, run.meta);
     const lines = fsSync.existsSync(logPath) ? await readTailLines(logPath, tail) : [];
@@ -91,7 +133,7 @@ export function registerRunRoutes(
 
   app.get("/runs/:id", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const detail = await buildRunDetail(run);
     res.json(detail);
@@ -99,7 +141,7 @@ export function registerRunRoutes(
 
   app.patch("/runs/:id", async (req, res) => {
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const { pinned, tags } = req.body ?? {};
     const updated = { ...run.meta };
@@ -112,7 +154,7 @@ export function registerRunRoutes(
 
   app.get("/runs/:id/steps", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const steps = await loadRunSteps(run);
     res.json(steps);
@@ -120,7 +162,7 @@ export function registerRunRoutes(
 
   app.get("/runs/:id/steps/:stepId/artifacts", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const stepPath = getRunStepDir(run, req.params.stepId);
     const files = await listArtifacts(stepPath);
@@ -129,7 +171,7 @@ export function registerRunRoutes(
 
   app.get("/runs/:id/steps/:stepId/artifacts/*", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     const artifactPath = (req.params as Record<string, string | undefined>)["0"] ?? "";
     const baseDir = getRunStepDir(run, req.params.stepId);
@@ -156,7 +198,7 @@ export function registerRunRoutes(
 
   app.get("/runs/:id/stream", async (req, res) => {
     const workspaceId = req.query.workspace ? String(req.query.workspace) : undefined;
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) {
       res.status(404).end();
       return;
@@ -219,7 +261,7 @@ export function registerRunRoutes(
     const runId = String(req.params.id ?? "");
     if (!runId) return res.status(400).json({ error: "run id required" });
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
-    const run = options.runIndex.get(runId, workspaceId);
+    const run = await loadRunWithSync(runId, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     if (!isMissionRunMeta(run.meta)) {
       return res.status(400).json({ error: "Resume is only supported for mission runs." });
@@ -236,7 +278,7 @@ export function registerRunRoutes(
     const runId = String(req.params.id ?? "");
     if (!runId) return res.status(400).json({ error: "run id required" });
     const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
-    const run = options.runIndex.get(runId, workspaceId);
+    const run = await loadRunWithSync(runId, workspaceId);
     if (run && isMissionRunMeta(run.meta)) {
       const updated = {
         ...run.meta,
@@ -297,7 +339,7 @@ export function registerRunRoutes(
     const stepId = String(req.body?.stepId ?? "");
     const always = Boolean(req.body?.always);
     if (!stepId) return res.status(400).json({ error: "stepId required" });
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     await writeText(path.join(run.runDir, "approvals", `${stepId}.approved`), new Date().toISOString());
     if (always) {
@@ -318,7 +360,7 @@ export function registerRunRoutes(
     const targetTool = typeof req.body?.targetTool === "string" ? req.body.targetTool : undefined;
     if (!workspaceId) return res.status(400).json({ error: "workspaceId required" });
     if (!text.trim()) return res.status(400).json({ error: "text required" });
-    const run = options.runIndex.get(req.params.id, workspaceId);
+    const run = await loadRunWithSync(req.params.id, workspaceId);
     if (!run) return res.status(404).json({ error: "Run not found" });
     if (!isMissionRunMeta(run.meta)) {
       return res.status(400).json({ error: "Node imports are only supported for mission runs." });
@@ -339,6 +381,258 @@ export function registerRunRoutes(
       res.status(400).json({ error: err?.message ?? "Mission node import failed." });
     }
   });
+}
+
+function statusPriority(status: string): number {
+  if (status === "blocked") return 0;
+  if (status === "failed") return 1;
+  if (status === "paused" || status === "interrupted") return 2;
+  if (status === "running") return 3;
+  if (status === "ready_for_review") return 4;
+  return 5;
+}
+
+async function buildRunOverview(options: {
+  rootDir: string;
+  workspaceId?: string;
+  status?: string;
+  tag?: string;
+  search?: string;
+  runs: RunSummary[];
+  listWorkspacePaths: () => Promise<string[]>;
+  resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
+  agentPlatform: AgentPlatformLike;
+}): Promise<RunOverviewItem[]> {
+  const workItems = await loadOverviewWorkItems({
+    rootDir: options.rootDir,
+    workspaceId: options.workspaceId,
+    listWorkspacePaths: options.listWorkspacePaths,
+    resolveWorkspacePath: options.resolveWorkspacePath
+  });
+
+  const taskByWorkItemId = new Map<string, ReturnType<AgentPlatformLike["listTasks"]>>();
+  for (const workItem of workItems) {
+    const tasks = options.agentPlatform.listTasks({
+      workspaceId: workItem.workspaceId,
+      workItemId: workItem.id
+    });
+    taskByWorkItemId.set(workItem.id, tasks);
+  }
+
+  const workItemRows = workItems
+    .filter((workItem) => isTaskGraphOverviewWorkItem(workItem))
+    .map((workItem) => {
+      const relatedTasks = taskByWorkItemId.get(workItem.id) ?? [];
+      const childRunIds = new Set<string>();
+      if (typeof workItem.linkedRunId === "string" && workItem.linkedRunId.trim()) {
+        childRunIds.add(workItem.linkedRunId.trim());
+      }
+      for (const task of relatedTasks) {
+        if (typeof task.linkedRunId === "string" && task.linkedRunId.trim()) {
+          childRunIds.add(task.linkedRunId.trim());
+        }
+      }
+      return {
+        itemType: "work_item" as const,
+        id: workItem.id,
+        workspaceId: workItem.workspaceId,
+        title: workItem.brief.title,
+        sourceType: workItem.brief.sourceType,
+        status: workItem.status,
+        executionMode: resolveWorkItemExecutionMode(workItem),
+        reviewStatus: workItem.reviewStatus ?? null,
+        summary: summarizeWorkItemExecution(workItem),
+        recommendedAction: recommendedWorkItemAction(workItem),
+        lastActivityAt: workItem.updatedAt ?? workItem.lastStartedAt ?? workItem.createdAt,
+        childRunCount: childRunIds.size,
+        childTaskCount: Array.isArray(workItem.linkedTaskIds) ? workItem.linkedTaskIds.length : relatedTasks.length
+      };
+    })
+    .filter((item) => matchesOverviewFilters(item, options.search, options.status, options.tag));
+
+  const parentWorkItemByRunId = new Map<string, { id: string; title: string }>();
+  for (const workItem of workItems) {
+    if (typeof workItem.linkedRunId === "string" && workItem.linkedRunId.trim()) {
+      parentWorkItemByRunId.set(workItem.linkedRunId.trim(), {
+        id: workItem.id,
+        title: workItem.brief.title
+      });
+    }
+    for (const task of taskByWorkItemId.get(workItem.id) ?? []) {
+      if (typeof task.linkedRunId === "string" && task.linkedRunId.trim()) {
+        parentWorkItemByRunId.set(task.linkedRunId.trim(), {
+          id: workItem.id,
+          title: workItem.brief.title
+        });
+      }
+    }
+  }
+
+  const runRows = options.runs.map((run) => {
+    const parent = parentWorkItemByRunId.get(run.runId) ?? null;
+    return {
+      ...run,
+      itemType: "run" as const,
+      summary: summarizeRunRow(run, parent),
+      recommendedAction: recommendedRunAction(run),
+      lastActivityAt: run.end ?? run.start,
+      parentWorkItemId: parent?.id ?? null,
+      parentWorkItemTitle: parent?.title ?? null
+    };
+  });
+
+  // Keep child runs subordinate to their parent work item session by default.
+  // Only standalone runs (no parentWorkItemId) are surfaced at the top level
+  // in the overview. Raw run listings and run detail endpoints remain unchanged.
+  const topLevelRuns = runRows.filter((row) => !row.parentWorkItemId);
+
+  return [...workItemRows, ...topLevelRuns].sort((left, right) => {
+    if (left.itemType !== right.itemType) {
+      return left.itemType === "work_item" ? -1 : 1;
+    }
+    if (left.itemType === "run" && right.itemType === "run") {
+      const leftParent = left.parentWorkItemId ? 1 : 0;
+      const rightParent = right.parentWorkItemId ? 1 : 0;
+      if (leftParent !== rightParent) return leftParent - rightParent;
+    }
+    const priority = statusPriority(left.status) - statusPriority(right.status);
+    if (priority !== 0) return priority;
+    return overviewTimestamp(right) - overviewTimestamp(left);
+  });
+}
+
+async function loadOverviewWorkItems(options: {
+  rootDir: string;
+  workspaceId?: string;
+  listWorkspacePaths: () => Promise<string[]>;
+  resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
+}): Promise<WorkItemRecord[]> {
+  const candidates = await resolveWorkspaceCandidates(options);
+  const items: WorkItemRecord[] = [];
+  for (const candidate of candidates) {
+    const filePath = getWorkspaceWorkItemsPath(candidate.path);
+    const raw = await fs.readFile(filePath, "utf8").then((text) => JSON.parse(text) as unknown[]).catch(() => []);
+    if (!Array.isArray(raw)) continue;
+    for (const entry of raw) {
+      if (entry && typeof entry === "object") {
+        items.push(entry as WorkItemRecord);
+      }
+    }
+  }
+  return items;
+}
+
+async function resolveWorkspaceCandidates(options: {
+  rootDir: string;
+  workspaceId?: string;
+  listWorkspacePaths: () => Promise<string[]>;
+  resolveWorkspacePath: (workspaceId?: string) => Promise<string | null>;
+}): Promise<Array<{ id: string; path: string }>> {
+  if (options.workspaceId) {
+    const workspacePath = await options.resolveWorkspacePath(options.workspaceId);
+    return workspacePath ? [{ id: options.workspaceId, path: workspacePath }] : [];
+  }
+  const manifests = await loadWorkspaces(options.rootDir, {
+    repoPaths: await options.listWorkspacePaths().catch(() => [])
+  }).catch(() => []);
+  return manifests.map((workspace) => ({ id: workspace.id, path: workspace.path }));
+}
+
+function isTaskGraphOverviewWorkItem(workItem: WorkItemRecord): boolean {
+  const executionMode = resolveWorkItemExecutionMode(workItem);
+  if (executionMode !== "task_graph") return false;
+  return ["running", "blocked", "ready_for_review", "failed"].includes(workItem.status)
+    || workItem.reviewStatus === "changes_requested";
+}
+
+function resolveWorkItemExecutionMode(workItem: WorkItemRecord): "task_graph" | "mission" | "not_started" {
+  if (workItem.executionMode === "task_graph" || (workItem.linkedTaskIds?.length ?? 0) > 0) return "task_graph";
+  if (workItem.executionMode === "mission" || workItem.linkedRunId) return "mission";
+  return "not_started";
+}
+
+function summarizeWorkItemExecution(workItem: WorkItemRecord): string {
+  if (workItem.reviewStatus === "changes_requested") {
+    return "Changes were requested on the latest cycle. Launch remediation when you are ready to address them.";
+  }
+  if (workItem.status === "ready_for_review") {
+    return "The current cycle is ready for a human review decision.";
+  }
+  if (workItem.status === "blocked") {
+    return "Execution is blocked. Open the work item to inspect the current lane, gate, or recovery guidance.";
+  }
+  if (workItem.status === "failed") {
+    return "The latest execution failed. Inspect the work item to see which lane or child run failed.";
+  }
+  if (workItem.status === "running") {
+    if (resolveWorkItemExecutionMode(workItem) === "task_graph") {
+      return "Task-graph execution is in flight. Work remains the top-level truth for team, gate, and evidence state.";
+    }
+    return "Mission execution is still running.";
+  }
+  return "Open the work item for the latest summary, readiness, and next action.";
+}
+
+function recommendedWorkItemAction(workItem: WorkItemRecord): string {
+  if (workItem.reviewStatus === "changes_requested") return "Launch remediation";
+  if (workItem.status === "ready_for_review") return "Review work item";
+  if (workItem.status === "blocked" || workItem.status === "failed") return "Inspect work item";
+  if (workItem.status === "running") return "Open work item";
+  return "Open work item";
+}
+
+function summarizeRunRow(run: RunSummary, parent: { id: string; title: string } | null): string {
+  if (parent) {
+    return `Child run for ${parent.title}. Open the parent work item for the top-level task-graph summary.`;
+  }
+  if (run.status === "blocked") return "Run finished with blocking findings or approval debt.";
+  if (run.status === "failed") return "Run failed before completion.";
+  if (run.status === "paused" || run.status === "interrupted") return "Run is paused and may need resume or recovery.";
+  if (run.status === "running") return "Run execution is still in flight.";
+  return "Standalone run history and evidence.";
+}
+
+function recommendedRunAction(run: RunSummary): string {
+  if (run.status === "blocked") return "Review findings";
+  if (run.status === "failed") return "Inspect failure";
+  if (run.status === "paused" || run.status === "interrupted") return "Resume";
+  return "Open run";
+}
+
+function overviewTimestamp(item: RunOverviewItem): number {
+  if (item.itemType === "work_item") {
+    return Date.parse(item.lastActivityAt);
+  }
+  return Date.parse(item.lastActivityAt ?? item.start ?? "");
+}
+
+function matchesOverviewFilters(
+  item: {
+    itemType: "work_item" | "run";
+    title?: string;
+    runId?: string;
+    summary?: string;
+    sourceType?: string;
+    status: string;
+  },
+  search?: string,
+  status?: string,
+  tag?: string
+): boolean {
+  if (status) {
+    const normalized = status.toLowerCase();
+    if (normalized === "finished") {
+      if (!["completed", "finished"].includes(item.status)) return false;
+    } else if (item.status !== normalized) {
+      return false;
+    }
+  }
+  if (tag && item.itemType === "work_item") {
+    return false;
+  }
+  if (!search) return true;
+  const haystack = [item.title, item.runId, item.summary, item.sourceType].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(search);
 }
 
 function isMissionRunMeta(run: any): run is {

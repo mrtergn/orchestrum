@@ -32,6 +32,47 @@ export type ValidationState = {
   completedAt?: string | null;
 };
 
+export type RunRecoveryArtifact = {
+  label: string;
+  path: string;
+  mimeType?: string | null;
+};
+
+export type RunRecoveryAction = {
+  kind:
+    | "inspect_artifact"
+    | "clean_repo"
+    | "resolve_conflicts"
+    | "resume_run"
+    | "retry_task"
+    | "manual_recover";
+  label: string;
+  detail: string;
+  artifactPath?: string | null;
+  runId?: string | null;
+  taskId?: string | null;
+};
+
+export type RunRecoveryState = {
+  status: "attention_required" | "interrupted";
+  kind:
+    | "audit_findings"
+    | "patch_conflict"
+    | "dirty_tree"
+    | "validation_blocked"
+    | "approval_pause"
+    | "input_pause"
+    | "interrupted"
+    | "unknown";
+  summary: string;
+  guidance: string[];
+  artifacts: RunRecoveryArtifact[];
+  suggestedActions: RunRecoveryAction[];
+  updatedAt: string;
+  blockingStepId?: string | null;
+  blockingStepTitle?: string | null;
+};
+
 export type ChangeState = {
   status: ChangeStatus;
   diffArtifact?: string | null;
@@ -169,6 +210,7 @@ export type RunState = {
   pauseReason?: PauseReason | null;
   change?: ChangeState | null;
   validation?: ValidationState | null;
+  recovery?: RunRecoveryState | null;
   verdict?: RunVerdict | null;
   profile?: {
     risk_tolerance?: string;

@@ -3,17 +3,22 @@ import path from "node:path";
 import {
   getWorkspaceAgentsPath,
   loadMissionTemplate,
+  type WorkItemAuditRisk,
   type WorkItemGate,
   type MissionTemplate,
   type WorkItemCyclePlan,
   type WorkItemExecutionStep,
+  type WorkItemMinimalTeamMember,
   type WorkItemPlanningDetail,
   type WorkItemRemediationPlan,
   type WorkItemRecord,
   type WorkItemReviewSummary,
+  type WorkItemTeamSelectionLane,
+  type WorkItemValidationContract,
   type WorkItemWorkstream,
   type WorkPlanLane,
   type WorkPlanLaneAssignment,
+  type WorkPlanLaneMatch,
   type WorkPlanTask,
   type WorkPlanTaskKind,
   type WorkSprintPreview
@@ -70,6 +75,17 @@ type RemediationTaskSignal = {
   resultSummary?: string;
 };
 
+type LifecycleIntentSignals = {
+  frontend: boolean;
+  backend: boolean;
+  browser: boolean;
+  scenario: boolean;
+  validation: boolean;
+  api: boolean;
+  data: boolean;
+  notes: string[];
+};
+
 const LANE_DEFINITIONS: WorkPlanLane[] = [
   { id: "pm", label: "PM", description: "Scope, framing, and planning work." },
   { id: "frontend", label: "Frontend", description: "UI and client-side implementation." },
@@ -90,12 +106,51 @@ async function composePlanningDetail(options: {
   template: ReturnType<typeof templateSummary>;
   sourceSnapshot: WorkItemPlanningDetail["sourceSnapshot"];
 }): Promise<WorkItemPlanningDetail> {
-  const tasks = ensureExecutionLifecycleTasks(options.tasks, options.sourceType);
+  const tasks = ensureExecutionLifecycleTasks(options.tasks, options.sourceType, {
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints
+  });
   const lanes = lanesFromTasks(tasks);
-  const teamAssignments = await buildTeamAssignments(options.workspacePath, lanes);
+  const workspaceAgents = await loadWorkspaceAgents(options.workspacePath);
+  const teamAssignments = buildTeamAssignmentsForLanes(lanes, workspaceAgents);
   const { workstreams, gates, qaCoverage, tasks: annotatedTasks } = buildWorkstreamPlan({
     tasks,
     teamAssignments
+  });
+  const validationContract = buildValidationContract({
+    sourceType: options.sourceType,
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints,
+    tasks: annotatedTasks,
+    workstreams
+  });
+  const {
+    teamSelection,
+    omittedLanes,
+    missingCapabilities,
+    selectionRationale
+  } = buildTeamSelection({
+    workspaceAgents,
+    activeLanes: lanes,
+    workstreams,
+    gates,
+    teamAssignments,
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints,
+    sourceType: options.sourceType
+  });
+  const auditRisk = buildAuditRisk({
+    sourceType: options.sourceType,
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints,
+    workstreams,
+    gates,
+    validationContract,
+    teamSelection
   });
   return {
     summary: options.summary,
@@ -106,7 +161,13 @@ async function composePlanningDetail(options: {
     workstreams,
     gates,
     qaCoverage,
+    validationContract,
+    auditRisk,
     teamAssignments,
+    teamSelection,
+    omittedLanes,
+    missingCapabilities,
+    selectionRationale,
     executionSteps: executionStepsFromTasks(annotatedTasks),
     template: options.template,
     sourceSnapshot: options.sourceSnapshot
@@ -338,17 +399,71 @@ export function buildWorkItemRemediationPlan(options: {
     review: options.review,
     sequence: nextCycleSequence
   });
+  const cycleTeamAssignments = options.detail.teamAssignments.filter((assignment) =>
+    cycleTasks.some((task) => task.laneId === assignment.laneId)
+  );
+  const cycleWorkstreamPlan = buildWorkstreamPlan({
+    tasks: cycleTasks,
+    teamAssignments: cycleTeamAssignments
+  });
+  const cycleValidationContract = buildValidationContract({
+    sourceType: options.workItem.brief.sourceType,
+    summary: `Cycle ${nextCycleSequence} remediation plan. ${buildRemediationSummary(selectedLaneIds, note, options.review)}`,
+    acceptanceCriteria: mergeUnique(options.detail.acceptanceCriteria, acceptanceDelta),
+    constraints: mergeUnique(options.detail.constraints, constraintDelta),
+    tasks: cycleWorkstreamPlan.tasks,
+    workstreams: cycleWorkstreamPlan.workstreams
+  });
+  const cycleTeamSelection = options.detail.teamSelection.map((entry) => {
+    const required = selectedLaneIds.includes(entry.laneId);
+    const hasMatch = entry.matches.length > 0;
+    return {
+      ...entry,
+      required,
+      decision: required ? (hasMatch ? "selected" : "missing") : hasMatch ? "standby" : "omitted",
+      selectionReason: required
+        ? entry.selectionReason ?? `${entry.laneLabel} participates in the remediation cycle.`
+        : entry.selectionReason ?? null,
+      omissionReason: required
+        ? null
+        : `Lane is not part of the remediation minimal team for this cycle.`,
+      expectedWorkstreams: [],
+      expectedGates: []
+    } satisfies WorkItemTeamSelectionLane;
+  });
   const cycleDetail = {
     ...options.detail,
     summary: `Cycle ${nextCycleSequence} remediation plan. ${buildRemediationSummary(selectedLaneIds, note, options.review)}`,
     acceptanceCriteria: mergeUnique(options.detail.acceptanceCriteria, acceptanceDelta),
     constraints: mergeUnique(options.detail.constraints, constraintDelta),
     lanes: lanesFromTasks(cycleTasks),
-    tasks: cycleTasks,
-    teamAssignments: options.detail.teamAssignments.filter((assignment) =>
-      cycleTasks.some((task) => task.laneId === assignment.laneId)
-    ),
-    executionSteps: executionStepsFromTasks(cycleTasks)
+    tasks: cycleWorkstreamPlan.tasks,
+    workstreams: cycleWorkstreamPlan.workstreams,
+    gates: cycleWorkstreamPlan.gates,
+    qaCoverage: cycleWorkstreamPlan.qaCoverage,
+    teamAssignments: cycleTeamAssignments,
+    teamSelection: cycleTeamSelection,
+    omittedLanes: cycleTeamSelection
+      .filter((entry) => !selectedLaneIds.includes(entry.laneId))
+      .map((entry) => entry.laneId),
+    missingCapabilities: cycleTeamSelection
+      .filter((entry) => selectedLaneIds.includes(entry.laneId) && entry.matches.length === 0)
+      .map((entry) => `${entry.laneLabel}: no specialist is configured for this remediation lane.`),
+    selectionRationale: cycleTeamSelection
+      .filter((entry) => selectedLaneIds.includes(entry.laneId))
+      .map((entry) => entry.selectionReason ?? `${entry.laneLabel} was retained for remediation.`),
+    executionSteps: executionStepsFromTasks(cycleTasks),
+    validationContract: cycleValidationContract,
+    auditRisk: buildAuditRisk({
+      sourceType: options.workItem.brief.sourceType,
+      summary: `Cycle ${nextCycleSequence} remediation plan. ${buildRemediationSummary(selectedLaneIds, note, options.review)}`,
+      acceptanceCriteria: mergeUnique(options.detail.acceptanceCriteria, acceptanceDelta),
+      constraints: mergeUnique(options.detail.constraints, constraintDelta),
+      workstreams: cycleWorkstreamPlan.workstreams,
+      gates: cycleWorkstreamPlan.gates,
+      validationContract: cycleValidationContract,
+      teamSelection: cycleTeamSelection
+    })
   } satisfies WorkItemPlanningDetail;
   const cyclePlan = createWorkItemCyclePlan({
     detail: cycleDetail,
@@ -386,6 +501,13 @@ export function applyRemediationPlanToPlanningDetail(options: {
   detail: WorkItemPlanningDetail;
   remediationPlan: WorkItemRemediationPlan;
 }): WorkItemPlanningDetail {
+  const teamSelection = options.remediationPlan.cyclePlan.teamSelection.map((entry) => ({
+    ...entry,
+    preferredSpecializations: [...entry.preferredSpecializations],
+    expectedWorkstreams: [...entry.expectedWorkstreams],
+    expectedGates: [...entry.expectedGates],
+    matches: entry.matches.map((match) => ({ ...match }))
+  }));
   return {
     ...options.detail,
     summary: options.remediationPlan.cyclePlan.summary,
@@ -396,7 +518,19 @@ export function applyRemediationPlanToPlanningDetail(options: {
     workstreams: [...options.remediationPlan.cyclePlan.workstreams],
     gates: [...options.remediationPlan.cyclePlan.gates],
     qaCoverage: options.remediationPlan.cyclePlan.gates.some((gate) => gate.type === "qa_scenario") ? "scenario" : "none",
+    validationContract: options.remediationPlan.cyclePlan.validationContract ?? null,
+    auditRisk: options.remediationPlan.cyclePlan.auditRisk ?? null,
     teamAssignments: [...options.remediationPlan.cyclePlan.teamAssignments],
+    teamSelection,
+    omittedLanes: teamSelection
+      .filter((entry) => entry.decision === "omitted" || entry.decision === "standby")
+      .map((entry) => entry.laneId),
+    missingCapabilities: teamSelection
+      .filter((entry) => entry.decision === "missing")
+      .map((entry) => `${entry.laneLabel}: no specialist is configured for this lane.`),
+    selectionRationale: teamSelection
+      .map((entry) => entry.selectionReason ?? entry.omissionReason ?? "")
+      .filter(Boolean),
     executionSteps: [...options.remediationPlan.cyclePlan.executionSteps]
   };
 }
@@ -441,11 +575,33 @@ export function createWorkItemCyclePlan(options: {
       ...gate,
       workstreamIds: [...gate.workstreamIds]
     })),
+    validationContract: options.detail.validationContract
+      ? {
+          ...options.detail.validationContract,
+          commands: [...options.detail.validationContract.commands],
+          requirements: [...options.detail.validationContract.requirements],
+          rationale: [...options.detail.validationContract.rationale]
+        }
+      : null,
+    auditRisk: options.detail.auditRisk
+      ? {
+          level: options.detail.auditRisk.level,
+          reasons: [...options.detail.auditRisk.reasons]
+        }
+      : null,
     teamAssignments: options.detail.teamAssignments.map((assignment) => ({
       ...assignment,
       preferredSpecializations: [...assignment.preferredSpecializations],
       matches: assignment.matches.map((match) => ({ ...match }))
     })),
+    teamSelection: options.detail.teamSelection.map((selection) => ({
+      ...selection,
+      preferredSpecializations: [...selection.preferredSpecializations],
+      expectedWorkstreams: [...selection.expectedWorkstreams],
+      expectedGates: [...selection.expectedGates],
+      matches: selection.matches.map((match) => ({ ...match }))
+    })),
+    recommendedMinimalTeam: buildRecommendedMinimalTeam(options.detail.teamSelection),
     executionSteps: options.detail.executionSteps.map((step) => ({
       ...step,
       dependsOn: [...step.dependsOn],
@@ -777,18 +933,61 @@ function templateExecutionSteps(template: MissionTemplate): WorkItemExecutionSte
 
 function synthesizeTemplateLifecycleTasks(
   tasks: WorkPlanTask[],
-  sourceType: WorkItemRecord["brief"]["sourceType"]
+  sourceType: WorkItemRecord["brief"]["sourceType"],
+  context?: {
+    summary?: string;
+    acceptanceCriteria?: string[];
+    constraints?: string[];
+  }
 ): WorkPlanTask[] {
-  return ensureExecutionLifecycleTasks(tasks, sourceType);
+  return ensureExecutionLifecycleTasks(tasks, sourceType, context);
 }
 
 function buildBriefDrivenLifecycleTasks(
   workItem: WorkItemRecord,
   template: MissionTemplate
 ): WorkPlanTask[] {
-  const workstreamSeeds = deriveImplementationWorkstreams(workItem);
+  if (workItem.brief.sourceType === "audit") {
+    return [
+      {
+        id: "plan_audit_scope",
+        title: planningTaskTitleForSourceType("audit"),
+        description: "Frame the audit scope, expected evidence, and review focus before findings are generated.",
+        laneId: "pm",
+        laneLabel: laneById("pm").label,
+        roleHint: "pm",
+        kind: "planning",
+        source: "template",
+        dependsOn: [],
+        sourceLine: null
+      },
+      {
+        id: "final_audit",
+        title: auditTaskTitleForSourceType("audit"),
+        description: "Review the requested repo area and return findings without opening an implementation lane.",
+        laneId: "audit",
+        laneLabel: laneById("audit").label,
+        roleHint: "audit",
+        kind: "review",
+        source: "template",
+        dependsOn: ["plan_audit_scope"],
+        sourceLine: null
+      }
+    ];
+  }
+  const lifecycleSignals = detectLifecycleIntentSignals({
+    sourceType: workItem.brief.sourceType,
+    summary: workItem.brief.request,
+    acceptanceCriteria: workItem.brief.acceptanceCriteria,
+    constraints: workItem.brief.constraints
+  });
+  const workstreamSeeds = deriveImplementationWorkstreamsWithSignals(workItem, lifecycleSignals);
   if (workstreamSeeds.length === 0) {
-    return synthesizeTemplateLifecycleTasks(templatePlanningTasks(template), workItem.brief.sourceType);
+    return synthesizeTemplateLifecycleTasks(templatePlanningTasks(template), workItem.brief.sourceType, {
+      summary: workItem.brief.request,
+      acceptanceCriteria: workItem.brief.acceptanceCriteria,
+      constraints: workItem.brief.constraints
+    });
   }
 
   const implementationTasks: WorkPlanTask[] = [];
@@ -833,10 +1032,31 @@ function buildBriefDrivenLifecycleTasks(
       ]
     : uniqueImplementationTasks;
 
-  return ensureExecutionLifecycleTasks(withIntegration, workItem.brief.sourceType);
+  return ensureExecutionLifecycleTasks(withIntegration, workItem.brief.sourceType, {
+    summary: workItem.brief.request,
+    acceptanceCriteria: workItem.brief.acceptanceCriteria,
+    constraints: workItem.brief.constraints
+  });
 }
 
 function deriveImplementationWorkstreams(workItem: WorkItemRecord): Array<{
+  title: string;
+  description: string | null;
+  laneId: string;
+  roleHint: string | null;
+}> {
+  return deriveImplementationWorkstreamsWithSignals(workItem, detectLifecycleIntentSignals({
+    sourceType: workItem.brief.sourceType,
+    summary: workItem.brief.request,
+    acceptanceCriteria: workItem.brief.acceptanceCriteria,
+    constraints: workItem.brief.constraints
+  }));
+}
+
+function deriveImplementationWorkstreamsWithSignals(
+  workItem: WorkItemRecord,
+  lifecycleSignals: LifecycleIntentSignals
+): Array<{
   title: string;
   description: string | null;
   laneId: string;
@@ -851,23 +1071,49 @@ function deriveImplementationWorkstreams(workItem: WorkItemRecord): Array<{
   const rawSeeds = (criteriaSeeds.length > 0 ? criteriaSeeds : requestSeeds).filter(Boolean);
 
   if (rawSeeds.length === 0) {
-    return [{
-      title: defaultImplementationTaskTitle(sourceType),
+    const fallbackLanes = inferImplementationLanes(
+      [workItem.brief.title, workItem.brief.request].filter(Boolean).join("\n"),
+      sourceType,
+      lifecycleSignals
+    );
+    return fallbackLanes.map((laneId, index) => ({
+      title: implementationTaskTitleFromSeed(defaultImplementationTaskTitle(sourceType), laneId, index + 1),
       description: workItem.brief.request.trim() || null,
-      laneId: inferImplementationLane(workItem.brief.title, sourceType),
-      roleHint: inferRoleHint(workItem.brief.title) ?? "dev"
-    }];
+      laneId,
+      roleHint: roleForImplementationLane(laneId)
+    }));
   }
 
-  return rawSeeds.map((seed, index) => {
-    const laneId = inferImplementationLane(seed, sourceType);
-    return {
-      title: implementationTaskTitleFromSeed(seed, laneId, index + 1),
+  const seeds: Array<{
+    title: string;
+    description: string | null;
+    laneId: string;
+    roleHint: string | null;
+  }> = rawSeeds.flatMap((seed, index) => {
+    const laneIds = inferImplementationLanes(seed, sourceType, lifecycleSignals);
+    return laneIds.map((laneId, laneIndex) => ({
+      title: implementationTaskTitleFromSeed(seed, laneId, index + laneIndex + 1),
       description: seed,
       laneId,
       roleHint: roleForImplementationLane(laneId)
-    };
+    }));
   });
+
+  const requiredLanes: string[] = [];
+  if (lifecycleSignals.frontend) requiredLanes.push("frontend");
+  if (lifecycleSignals.backend) requiredLanes.push("backend");
+
+  for (const laneId of requiredLanes) {
+    if (seeds.some((seed) => seed.laneId === laneId)) continue;
+    seeds.push({
+      title: implementationTaskTitleFromSeed(workItem.brief.title || workItem.brief.request, laneId, seeds.length + 1),
+      description: workItem.brief.request.trim() || null,
+      laneId,
+      roleHint: roleForImplementationLane(laneId)
+    });
+  }
+
+  return seeds;
 }
 
 function extractRequestWorkstreamSeeds(request: string): string[] {
@@ -887,25 +1133,32 @@ function extractRequestWorkstreamSeeds(request: string): string[] {
     .slice(0, 4);
 }
 
-function inferImplementationLane(
+function inferImplementationLanes(
   text: string,
-  sourceType: WorkItemRecord["brief"]["sourceType"]
-): string {
+  sourceType: WorkItemRecord["brief"]["sourceType"],
+  lifecycleSignals?: LifecycleIntentSignals | null
+): string[] {
   const normalized = text.trim().toLowerCase();
-  if (
-    /\b(ui|ux|page|screen|layout|modal|dialog|component|button|form|client|frontend|browser)\b/.test(normalized)
-  ) {
-    return "frontend";
-  }
-  if (
-    /\b(api|server|backend|database|db|schema|migration|query|endpoint|auth|worker|service)\b/.test(normalized)
-  ) {
-    return "backend";
-  }
+  const frontendOnly = /\b(frontend-only|ui-only|client-only|visual-only)\b/.test(normalized);
+  const backendOnly = /\b(backend-only|server-only|api-only|service-only|data-only)\b/.test(normalized);
+  const frontend = !backendOnly && (
+    frontendOnly ||
+    /\b(ui|ux|page|screen|layout|modal|dialog|component|button|form|client|frontend|browser|view|dashboard)\b/.test(normalized)
+  );
+  const backend = !frontendOnly && (
+    backendOnly ||
+    /\b(api|server|backend|database|db|schema|migration|query|endpoint|auth|worker|service|repository|webhook|queue)\b/.test(normalized)
+  );
+  if (frontend && backend) return ["frontend", "backend"];
+  if (frontend) return ["frontend"];
+  if (backend) return ["backend"];
+  if (lifecycleSignals?.frontend && lifecycleSignals?.backend) return ["frontend", "backend"];
+  if (lifecycleSignals?.frontend) return ["frontend"];
+  if (lifecycleSignals?.backend) return ["backend"];
   if (sourceType === "bug" && /\b(crash|error|exception|regression|fix)\b/.test(normalized)) {
-    return "developer";
+    return ["developer"];
   }
-  return "developer";
+  return ["developer"];
 }
 
 function implementationTaskTitleFromSeed(seed: string, laneId: string, fallbackIndex: number): string {
@@ -928,6 +1181,8 @@ function implementationTaskTitleFromSeed(seed: string, laneId: string, fallbackI
 
 function defaultImplementationTaskTitle(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
   switch (sourceType) {
+    case "audit":
+      return "Inspect requested scope";
     case "bug":
       return "Implement reported bugfix";
     case "pr_hardening":
@@ -937,6 +1192,220 @@ function defaultImplementationTaskTitle(sourceType: WorkItemRecord["brief"]["sou
     default:
       return "Implement requested feature";
   }
+}
+
+function isBrowserRelevantLifecycle(options: {
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  tasks: WorkPlanTask[];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+}): boolean {
+  if (options.tasks.some((task) => task.laneId === "qa" || task.qaMode)) return true;
+  if (options.tasks.some((task) => task.laneId === "frontend")) return true;
+  const signals = detectLifecycleIntentSignals(options);
+  return signals.browser;
+}
+
+function requiresScenarioGate(options: {
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  tasks: WorkPlanTask[];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+}): boolean {
+  if (options.tasks.some((task) => task.qaMode === "scenario")) return true;
+  const signals = detectLifecycleIntentSignals(options);
+  return signals.scenario;
+}
+
+function buildValidationContract(options: {
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  tasks: WorkPlanTask[];
+  workstreams: WorkItemWorkstream[];
+}): WorkItemValidationContract {
+  const commands = extractValidationCommands([
+    options.summary,
+    ...options.acceptanceCriteria,
+    ...options.constraints,
+    ...options.tasks.map((task) => `${task.title} ${task.description ?? ""}`)
+  ]);
+  const implementationLaneCount = new Set(
+    options.workstreams
+      .filter((workstream) => workstream.type === "implement")
+      .map((workstream) => workstream.laneId)
+  ).size;
+  const required = commands.length > 0 || requiresValidationLane({
+    sourceType: options.sourceType,
+    tasks: options.tasks,
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints,
+    implementationLaneCount
+  });
+  if (commands.length > 0) {
+    return {
+      required: true,
+      source: "explicit",
+      commands,
+      requirements: commands.map((command) => `Run \`${command}\` and record the outcome before review.`),
+      rationale: ["Validation is explicitly required because this cycle names concrete verification commands."]
+    };
+  }
+  if (!required) {
+    return {
+      required: false,
+      source: "not_required",
+      commands: [],
+      requirements: [],
+      rationale: ["No separate validation contract is required for this low-risk cycle."]
+    };
+  }
+  const signals = detectLifecycleIntentSignals(options);
+  const requirements = new Set<string>();
+  if (signals.backend || signals.api || signals.data) {
+    requirements.add("Verify the affected backend/API path with the workspace validation command before review.");
+  }
+  if (signals.browser) {
+    requirements.add("Verify the user-facing flow before the cycle can be reviewed.");
+  }
+  if (implementationLaneCount > 1) {
+    requirements.add("Run validation after the implementation lanes have been integrated into one delivery slice.");
+  }
+  if (options.sourceType === "bug") {
+    requirements.add("Prove the reported regression is fixed with explicit validation evidence.");
+  }
+  if (options.sourceType === "pr_hardening") {
+    requirements.add("Record release-hardening validation evidence before operator review.");
+  }
+  return {
+    required: true,
+    source: "risk_based",
+    commands: [],
+    requirements: Array.from(requirements),
+    rationale: ["Validation is required because this cycle carries enough product or integration risk to need explicit verification."]
+  };
+}
+
+function buildAuditRisk(options: {
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  workstreams: WorkItemWorkstream[];
+  gates: WorkItemGate[];
+  validationContract: WorkItemValidationContract;
+  teamSelection: WorkItemTeamSelectionLane[];
+}): WorkItemAuditRisk {
+  const normalized = [options.summary, ...options.acceptanceCriteria, ...options.constraints].join("\n").toLowerCase();
+  const implementLaneCount = new Set(
+    options.workstreams.filter((workstream) => workstream.type === "implement").map((workstream) => workstream.laneId)
+  ).size;
+  const reasons: string[] = [];
+  let score = 0;
+  if (options.sourceType === "pr_hardening") {
+    score += 3;
+    reasons.push("Release hardening cycles are treated as high-audit-risk by default.");
+  }
+  if (implementLaneCount > 1 || options.workstreams.some((workstream) => workstream.type === "integrate")) {
+    score += 2;
+    reasons.push("Cross-lane implementation and integration increase the review surface.");
+  }
+  if (options.gates.some((gate) => gate.type === "qa_scenario")) {
+    score += 1;
+    reasons.push("Browser Scenario coverage indicates a user-critical flow that needs stronger audit attention.");
+  }
+  if (options.validationContract.required) {
+    score += options.validationContract.source === "explicit" ? 2 : 1;
+    reasons.push(
+      options.validationContract.source === "explicit"
+        ? "This cycle names explicit validation commands that the audit must verify."
+        : "This cycle needs explicit validation evidence before the operator should trust it."
+    );
+  }
+  if (/\b(auth|security|permission|secret|token|payment|billing|migration|schema|database|rollback|compliance)\b/.test(normalized)) {
+    score += 2;
+    reasons.push("The change touches a sensitive area such as auth, data, migration, or security.");
+  }
+  const missingSelectedCoverage = options.teamSelection.filter((selection) => selection.required && selection.decision === "missing");
+  if (missingSelectedCoverage.length > 0) {
+    score += 2;
+    reasons.push(`Missing specialist coverage remains on ${missingSelectedCoverage.map((entry) => entry.laneLabel).join(", ")}.`);
+  }
+
+  const level = score >= 5 ? "high" : score >= 2 ? "medium" : "low";
+  if (reasons.length === 0) {
+    reasons.push(
+      level === "low"
+        ? "The cycle stays narrow enough for a lightweight operator audit."
+        : "The cycle still needs an operator-facing audit before review."
+    );
+  }
+  return {
+    level,
+    reasons
+  };
+}
+
+function extractValidationCommands(parts: string[]): string[] {
+  const commandPatterns = [
+    /`((?:npm|pnpm|yarn|bun)\s+run\s+[a-z0-9:_-]+)`/gi,
+    /`((?:npm|pnpm|yarn|bun)\s+(?:test|lint|build))`/gi,
+    /`(tsc\s+-p\s+[^\s`]+)`/gi,
+    /`(vitest(?:\s+[^\s`]+)*)`/gi,
+    /\b((?:npm|pnpm|yarn|bun)\s+run\s+[a-z0-9:_-]+)\b/gi,
+    /\b((?:npm|pnpm|yarn|bun)\s+(?:test|lint|build))\b/gi,
+    /\b(tsc\s+-p\s+[^\s]+)\b/gi,
+    /\b(vitest(?:\s+[^\s]+)*)\b/gi
+  ];
+  const matches: Array<{ command: string; position: number }> = [];
+  for (const part of parts) {
+    for (const pattern of commandPatterns) {
+      for (const match of part.matchAll(pattern)) {
+        const command = match[1]?.trim();
+        if (!command) continue;
+        matches.push({
+          command,
+          position: match.index ?? Number.MAX_SAFE_INTEGER
+        });
+      }
+    }
+  }
+  matches.sort((left, right) => left.position - right.position);
+  const seen = new Set<string>();
+  const commands: string[] = [];
+  for (const match of matches) {
+    if (seen.has(match.command)) continue;
+    seen.add(match.command);
+    commands.push(match.command);
+    if (commands.length >= 6) break;
+  }
+  return commands;
+}
+
+function requiresValidationLane(options: {
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  tasks: WorkPlanTask[];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  implementationLaneCount: number;
+}): boolean {
+  if (options.tasks.some((task) => task.kind === "validation" || task.laneId === "tester")) return true;
+  const signals = detectLifecycleIntentSignals(options);
+  const normalized = [options.summary, ...options.acceptanceCriteria, ...options.constraints].join("\n").toLowerCase();
+  const explicitValidationRequested =
+    /\b(npm test|pnpm test|yarn test|bun test|vitest|jest|typecheck|tsc|lint|build|validate|validation|verify|verification|unit test|integration test|contract test|regression test)\b/.test(normalized);
+  if (explicitValidationRequested) return true;
+  if (options.sourceType === "bug" || options.sourceType === "pr_hardening") return true;
+  if (options.implementationLaneCount > 1) return true;
+  if (options.acceptanceCriteria.length > 0 && (signals.api || signals.data || signals.browser || signals.backend)) {
+    return true;
+  }
+  return false;
 }
 
 function integrationTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
@@ -972,7 +1441,12 @@ function dedupeImplementationTasks(tasks: WorkPlanTask[]): WorkPlanTask[] {
 
 function ensureExecutionLifecycleTasks(
   tasks: WorkPlanTask[],
-  sourceType: WorkItemRecord["brief"]["sourceType"]
+  sourceType: WorkItemRecord["brief"]["sourceType"],
+  context?: {
+    summary?: string;
+    acceptanceCriteria?: string[];
+    constraints?: string[];
+  }
 ): WorkPlanTask[] {
   const nextTasks: WorkPlanTask[] = tasks.map((task): WorkPlanTask => ({
     ...task,
@@ -1028,12 +1502,37 @@ function ensureExecutionLifecycleTasks(
     integrationTaskIds.length > 0
       ? integrationTaskIds
       : implementationTasks.map((task) => task.id);
+  const planningTaskIds = nextTasks
+    .filter((task) => task.kind === "planning" || task.laneId === "pm")
+    .map((task) => task.id);
+  const browserRelevant = isBrowserRelevantLifecycle({
+    sourceType,
+    tasks: nextTasks,
+    summary: context?.summary ?? "",
+    acceptanceCriteria: context?.acceptanceCriteria ?? [],
+    constraints: context?.constraints ?? []
+  });
+  const scenarioRequired = browserRelevant && requiresScenarioGate({
+    sourceType,
+    tasks: nextTasks,
+    summary: context?.summary ?? "",
+    acceptanceCriteria: context?.acceptanceCriteria ?? [],
+    constraints: context?.constraints ?? []
+  });
 
   const implementationLanes = new Set(
     implementationTasks
       .filter((task) => !isIntegrationTask(task))
       .map((task) => task.laneId)
   );
+  const validationRequired = requiresValidationLane({
+    sourceType,
+    tasks: nextTasks,
+    summary: context?.summary ?? "",
+    acceptanceCriteria: context?.acceptanceCriteria ?? [],
+    constraints: context?.constraints ?? [],
+    implementationLaneCount: implementationLanes.size
+  });
 
   if (implementationLanes.size > 1 && integrationTaskIds.length === 0) {
     const integrateTaskId = uniquePlannerTaskId(nextTasks, "integrate_workstreams");
@@ -1055,7 +1554,7 @@ function ensureExecutionLifecycleTasks(
   let validationTaskIds = nextTasks
     .filter((task) => task.kind === "validation" || task.laneId === "tester")
     .map((task) => task.id);
-  if (validationTaskIds.length === 0 && implementationTaskIds.length > 0) {
+  if (validationTaskIds.length === 0 && validationRequired && implementationTaskIds.length > 0) {
     const validationTaskId = uniquePlannerTaskId(nextTasks, "validation_pass");
     nextTasks.push({
       id: validationTaskId,
@@ -1075,7 +1574,15 @@ function ensureExecutionLifecycleTasks(
   let qaSmokeTaskIds = nextTasks
     .filter((task) => (task.kind === "qa" || task.laneId === "qa") && (task.qaMode ?? "smoke") === "smoke")
     .map((task) => task.id);
-  if (qaSmokeTaskIds.length === 0 && (validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
+  if (
+    qaSmokeTaskIds.length === 0 &&
+    browserRelevant &&
+    (
+      validationTaskIds.length > 0 ||
+      implementationTaskIds.length > 0 ||
+      (sourceType === "audit" && planningTaskIds.length > 0)
+    )
+  ) {
     const qaTaskId = uniquePlannerTaskId(nextTasks, "browser_smoke");
     const reviewInsertIndex = nextTasks.findIndex((task) => task.kind === "review" || task.laneId === "audit");
     const qaTask: WorkPlanTask = {
@@ -1087,7 +1594,11 @@ function ensureExecutionLifecycleTasks(
       roleHint: "qa",
       kind: "qa",
       source: "template",
-      dependsOn: validationTaskIds.length > 0 ? [...validationTaskIds] : [...implementationTaskIds],
+      dependsOn: validationTaskIds.length > 0
+        ? [...validationTaskIds]
+        : implementationTaskIds.length > 0
+          ? [...implementationTaskIds]
+          : [...planningTaskIds],
       sourceLine: null,
       qaMode: "smoke"
     };
@@ -1102,7 +1613,16 @@ function ensureExecutionLifecycleTasks(
   let qaScenarioTaskIds = nextTasks
     .filter((task) => (task.kind === "qa" || task.laneId === "qa") && task.qaMode === "scenario")
     .map((task) => task.id);
-  if (qaScenarioTaskIds.length === 0 && (qaSmokeTaskIds.length > 0 || validationTaskIds.length > 0 || implementationTaskIds.length > 0)) {
+  if (
+    qaScenarioTaskIds.length === 0 &&
+    scenarioRequired &&
+    (
+      qaSmokeTaskIds.length > 0 ||
+      validationTaskIds.length > 0 ||
+      implementationTaskIds.length > 0 ||
+      (sourceType === "audit" && planningTaskIds.length > 0)
+    )
+  ) {
     const qaScenarioTaskId = uniquePlannerTaskId(nextTasks, "browser_scenario");
     const reviewInsertIndex = nextTasks.findIndex((task) => task.kind === "review" || task.laneId === "audit");
     const qaScenarioTask: WorkPlanTask = {
@@ -1118,7 +1638,9 @@ function ensureExecutionLifecycleTasks(
         ? [...qaSmokeTaskIds]
         : validationTaskIds.length > 0
           ? [...validationTaskIds]
-          : [...implementationTaskIds],
+          : implementationTaskIds.length > 0
+            ? [...implementationTaskIds]
+            : [...planningTaskIds],
       sourceLine: null,
       qaMode: "scenario"
     };
@@ -1171,6 +1693,8 @@ function ensureExecutionLifecycleTasks(
 
 function planningTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
   switch (sourceType) {
+    case "audit":
+      return "Frame audit scope";
     case "bug":
       return "Frame bug remediation plan";
     case "pr_hardening":
@@ -1184,6 +1708,8 @@ function planningTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sou
 
 function validationTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
   switch (sourceType) {
+    case "audit":
+      return "Run audit evidence validation";
     case "bug":
       return "Run bugfix validation";
     case "pr_hardening":
@@ -1197,6 +1723,8 @@ function validationTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["s
 
 function qaTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
   switch (sourceType) {
+    case "audit":
+      return "Run audit browser smoke";
     case "bug":
       return "Run browser regression QA";
     case "pr_hardening":
@@ -1210,6 +1738,8 @@ function qaTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceTyp
 
 function qaScenarioTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
   switch (sourceType) {
+    case "audit":
+      return "Run audit browser scenario gate";
     case "bug":
       return "Run browser scenario regression gate";
     case "pr_hardening":
@@ -1441,6 +1971,8 @@ function buildWorkstreamPlan(options: {
 
 function auditTaskTitleForSourceType(sourceType: WorkItemRecord["brief"]["sourceType"]): string {
   switch (sourceType) {
+    case "audit":
+      return "Produce audit findings";
     case "bug":
       return "Audit bugfix readiness";
     case "pr_hardening":
@@ -1471,11 +2003,6 @@ function templateSummary(template: MissionTemplate) {
   };
 }
 
-async function buildTeamAssignments(workspacePath: string, lanes: WorkPlanLane[]): Promise<WorkPlanLaneAssignment[]> {
-  const agents = await loadWorkspaceAgents(workspacePath);
-  return lanes.map((lane) => buildTeamAssignmentForLane(lane, agents));
-}
-
 async function loadWorkspaceAgents(workspacePath: string): Promise<WorkspaceAgentRecord[]> {
   const agentsPath = getWorkspaceAgentsPath(workspacePath);
   const raw = await fs.readFile(agentsPath, "utf8").catch(() => "[]");
@@ -1484,6 +2011,13 @@ async function loadWorkspaceAgents(workspacePath: string): Promise<WorkspaceAgen
   return parsed
     .map((entry) => normalizeWorkspaceAgent(entry))
     .filter((entry): entry is WorkspaceAgentRecord => entry !== null);
+}
+
+function buildTeamAssignmentsForLanes(
+  lanes: WorkPlanLane[],
+  agents: WorkspaceAgentRecord[]
+): WorkPlanLaneAssignment[] {
+  return lanes.map((lane) => buildTeamAssignmentForLane(lane, agents));
 }
 
 function normalizeWorkspaceAgent(input: unknown): WorkspaceAgentRecord | null {
@@ -1572,6 +2106,301 @@ function buildTeamAssignmentForLane(lane: WorkPlanLane, agents: WorkspaceAgentRe
       score
     }))
   };
+}
+
+function buildTeamSelection(options: {
+  workspaceAgents: WorkspaceAgentRecord[];
+  activeLanes: WorkPlanLane[];
+  workstreams: WorkItemWorkstream[];
+  gates: WorkItemGate[];
+  teamAssignments: WorkPlanLaneAssignment[];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+}): {
+  teamSelection: WorkItemTeamSelectionLane[];
+  omittedLanes: string[];
+  missingCapabilities: string[];
+  selectionRationale: string[];
+} {
+  const lifecycleSignals = detectLifecycleIntentSignals({
+    sourceType: options.sourceType,
+    summary: options.summary,
+    acceptanceCriteria: options.acceptanceCriteria,
+    constraints: options.constraints,
+    tasks: options.workstreams.flatMap((workstream) => workstream.title ? [{
+      id: workstream.id,
+      title: workstream.title,
+      description: workstream.description ?? null,
+      laneId: workstream.laneId,
+      laneLabel: workstream.laneLabel,
+      kind: workstream.type === "validate" ? "validation" : workstream.type === "qa_smoke" || workstream.type === "qa_scenario" ? "qa" : workstream.type === "audit" ? "review" : workstream.type === "plan" ? "planning" : "implementation",
+      source: "template" as const,
+      dependsOn: [...workstream.dependsOn]
+    }] : [])
+  });
+  const assignmentByLane = new Map(options.teamAssignments.map((assignment) => [assignment.laneId, assignment]));
+  const activeLaneIds = new Set(options.activeLanes.map((lane) => lane.id));
+  const workstreamsByLane = new Map<string, WorkItemWorkstream[]>();
+  for (const workstream of options.workstreams) {
+    const bucket = workstreamsByLane.get(workstream.laneId) ?? [];
+    bucket.push(workstream);
+    workstreamsByLane.set(workstream.laneId, bucket);
+  }
+  const selection = LANE_DEFINITIONS.map((lane) => {
+    const assignment = assignmentByLane.get(lane.id) ?? buildTeamAssignmentForLane(lane, options.workspaceAgents);
+    const laneWorkstreams = workstreamsByLane.get(lane.id) ?? [];
+    const expectedWorkstreams = laneWorkstreams.map((entry) => entry.id);
+    const expectedGates = options.gates
+      .filter((gate) => gate.workstreamIds.some((workstreamId) => expectedWorkstreams.includes(workstreamId)))
+      .map((gate) => gate.id);
+    const chosen = assignment.matches[0] ?? null;
+    const required = activeLaneIds.has(lane.id) || expectedWorkstreams.length > 0 || expectedGates.length > 0;
+    const hasMatch = assignment.matches.length > 0;
+    const decision: WorkItemTeamSelectionLane["decision"] =
+      required
+        ? hasMatch
+          ? "selected"
+          : "missing"
+        : hasMatch
+          ? "standby"
+          : "omitted";
+    return {
+      laneId: lane.id,
+      laneLabel: lane.label,
+      required,
+      decision,
+      preferredRole: assignment.preferredRole,
+      preferredSpecializations: [...assignment.preferredSpecializations],
+      selectionReason:
+        decision === "selected"
+          ? buildLaneSelectionReason(lane, assignment, laneWorkstreams)
+          : decision === "missing"
+            ? `${lane.label} is part of the minimal team, but no matching specialist is configured in this workspace.`
+            : null,
+      omissionReason:
+        decision === "selected" || decision === "missing"
+          ? null
+          : buildLaneOmissionReason({
+              laneId: lane.id,
+              summary: options.summary,
+              acceptanceCriteria: options.acceptanceCriteria,
+              constraints: options.constraints,
+              sourceType: options.sourceType,
+              hasMatch,
+              lifecycleSignals
+            }),
+      chosenAgentId: chosen?.id ?? null,
+      chosenAgentName: chosen?.name ?? null,
+      chosenRole: chosen?.role ?? assignment.preferredRole,
+      fallbackAgentId: assignment.coverage === "fallback" ? chosen?.id ?? null : null,
+      fallbackReason:
+        assignment.coverage === "fallback" && chosen
+          ? `${chosen.name} is covering ${lane.label.toLowerCase()} as a fallback specialist.`
+          : null,
+      expectedWorkstreams,
+      expectedGates,
+      matches: assignment.matches.map((match) => ({ ...match }))
+    };
+  });
+
+  const omittedLanes = selection
+    .filter((entry) => entry.decision === "standby" || entry.decision === "omitted")
+    .map((entry) => entry.laneId);
+  const missingCapabilities = selection
+    .filter((entry) => entry.decision === "missing")
+    .map((entry) => `${entry.laneLabel}: no matching specialist is configured for this cycle.`);
+  const selectionRationale = buildSelectionRationale(selection, lifecycleSignals);
+
+  return {
+    teamSelection: selection,
+    omittedLanes,
+    missingCapabilities,
+    selectionRationale
+  };
+}
+
+function buildLaneSelectionReason(
+  lane: WorkPlanLane,
+  assignment: WorkPlanLaneAssignment,
+  workstreams: WorkItemWorkstream[]
+): string {
+  const chosen = assignment.matches[0];
+  const workstreamSummary = workstreams.length > 0
+    ? `${workstreams.length} workstream${workstreams.length === 1 ? "" : "s"}`
+    : "an explicit lane requirement";
+  if (!chosen) {
+    return `${lane.label} is part of the minimal team because this cycle needs ${workstreamSummary}.`;
+  }
+  if (assignment.coverage === "fallback") {
+    return `${lane.label} stays in the minimal team for ${workstreamSummary}, with ${chosen.name} covering it as a fallback ${chosen.specialization} specialist.`;
+  }
+  return `${lane.label} is part of the minimal team for ${workstreamSummary}, and ${chosen.name} is the strongest available match.`;
+}
+
+function buildLaneOmissionReason(options: {
+  laneId: string;
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  hasMatch: boolean;
+  lifecycleSignals: LifecycleIntentSignals;
+}): string {
+  switch (options.laneId) {
+    case "frontend":
+      return options.lifecycleSignals.backend && !options.lifecycleSignals.frontend
+        ? "This cycle is backend-only, so no UI or client-facing lane was opened."
+        : "No browser, UI, or client-facing surface was detected for this cycle.";
+    case "backend":
+      return options.lifecycleSignals.frontend && !options.lifecycleSignals.backend
+        ? "This cycle stays in the client/browser surface, so no backend lane was opened."
+        : "No API, server, or data-flow surface was detected for this cycle.";
+    case "developer":
+      return "A dedicated integration/generalist lane was not needed for this cycle.";
+    case "tester":
+      return "This cycle does not require a separate validation specialist lane.";
+    case "qa":
+      return options.lifecycleSignals.browser
+        ? "Browser evidence is available, but this cycle did not require a dedicated QA lane."
+        : "No browser or journey-critical surface was detected, so QA stayed out of the minimal team.";
+    case "audit":
+      return options.hasMatch
+        ? "Audit stays on standby until review-time evidence exists."
+        : "Audit is not separately staffed in this workspace yet.";
+    default:
+      return options.hasMatch
+        ? `${laneById(options.laneId).label} remains on standby for this cycle.`
+        : `${laneById(options.laneId).label} is not needed for this cycle.`;
+  }
+}
+
+function buildSelectionRationale(selection: WorkItemTeamSelectionLane[], lifecycleSignals: LifecycleIntentSignals): string[] {
+  const selected = selection.filter((entry) => entry.decision === "selected");
+  const standby = selection.filter((entry) => entry.decision === "standby");
+  const missing = selection.filter((entry) => entry.decision === "missing");
+  const lines: string[] = [];
+  lines.push(...lifecycleSignals.notes);
+  if (selected.length > 0) {
+    lines.push(`Minimal team: ${selected.map((entry) => entry.laneLabel).join(", ")}.`);
+  }
+  if (standby.length > 0) {
+    lines.push(`Standby coverage: ${standby.map((entry) => entry.laneLabel).join(", ")}.`);
+  }
+  if (missing.length > 0) {
+    lines.push(`Missing specialist coverage: ${missing.map((entry) => entry.laneLabel).join(", ")}.`);
+  }
+  return lines;
+}
+
+function detectLifecycleIntentSignals(options: {
+  sourceType: WorkItemRecord["brief"]["sourceType"];
+  summary: string;
+  acceptanceCriteria: string[];
+  constraints: string[];
+  tasks?: WorkPlanTask[];
+}): LifecycleIntentSignals {
+  const normalized = [
+    options.summary,
+    ...options.acceptanceCriteria,
+    ...options.constraints,
+    ...(options.tasks ?? []).map((task) => `${task.title} ${task.description ?? ""}`)
+  ]
+    .join("\n")
+    .toLowerCase();
+  if (options.sourceType === "audit") {
+    const browser = /\b(browser smoke|browser evidence|browser check|browser coverage|browser audit|playwright|e2e|journey|user flow|critical path|visual smoke|smoke run|scenario)\b/.test(normalized);
+    const scenario = browser && /\b(playwright|e2e|journey|scenario|assert|critical path|browser gate|scenario gate)\b/.test(normalized);
+    const notes = [
+      "Audit-only route selected, so the minimal team stays review-focused instead of opening implementation lanes."
+    ];
+    if (browser) {
+      notes.push(
+        scenario
+          ? "Audit request explicitly asked for browser scenario evidence, so QA can add a gate without opening implementation work."
+          : "Audit request explicitly asked for browser evidence, so browser smoke can be added without opening implementation work."
+      );
+    }
+    return {
+      frontend: false,
+      backend: false,
+      browser,
+      scenario,
+      validation: false,
+      api: false,
+      data: false,
+      notes
+    };
+  }
+  const frontendOnly = /\b(frontend-only|ui-only|client-only|visual-only)\b/.test(normalized);
+  const backendOnly = /\b(backend-only|server-only|api-only|service-only|data-only)\b/.test(normalized);
+  const noBrowser = /\b(no browser|without browser|non-visual|server-only|backend-only|api-only|headless)\b/.test(normalized);
+  const frontend = !backendOnly && (
+    frontendOnly ||
+    /\b(ui|ux|page|screen|layout|modal|dialog|component|button|form|client|frontend|browser|view|dashboard|navigation|stylesheet|css)\b/.test(normalized)
+  );
+  const api = /\b(api|endpoint|route|http|rest|graphql|webhook|rpc)\b/.test(normalized);
+  const data = /\b(database|db|schema|migration|query|table|column|model|serialization|deserialize|payload)\b/.test(normalized);
+  const backend = !frontendOnly && (
+    backendOnly ||
+    api ||
+    data ||
+    /\b(server|backend|auth|worker|service|repository|queue|job)\b/.test(normalized)
+  );
+  const browser = !noBrowser && (
+    frontend ||
+    /\b(browser|playwright|e2e|journey|user flow|critical path|interaction|click|form submit|visual)\b/.test(normalized)
+  );
+  const scenario = browser && /\b(playwright|e2e|journey|scenario|assert|user flow|critical path|regression gate|prove it in the browser|browser gate)\b/.test(normalized);
+  const validation =
+    /\b(npm test|pnpm test|yarn test|bun test|vitest|jest|typecheck|tsc|lint|build|validate|validation|verify|verification|unit test|integration test|contract test|regression test)\b/.test(normalized) ||
+    options.sourceType === "bug" ||
+    options.sourceType === "pr_hardening";
+
+  const notes: string[] = [];
+  if (frontend && backend) {
+    notes.push("Detected a cross-stack change touching both UI/client and backend/API surfaces.");
+  } else if (backend) {
+    notes.push("Detected a backend/API/data-focused change, so the minimal team stays server-heavy.");
+  } else if (frontend) {
+    notes.push("Detected a UI/client-facing change, so the minimal team stays browser-facing.");
+  } else {
+    notes.push("No strong surface signal was detected, so the planner falls back to the general development lane.");
+  }
+  if (browser) {
+    notes.push(
+      scenario
+        ? "Detected browser-critical flow coverage, so Browser Scenario can become a required gate."
+        : "Detected browser-facing impact, so browser smoke evidence stays available for this cycle."
+    );
+  }
+  if (validation) {
+    notes.push("Detected explicit validation or higher-risk verification needs for this cycle.");
+  }
+
+  return {
+    frontend,
+    backend,
+    browser,
+    scenario,
+    validation,
+    api,
+    data,
+    notes
+  };
+}
+
+function buildRecommendedMinimalTeam(selection: WorkItemTeamSelectionLane[]): WorkItemMinimalTeamMember[] {
+  return selection
+    .filter((entry) => entry.decision === "selected" || entry.decision === "missing")
+    .map((entry) => ({
+      laneId: entry.laneId,
+      laneLabel: entry.laneLabel,
+      agentId: entry.chosenAgentId ?? null,
+      agentName: entry.chosenAgentName ?? null,
+      role: entry.chosenRole ?? entry.preferredRole
+    }));
 }
 
 function preferenceForLane(laneId: string): {
