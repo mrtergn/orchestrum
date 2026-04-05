@@ -1,11 +1,13 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
+const { randomUUID } = require("crypto");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
 const net = require("net");
 const os = require("os");
 
+const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_UI_PORT = Number(process.env.ORCHESTRUM_UI_PORT || 3000);
 const DEFAULT_SERVICE_PORT = Number(process.env.ORCHESTRUM_SERVICE_PORT || 4137);
 const RESTART_WINDOW_MS = 60_000;
@@ -244,13 +246,16 @@ async function resolveDesktopLaunchEnv() {
   }
 }
 
-function findAvailablePort(startPort) {
+function findAvailablePort(startPort, host) {
   return new Promise((resolve) => {
     const tryPort = (port) => {
       const server = net.createServer();
       server.unref();
       server.on("error", () => tryPort(port + 1));
-      server.listen(port, "127.0.0.1", () => {
+      const listenOptions = host
+        ? { port, host, exclusive: true }
+        : { port, exclusive: true };
+      server.listen(listenOptions, () => {
         const resolvedPort = server.address()?.port ?? port;
         server.close(() => resolve(resolvedPort));
       });
@@ -259,16 +264,69 @@ function findAvailablePort(startPort) {
   });
 }
 
-function waitForUrl(url, timeoutMs = 20_000) {
+function buildChildStartupError(kind, detail) {
+  const state = getChildState(kind);
+  const label = kind === "service" ? "Service" : "UI";
+  const parts = [detail];
+  if (state.lastError) {
+    parts.push(state.lastError);
+  }
+  return new Error(`${label} failed to become healthy. ${parts.filter(Boolean).join(" ")}`.trim());
+}
+
+function isChildLaunchActive(kind, child) {
+  const state = getChildState(kind);
+  return state.process === child && child.exitCode == null && child.signalCode == null;
+}
+
+function waitForManagedChildUrl(kind, child, url, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const expectedHealthToken = options.expectedHealthToken ?? null;
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const poll = () => {
+      if (!isChildLaunchActive(kind, child)) {
+        reject(buildChildStartupError(kind, "The child process exited before the readiness probe passed."));
+        return;
+      }
       http
         .get(url, (response) => {
-          response.resume();
-          resolve(true);
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            if (body.length < 16_384) {
+              body += String(chunk);
+            }
+          });
+          response.on("end", () => {
+            if (!isChildLaunchActive(kind, child)) {
+              reject(buildChildStartupError(kind, "The child process exited before the readiness probe passed."));
+              return;
+            }
+            if (expectedHealthToken) {
+              let payload = null;
+              try {
+                payload = body ? JSON.parse(body) : null;
+              } catch {
+                payload = null;
+              }
+              if (payload?.bootToken !== expectedHealthToken) {
+                if (Date.now() - start > timeoutMs) {
+                  reject(buildChildStartupError(kind, `Readiness probes reached the wrong runtime at ${url}.`));
+                } else {
+                  setTimeout(poll, 500);
+                }
+                return;
+              }
+            }
+            resolve(true);
+          });
         })
         .on("error", () => {
+          if (!isChildLaunchActive(kind, child)) {
+            reject(buildChildStartupError(kind, "The child process exited before the readiness probe passed."));
+            return;
+          }
           if (Date.now() - start > timeoutMs) {
             reject(new Error(`Timed out waiting for ${url}. Check local runtime prerequisites, ports, and provider/auth setup.`));
           } else {
@@ -493,6 +551,7 @@ async function stopChildAndWait(kind, timeoutMs = 5_000) {
 
 async function launchService(paths, reason = "startup") {
   const state = getChildState("service");
+  const healthToken = randomUUID();
   const serviceEntry = app.isPackaged
     ? path.join(paths.serviceRoot, "dist", "server.js")
     : path.join(paths.serviceRoot, "src", "server.ts");
@@ -502,6 +561,8 @@ async function launchService(paths, reason = "startup") {
   writeRuntimeState();
   const serviceEnv = {
     ORCHESTRUM_SERVICE_PORT: String(servicePort),
+    ORCHESTRUM_SERVICE_HOST: LOOPBACK_HOST,
+    ORCHESTRUM_BOOT_TOKEN: healthToken,
     ORCHESTRUM_ROOT_DIR: paths.operatorRoot,
     ORCHESTRUM_RUNS_DIR: path.join(paths.operatorRoot, "runs"),
     ORCHESTRUM_INSTALL_ROOT: paths.rootDir
@@ -510,7 +571,10 @@ async function launchService(paths, reason = "startup") {
     ? spawnNode(serviceEntry, [], paths.operatorRoot, serviceEnv)
     : spawnNode(resolveTsxBin(paths.serviceRoot), [serviceEntry], paths.operatorRoot, serviceEnv);
   registerChildLifecycle("service", child);
-  await waitForUrl(`http://127.0.0.1:${servicePort}/health`, 30_000);
+  await waitForManagedChildUrl("service", child, `http://${LOOPBACK_HOST}:${servicePort}/health`, {
+    timeoutMs: 30_000,
+    expectedHealthToken: healthToken
+  });
   state.status = "running";
   state.lastError = null;
   writeRuntimeState();
@@ -527,20 +591,20 @@ async function launchUi(paths, reason = "startup") {
     ensurePathExists(standaloneEntry, "Standalone UI server");
     child = spawnNode(standaloneEntry, [], paths.uiRoot, {
       PORT: String(uiPort),
-      HOSTNAME: "127.0.0.1",
-      NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL: `http://127.0.0.1:${servicePort}`,
-      ORCHESTRUM_SERVICE_URL: `http://127.0.0.1:${servicePort}`
+      HOSTNAME: LOOPBACK_HOST,
+      NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL: `http://${LOOPBACK_HOST}:${servicePort}`,
+      ORCHESTRUM_SERVICE_URL: `http://${LOOPBACK_HOST}:${servicePort}`
     });
   } else {
     const nextBin = resolveNextBin(paths.uiRoot);
     child = spawnNode(nextBin, ["dev", "-p", String(uiPort)], paths.uiRoot, {
       PORT: String(uiPort),
-      NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL: `http://127.0.0.1:${servicePort}`,
-      ORCHESTRUM_SERVICE_URL: `http://127.0.0.1:${servicePort}`
+      NEXT_PUBLIC_ORCHESTRUM_SERVICE_URL: `http://${LOOPBACK_HOST}:${servicePort}`,
+      ORCHESTRUM_SERVICE_URL: `http://${LOOPBACK_HOST}:${servicePort}`
     });
   }
   registerChildLifecycle("ui", child);
-  await waitForUrl(`http://127.0.0.1:${uiPort}`, 40_000);
+  await waitForManagedChildUrl("ui", child, `http://${LOOPBACK_HOST}:${uiPort}`, { timeoutMs: 40_000 });
   state.status = "running";
   state.lastError = null;
   writeRuntimeState();
@@ -618,7 +682,7 @@ async function bootDesktopRuntime() {
   desktopLaunchEnv = await resolveDesktopLaunchEnv();
   assertRuntimeWriteSafety(runtimePaths);
   servicePort = await findAvailablePort(DEFAULT_SERVICE_PORT);
-  uiPort = await findAvailablePort(DEFAULT_UI_PORT);
+  uiPort = await findAvailablePort(DEFAULT_UI_PORT, LOOPBACK_HOST);
   writeRuntimeState();
   await launchService(runtimePaths, "startup");
   await launchUi(runtimePaths, "startup");

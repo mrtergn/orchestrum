@@ -193,6 +193,7 @@ function laneRuntimeClassName(status: string) {
     case "planned":
       return "border-cyan-400/30 bg-cyan-400/10 text-cyan-200";
     case "succeeded":
+    case "completed":
       return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
     case "missing":
       return "border-rose-400/30 bg-rose-400/10 text-rose-200";
@@ -207,7 +208,7 @@ function laneRuntimeClassName(status: string) {
 function laneRuntimeLabel(status: string) {
   if (status === "missing") return "Missing coverage";
   if (status === "paused") return "Waiting review";
-  if (status === "succeeded") return "Completed";
+  if (status === "succeeded" || status === "completed") return "Completed";
   return status.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
@@ -216,7 +217,7 @@ function laneBoardStatusRank(status: string) {
   if (status === "paused") return 1;
   if (status === "blocked" || status === "failed") return 2;
   if (status === "queued" || status === "planned") return 3;
-  if (status === "succeeded") return 4;
+  if (status === "succeeded" || status === "completed") return 4;
   if (status === "omitted" || status === "missing") return 5;
   return 6;
 }
@@ -330,6 +331,15 @@ type LiveStoryBeat = {
   meta: string[];
 };
 
+type LiveStageMove = {
+  id: string;
+  tone: LiveStoryBeat["tone"];
+  label: string;
+  summary: string;
+  meta: string[];
+  timeLabel: string;
+};
+
 const ACTIVE_TASK_STATUSES = new Set(["queued", "running", "active", "paused"]);
 const ATTENTION_TASK_STATUSES = new Set(["blocked", "failed", "cancelled", "canceled"]);
 
@@ -441,6 +451,17 @@ function normalizeRunLikeStatus(value: string | null | undefined) {
   return (value ?? "").trim().toLowerCase();
 }
 
+function rankLiveRunForFocus(status: string, needsReview: boolean) {
+  const normalized = normalizeRunLikeStatus(status);
+  if (normalized === "failed" || normalized === "blocked") return 0;
+  if (needsReview) return 1;
+  if (normalized === "paused" || normalized === "awaiting_approval" || normalized === "waiting_input") return 2;
+  if (normalized === "running" || normalized === "active") return 3;
+  if (normalized === "queued" || normalized === "pending") return 4;
+  if (normalized === "completed" || normalized === "succeeded") return 6;
+  return 5;
+}
+
 function computeRunProgress(detail: RunDetail | null) {
   const steps = detail?.steps ?? [];
   const total = steps.length;
@@ -498,6 +519,92 @@ function liveStoryToneClassName(tone: LiveStoryBeat["tone"]) {
   if (tone === "warning") return "border-fuchsia-400/20 bg-fuchsia-400/10";
   if (tone === "success") return "border-emerald-400/20 bg-emerald-400/10";
   return "border-cyan-400/20 bg-cyan-400/10";
+}
+
+function missionControlFrameClassName(mode: "active" | "warning" | "danger" | "success" | "idle") {
+  switch (mode) {
+    case "danger":
+      return "border-rose-400/30 bg-rose-950/15";
+    case "warning":
+      return "border-amber-300/25 bg-amber-950/15";
+    case "success":
+      return "border-emerald-400/20 bg-emerald-950/15";
+    case "active":
+      return "border-cyan-400/20 bg-cyan-950/15";
+    default:
+      return "border-slate-800 bg-slate-950/70";
+  }
+}
+
+function missionControlBadgeClassName(mode: "active" | "warning" | "danger" | "success" | "idle") {
+  switch (mode) {
+    case "danger":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+    case "warning":
+      return "border-amber-300/30 bg-amber-300/10 text-amber-100";
+    case "success":
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+    case "active":
+      return "border-cyan-400/30 bg-cyan-400/10 text-cyan-100";
+    default:
+      return "border-slate-700 bg-slate-900/70 text-slate-300";
+  }
+}
+
+function missionControlGlowClassName(mode: "active" | "warning" | "danger" | "success" | "idle") {
+  switch (mode) {
+    case "danger":
+      return "bg-rose-400/20";
+    case "warning":
+      return "bg-amber-300/20";
+    case "success":
+      return "bg-emerald-400/20";
+    case "active":
+      return "bg-cyan-400/20";
+    default:
+      return "bg-slate-400/10";
+  }
+}
+
+function missionControlToneClassName(tone: "info" | "success" | "warning" | "danger") {
+  switch (tone) {
+    case "danger":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+    case "warning":
+      return "border-amber-300/30 bg-amber-300/10 text-amber-100";
+    case "success":
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+    default:
+      return "border-cyan-400/30 bg-cyan-400/10 text-cyan-100";
+  }
+}
+
+function laneOrchestraCardClassName(status: string, isCurrent: boolean) {
+  if (isCurrent) {
+    return "border-cyan-300/35 bg-cyan-400/10 shadow-[0_24px_80px_rgba(8,145,178,0.18)]";
+  }
+  if (status === "blocked" || status === "failed" || status === "cancelled") {
+    return "border-rose-400/20 bg-rose-400/10";
+  }
+  if (status === "paused") {
+    return "border-amber-300/20 bg-amber-300/10";
+  }
+  if (status === "succeeded" || status === "completed") {
+    return "border-emerald-400/20 bg-emerald-400/10";
+  }
+  if (status === "queued" || status === "planned") {
+    return "border-slate-700/80 bg-slate-950/70";
+  }
+  return "border-slate-800 bg-slate-950/70";
+}
+
+function laneOrchestraDotClassName(status: string, isCurrent: boolean) {
+  if (isCurrent) return "bg-cyan-300 shadow-[0_0_0_6px_rgba(34,211,238,0.16)]";
+  if (status === "blocked" || status === "failed" || status === "cancelled") return "bg-rose-300";
+  if (status === "paused") return "bg-amber-300";
+  if (status === "succeeded" || status === "completed") return "bg-emerald-300";
+  if (status === "queued" || status === "planned") return "bg-slate-500";
+  return "bg-slate-400";
 }
 
 function stepTimestampValue(step: RunDetail["steps"][number]) {
@@ -631,6 +738,7 @@ export default function WorkItemDetailPage() {
   const [liveRunEvents, setLiveRunEvents] = useState<string[]>([]);
   const [liveRunArtifacts, setLiveRunArtifacts] = useState<string[]>([]);
   const [liveSelectedRunId, setLiveSelectedRunId] = useState("");
+  const [liveSelectionPinned, setLiveSelectionPinned] = useState(false);
   const [liveSelectedArtifact, setLiveSelectedArtifact] = useState("");
   const [liveArtifactContent, setLiveArtifactContent] = useState("");
   const [liveArtifactMimeType, setLiveArtifactMimeType] = useState("text/plain");
@@ -656,6 +764,7 @@ export default function WorkItemDetailPage() {
     setLiveSignals([]);
     setLiveRunSnapshots({});
     setLiveSelectedRunId("");
+    setLiveSelectionPinned(false);
   }, [workItemId]);
 
   useEffect(() => {
@@ -941,22 +1050,6 @@ export default function WorkItemDetailPage() {
     }
     return Array.from(ids);
   }, [liveTasks, state?.workItem.linkedRunId]);
-  const preferredLiveRunId = attentionTask?.linkedRunId
-    ?? activeSessionTasks.find((task) => Boolean(task.linkedRunId))?.linkedRunId
-    ?? liveTasks.find((task) => Boolean(task.linkedRunId))?.linkedRunId
-    ?? state?.workItem.linkedRunId
-    ?? null;
-  useEffect(() => {
-    if (!preferredLiveRunId) {
-      setLiveSelectedRunId("");
-      return;
-    }
-    setLiveSelectedRunId((current) => (
-      current && liveCandidateRunIds.includes(current)
-        ? current
-        : preferredLiveRunId
-    ));
-  }, [preferredLiveRunId, liveCandidateRunIds]);
   useEffect(() => {
     if (!state?.workItem.workspaceId || liveCandidateRunIds.length === 0) {
       setLiveRunSnapshots({});
@@ -988,7 +1081,101 @@ export default function WorkItemDetailPage() {
       clearInterval(timer);
     };
   }, [liveCandidateRunIds, state?.workItem.workspaceId]);
-  const liveFocusedRunId = liveSelectedRunId || preferredLiveRunId;
+  const preferredLiveRunId = useMemo(() => {
+    // 1) Try to follow the current baton by default
+    // Identify the active workstream (baton holder) from either teamRuntime or derived workstreamRuntime
+    const batonWorkstreamId = (() => {
+      const explicit = state?.teamRuntime?.activeWorkstreamId ?? null;
+      if (explicit) return explicit;
+      const runtimes = (state?.workstreamRuntime ?? []);
+      const byPriority = (runtimes
+        .find((r) => r.status === "running")
+        ?? runtimes.find((r) => r.status === "paused")
+        ?? runtimes.find((r) => r.status === "blocked")
+        ?? runtimes.find((r) => r.status === "queued")
+        ?? runtimes[0]
+        ?? null);
+      return byPriority?.id ?? null;
+    })();
+
+    if (batonWorkstreamId) {
+      // Prefer the active child run within the baton workstream when available
+      const batonTasks = liveTasks
+        .filter((t) => t.workstreamId === batonWorkstreamId && typeof t.linkedRunId === "string" && t.linkedRunId)
+        .sort((l, r) => {
+          // Attention > Active > Queued > Completed
+          const rank = (s: string) => (
+            ATTENTION_TASK_STATUSES.has(s) ? 0
+              : (s === "running" || s === "active" || s === "paused") ? 1
+                : (s === "queued" || s === "pending") ? 2
+                  : (s === "succeeded" || s === "completed") ? 4
+                    : 3
+          );
+          const delta = rank(l.status) - rank(r.status);
+          if (delta !== 0) return delta;
+          return (l.title ?? "").localeCompare(r.title ?? "");
+        });
+      const batonRunId = batonTasks[0]?.linkedRunId ?? null;
+      if (batonRunId && liveCandidateRunIds.includes(batonRunId)) return batonRunId;
+    }
+
+    // If baton isn't identifiable, still align to any active child run with a linked run.
+    const activeTaskWithRun = activeSessionTasks.find((t) => typeof t.linkedRunId === "string" && t.linkedRunId.trim());
+    if (activeTaskWithRun?.linkedRunId && liveCandidateRunIds.includes(activeTaskWithRun.linkedRunId)) {
+      return activeTaskWithRun.linkedRunId;
+    }
+
+    // 2) Fallback: rank all candidate runs by live status and review need
+    const rankedRuns = liveCandidateRunIds
+      .map((runId) => {
+        const task = liveTasks.find((entry) => entry.linkedRunId === runId) ?? null;
+        const snapshot = liveRunSnapshots[runId] ?? null;
+        const leadStep = (snapshot?.steps ?? []).find((step) => {
+          const status = normalizeRunLikeStatus(step.status);
+          return status === "running" || status === "blocked" || status === "failed" || status === "awaiting_approval" || status === "waiting_input";
+        }) ?? snapshot?.steps.at(-1) ?? null;
+        const pauseReasonRaw = leadStep?.pauseReason ?? snapshot?.run?.pauseReason ?? null;
+        const verdictRaw = leadStep?.verdict ?? snapshot?.run?.verdict ?? null;
+        const changeStatusRaw = leadStep?.change?.status ?? null;
+        const fallbackStatus = normalizeRunLikeStatus(task?.status ?? "pending") || "pending";
+        const status = snapshot ? inferRunDisplayStatus(snapshot) : fallbackStatus;
+        const needsReview = pauseReasonRaw === "awaiting_approval"
+          || verdictRaw === "needs_human_review"
+          || changeStatusRaw === "needs_review";
+        return {
+          runId,
+          status,
+          needsReview,
+          title: task?.title ?? snapshot?.run?.goal ?? runId
+        };
+      })
+      .sort((left, right) => {
+        const statusDelta = rankLiveRunForFocus(left.status, left.needsReview) - rankLiveRunForFocus(right.status, right.needsReview);
+        if (statusDelta !== 0) return statusDelta;
+        return left.title.localeCompare(right.title);
+      });
+    return rankedRuns[0]?.runId ?? state?.workItem.linkedRunId ?? null;
+  }, [activeSessionTasks, liveCandidateRunIds, liveRunSnapshots, liveTasks, state?.workItem.linkedRunId, state?.teamRuntime?.activeWorkstreamId, state?.workstreamRuntime]);
+  useEffect(() => {
+    if (!preferredLiveRunId) {
+      setLiveSelectedRunId("");
+      setLiveSelectionPinned(false);
+      return;
+    }
+    if (!liveSelectionPinned) {
+      setLiveSelectedRunId(preferredLiveRunId);
+    }
+  }, [preferredLiveRunId, liveSelectionPinned]);
+  useEffect(() => {
+    if (!liveSelectionPinned || !liveSelectedRunId) return;
+    if (liveCandidateRunIds.includes(liveSelectedRunId)) return;
+    setLiveSelectionPinned(false);
+    setLiveSelectedRunId(preferredLiveRunId ?? "");
+  }, [liveCandidateRunIds, liveSelectedRunId, liveSelectionPinned, preferredLiveRunId]);
+  const livePinnedRunIsAvailable = liveSelectionPinned
+    && Boolean(liveSelectedRunId)
+    && liveCandidateRunIds.includes(liveSelectedRunId);
+  const liveFocusedRunId = livePinnedRunIsAvailable ? liveSelectedRunId : preferredLiveRunId;
   const liveFocusedTask = liveFocusedRunId
     ? liveTasks.find((task) => task.linkedRunId === liveFocusedRunId) ?? null
     : null;
@@ -1088,16 +1275,6 @@ export default function WorkItemDetailPage() {
       return Number.isNaN(rightTime) || Number.isNaN(leftTime) ? 0 : rightTime - leftTime;
     });
   const liveChildRuns = useMemo(() => {
-    const priority = (status: string, needsReview: boolean) => {
-      const normalized = normalizeRunLikeStatus(status);
-      if (normalized === "failed" || normalized === "blocked") return 0;
-      if (needsReview) return 1;
-      if (normalized === "paused") return 2;
-      if (normalized === "running" || normalized === "active") return 3;
-      if (normalized === "queued" || normalized === "pending") return 4;
-      if (normalized === "completed" || normalized === "succeeded") return 6;
-      return 5;
-    };
     return liveCandidateRunIds
       .map((runId) => {
         const task = liveTasks.find((entry) => entry.linkedRunId === runId) ?? null;
@@ -1145,7 +1322,7 @@ export default function WorkItemDetailPage() {
         };
       })
       .sort((left, right) => {
-        const statusDelta = priority(left.status, left.needsReview) - priority(right.status, right.needsReview);
+        const statusDelta = rankLiveRunForFocus(left.status, left.needsReview) - rankLiveRunForFocus(right.status, right.needsReview);
         if (statusDelta !== 0) return statusDelta;
         return left.title.localeCompare(right.title);
       });
@@ -1153,6 +1330,10 @@ export default function WorkItemDetailPage() {
   const liveSelectedRunCard = liveFocusedRunId
     ? liveChildRuns.find((run) => run.runId === liveFocusedRunId) ?? null
     : null;
+  const livePreferredRunCard = preferredLiveRunId
+    ? liveChildRuns.find((run) => run.runId === preferredLiveRunId) ?? null
+    : null;
+  const liveFocusFollowsBaton = !livePinnedRunIsAvailable;
   const liveRunningChildRuns = liveChildRuns.filter((run) => run.status === "running" || run.status === "active");
   const liveQueuedChildRuns = liveChildRuns.filter((run) => run.status === "queued" || run.status === "pending");
   const liveRunsAwaitingReview = liveChildRuns.filter((run) => run.needsReview);
@@ -1357,6 +1538,21 @@ export default function WorkItemDetailPage() {
         title: decision === "approve" ? "Work item approved" : "Changes requested",
         message: state.workItem.brief.title
       });
+      // Fire-and-forget audit record against the live session for traceability.
+      const auditRunId = options?.targetRunId || liveFocusedRunId || state.workItem.linkedRunId || null;
+      if (auditRunId) {
+        void fetch("/api/sessions/decisions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runId: auditRunId,
+            workspaceId: state.workItem.workspaceId,
+            decision,
+            note: reviewNote && reviewNote.trim() ? reviewNote.trim() : undefined,
+            data: options?.targetTaskId ? { targetTaskId: options.targetTaskId } : undefined
+          })
+        }).catch(() => {});
+      }
       setRefreshKey((value) => value + 1);
       return true;
     } catch (error) {
@@ -1996,6 +2192,14 @@ export default function WorkItemDetailPage() {
     ?? liveFocusedTask?.title
     ?? liveLeadWorkstream?.workstream.title
     ?? "Waiting to start";
+  const liveFocusLabel = liveFocusFollowsBaton ? "Following current baton" : "Pinned child run";
+  const liveFocusSummary = liveFocusFollowsBaton
+    ? liveSelectedRunCard
+      ? `Session detail follows ${liveSelectedRunCard.title} automatically as the baton moves.`
+      : "Session detail follows the live baton automatically as the cycle moves."
+    : livePreferredRunCard
+      ? `Pinned to ${liveSelectedRunCard?.title ?? liveFocusedRunId}. Current baton remains with ${livePreferredRunCard.title}.`
+      : `Pinned to ${liveSelectedRunCard?.title ?? liveFocusedRunId}.`;
   const reviewReady = review.gate === "ready" || workItem.status === "ready_for_review";
   const liveBatonSummary = (() => {
     const owner = liveLeadWorkstream?.runtime?.ownerAgentName ?? null;
@@ -2098,6 +2302,162 @@ export default function WorkItemDetailPage() {
                     title: "Review the current summary",
                     body: "Use Inspect only if the summary no longer explains what is happening."
                   };
+  const liveStageMood: "active" | "warning" | "danger" | "success" | "idle" = attentionTask
+    ? "danger"
+    : workItem.reviewStatus === "changes_requested" || liveRunsAwaitingReview.length > 0
+      ? "warning"
+      : reviewReady || workItem.reviewStatus === "approved" || workItem.status === "completed"
+        ? "success"
+        : hasActiveExecution(workItem)
+          ? "active"
+          : "idle";
+  const liveStageLabel = attentionTask
+    ? "Intervention needed"
+    : workItem.reviewStatus === "changes_requested"
+      ? "Remediation staged"
+      : liveRunsAwaitingReview.length > 0
+        ? liveRunningChildRuns.length > 0
+          ? "Review gate live"
+          : "Waiting on review"
+        : liveRunningChildRuns.length > 1
+          ? "Parallel delivery live"
+          : reviewReady
+            ? "Ready for operator"
+            : hasActiveExecution(workItem)
+              ? "Team in motion"
+              : "Standing by";
+  const liveStageHeadline = (() => {
+    const owner = liveLeadWorkstream?.runtime?.ownerAgentName ?? liveLeadLane?.ownerName ?? "Operator";
+    const lane = liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "session";
+    if (attentionTask) return `${owner} is blocked in ${lane}`;
+    if (workItem.reviewStatus === "changes_requested") return "Remediation has re-entered the stage";
+    if (liveRunsAwaitingReview.length > 0) {
+      return liveRunningChildRuns.length > 0
+        ? `${owner} is holding ${lane} while review catches up`
+        : `Review is holding ${lane}`;
+    }
+    if (reviewReady) return "Human review has the baton";
+    if (hasActiveExecution(workItem)) return `${owner} is moving ${lane}`;
+    return "Session is ready to launch";
+  })();
+  const liveStageSummary = liveSessionNotice.body
+    ?? liveBatonSummary
+    ?? liveLeadWorkstream?.runtime?.summary
+    ?? teamRuntime?.currentStage
+    ?? "Launch execution from this page to watch the PM, specialists, validation, and audit move in one flow.";
+  const liveStageMoves: LiveStageMove[] = liveStoryBeats.length > 0
+    ? liveStoryBeats.slice(0, 4).map((beat) => ({
+        id: beat.id,
+        tone: beat.tone,
+        label: beat.label,
+        summary: beat.summary,
+        meta: beat.meta,
+        timeLabel: formatEventTimestamp(new Date(beat.ts).toISOString())
+      }))
+    : timelineSignals.slice(0, 4).map((signal) => {
+        const tone: LiveStoryBeat["tone"] = signal.status === "failed"
+          ? "danger"
+          : signal.status === "blocked"
+            ? "warning"
+            : signal.status === "completed" || signal.type.endsWith(".completed")
+              ? "success"
+              : "info";
+        return {
+          id: `${signal.source}:${signal.type}:${signal.ts ?? "now"}`,
+          tone,
+          label: liveEventSourceLabel(signal),
+          summary: signal.summary ?? "A runtime signal was recorded for this work item.",
+          meta: [
+            signal.source,
+            readPayloadString(signal.payload, "workstreamId") ?? "",
+            readPayloadString(signal.payload, "runId") ?? readPayloadString(signal.payload, "linkedRunId") ?? ""
+          ].filter(Boolean),
+          timeLabel: formatEventTimestamp(signal.ts)
+        };
+      });
+  const liveMissionControlStats = [
+    {
+      label: "Baton owner",
+      value: liveLeadWorkstream?.runtime?.ownerAgentName ?? "Operator",
+      sub: liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "No active lane"
+    },
+    {
+      label: "Parallel work",
+      value: liveRunningChildRuns.length > 1
+        ? `${liveRunningChildRuns.length} live`
+        : liveChildRuns.length > 0
+          ? liveChildExecutionLabel
+          : "Waiting",
+      sub: liveChildExecutionSummary
+    },
+    {
+      label: "Validation",
+      value: liveValidationLabel,
+      sub: liveValidationSummary
+    },
+    {
+      label: "Findings",
+      value: liveFindingItems.length > 0 ? `${liveFindingItems.length} open` : "Clear",
+      sub: liveFindingItems[0] ?? "No blocking finding is currently flagged by the session truth."
+    }
+  ];
+  const liveSpotlightLane = liveLeadLane ?? laneFlowCards[0] ?? null;
+  const liveSupportingLanes = laneFlowCards
+    .filter((lane) => lane.id !== liveSpotlightLane?.id)
+    .sort((left, right) => {
+      const leftRank = laneBoardStatusRank(left.status);
+      const rightRank = laneBoardStatusRank(right.status);
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.label.localeCompare(right.label);
+    });
+  const livePausedLaneCount = laneFlowCards.filter((lane) => lane.status === "paused").length;
+  const liveBlockedLaneCount = laneFlowCards.filter((lane) => ["blocked", "failed", "cancelled"].includes(lane.status)).length;
+  const liveCompletedLaneCount = laneFlowCards.filter((lane) => lane.status === "succeeded" || lane.status === "completed").length;
+  const liveTruthRows = [
+    {
+      label: "Overall state",
+      value: `${statusLabel(workItem.status)} · ${workItemKindLabel(workItem)}`
+    },
+    {
+      label: "Baton owner",
+      value: `${liveLeadWorkstream?.runtime?.ownerAgentName ?? "Operator"} · ${liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "No active lane"}`
+    },
+    {
+      label: "Session focus",
+      value: liveFocusedRunId ? `${liveFocusLabel} · ${liveFocusedRunId}` : liveFocusLabel
+    },
+    {
+      label: "Child executions",
+      value: liveChildExecutionSummary
+    },
+    {
+      label: "What changed",
+      value: liveChangeLabel
+    },
+    {
+      label: "Activity",
+      value: `${liveSignalCount} events · ${completedSessionTasks.length} completed task${completedSessionTasks.length === 1 ? "" : "s"}`
+    }
+  ];
+  const liveTruthBriefRows = liveTruthRows.slice(0, 4);
+  const liveOperatorFacts = [
+    {
+      label: "Just changed",
+      value: liveStageMoves[0]?.label ?? "Waiting for a fresh move",
+      detail: liveStageMoves[0]?.summary ?? "The stage has not emitted a new move yet."
+    },
+    {
+      label: "Session focus",
+      value: liveCurrentFocus,
+      detail: liveFocusSummary
+    }
+  ];
+  const liveSpotlightSummary = liveSpotlightLane?.activeTask?.title
+    ? `${liveSpotlightLane.activeTask.title}${liveSpotlightLane.activeTask.resultSummary ? ` · ${liveSpotlightLane.activeTask.resultSummary}` : ""}`
+    : liveSpotlightLane?.runtime?.summary
+      ?? liveSpotlightLane?.selection?.selectionReason
+      ?? liveSpotlightLane?.description
+      ?? "No lane activity recorded yet.";
   const recoverySectionLabel = isAuditFindingRecovery(state?.recovery)
     ? "Blocking Findings"
     : "Recovery Guidance";
@@ -2339,472 +2699,422 @@ export default function WorkItemDetailPage() {
         </>
       ) : detailView === "live" ? (
         <>
-          {/* Active lane and baton owner strip */}
-          <div className="rounded-3xl border border-amber-400/30 bg-amber-400/10 px-5 py-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="space-y-1">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-amber-200/90">Active Lane</div>
-                <div className="text-lg font-semibold text-white">
-                  {liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "No active lane"}
-                </div>
-                <div className="text-xs text-amber-100/90">
-                  Baton owner: {liveLeadWorkstream?.runtime?.ownerAgentName ?? liveLeadLane?.ownerName ?? "Operator"}
-                  {liveLeadWorkstream?.runtime?.ownerAgentId ? ` · ${liveLeadWorkstream.runtime.ownerAgentId}` : ""}
-                </div>
-              </div>
-              <div className="flex items-start gap-2">
-                {liveLeadLane ? (
-                  <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${laneRuntimeClassName(liveLeadLane.status)}`}>
-                    {laneRuntimeLabel(liveLeadLane.status)}
-                  </span>
-                ) : null}
-                {liveLeadWorkstream?.workstream?.title ? (
-                  <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
-                    {liveLeadWorkstream.workstream.title}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-          </div>
-
-          <NoticePanel tone={liveSessionNotice.tone} title={liveSessionNotice.title}>
-            {liveSessionNotice.body}
-          </NoticePanel>
-
-          {/* Session clarity strip: baton, commands, change, validation, findings, next action */}
-          <MetricStrip
-            items={[
-              {
-                label: "Baton owner",
-                value: liveLeadWorkstream?.runtime?.ownerAgentName ?? "Operator",
-                sub: liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "No active lane"
-              },
-              {
-                label: "Commands",
-                value: (liveRunLeadStep?.validation?.commands?.length ?? 0),
-                sub: (liveRunLeadStep?.validation?.commands?.length ?? 0) > 0 ? "Latest step" : "No explicit list"
-              },
-              {
-                label: "Change",
-                value: liveChangeLabel,
-                sub: liveChangeSummary
-              },
-              {
-                label: "Validation",
-                value: (liveRunLeadStep?.validation && liveRunLeadStep.validation.status !== "not_requested")
-                  ? liveRunLeadStep.validation.status.replace(/_/g, " ")
-                  : "Not requested",
-                sub: liveValidationSummary
-              },
-              {
-                label: "Findings",
-                value: liveFindingItems.length,
-                sub: liveFindingItems.length > 0 ? "Blocking flagged" : "No blocking"
-              },
-              {
-                label: "Next action",
-                value: nextAction.title,
-                sub: "Operator move"
-              }
-            ]}
-          />
-
-          <SurfacePanel
-            title="Live session brief"
-            description="This is the canonical session readout: baton, prompt, commands, change, validation, findings, handoff, and the next operator move."
+          {/* ═══ COMMAND STRIP ═══ The single-line scoreboard that reads the room */}
+          <section
+            className={`relative overflow-hidden rounded-2xl border px-5 py-4 ${missionControlFrameClassName(liveStageMood)} live-baton-breathe`}
           >
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1.08fr)_minmax(320px,0.92fr)]">
-              <div className="space-y-4 min-w-0">
-                <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-5 py-5">
-                  <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.18em]">
-                    <span className={`rounded-full border px-2.5 py-1 ${statusClassName(workItem.status)}`}>
-                      {statusLabel(workItem.status)}
+            <div
+              className="absolute inset-0"
+              style={{
+                background: liveStageMood === "danger"
+                  ? "linear-gradient(90deg, rgba(244,63,94,0.06), transparent 60%)"
+                  : liveStageMood === "warning"
+                    ? "linear-gradient(90deg, rgba(251,191,36,0.06), transparent 60%)"
+                    : liveStageMood === "success"
+                      ? "linear-gradient(90deg, rgba(52,211,153,0.06), transparent 60%)"
+                      : liveStageMood === "active"
+                        ? "linear-gradient(90deg, rgba(34,211,238,0.06), transparent 60%)"
+                        : "none"
+              }}
+            />
+
+            <div className="relative flex flex-wrap items-center justify-between gap-4">
+              {/* Left: stage + headline */}
+              <div className="flex items-center gap-4 min-w-0">
+                {/* Baton indicator orb */}
+                <div className="relative flex h-11 w-11 shrink-0 items-center justify-center">
+                  <div className={`absolute inset-0 rounded-full ${liveStageMood === "danger" ? "bg-rose-400/20" : liveStageMood === "warning" ? "bg-amber-300/20" : liveStageMood === "success" ? "bg-emerald-400/20" : liveStageMood === "active" ? "bg-cyan-400/20" : "bg-slate-400/10"} ${hasActiveExecution(workItem) ? "live-baton-breathe" : ""}`} />
+                  <div className={`relative h-3.5 w-3.5 rounded-full ${liveStageMood === "danger" ? "bg-rose-400" : liveStageMood === "warning" ? "bg-amber-300" : liveStageMood === "success" ? "bg-emerald-400" : liveStageMood === "active" ? "bg-cyan-400" : "bg-slate-500"} ${hasActiveExecution(workItem) ? "live-stage-dot" : ""}`} />
+                </div>
+
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${missionControlBadgeClassName(liveStageMood)}`}>
+                      {liveStageLabel}
                     </span>
-                    <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300">
-                      {workItemKindLabel(workItem)}
-                    </span>
-                    {liveFocusedRunId ? (
-                      <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-1 text-slate-300">
-                        Selected run {liveFocusedRunId}
+                    {liveRunningChildRuns.length > 1 ? (
+                      <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-cyan-100">
+                        {liveRunningChildRuns.length} parallel
                       </span>
                     ) : null}
                   </div>
+                  <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-white sm:text-xl">{liveStageHeadline}</h2>
+                </div>
+              </div>
 
-                  <div className="mt-4 text-lg font-semibold text-white">{liveCurrentFocus}</div>
-                  <div className="mt-2 text-sm leading-6 text-cyan-50/90">
-                    {attentionTask?.resultSummary
-                      ?? liveLeadWorkstream?.runtime?.summary
-                      ?? teamRuntime?.currentStage
-                      ?? "The session is ready to explain itself once the first baton move is recorded."}
-                  </div>
-
-                  <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-3">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Baton owner</div>
-                      <div className="mt-2 text-sm font-medium text-white">{liveLeadWorkstream?.runtime?.ownerAgentName ?? "Operator"}</div>
-                      <div className="mt-1 text-xs text-slate-400">{liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "No active lane"}</div>
-                    {liveBatonSummary ? (
-                      <div className="mt-2 text-xs leading-5 text-slate-400">{liveBatonSummary}</div>
-                    ) : (
-                      <div className="mt-2 text-xs leading-5 text-slate-400">
-                        The baton marks who is actively moving the cycle forward. Handoffs below record every change in ownership.
-                      </div>
-                    )}
-                    </div>
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-3">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Current phase</div>
-                      <div className="mt-2 text-sm font-medium text-white">{teamRuntime?.currentStage ?? liveLeadWorkstream?.workstream.title ?? statusLabel(workItem.status)}</div>
-                      <div className="mt-1 text-xs text-slate-400">{activeSessionTasks.length} active task{activeSessionTasks.length === 1 ? "" : "s"}</div>
-                    </div>
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-3">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Model route</div>
-                      <div className="mt-2 text-sm font-medium text-white">{liveAppliedModel ?? "Unknown"}</div>
-                      <div className="mt-1 text-xs text-slate-400">
-                        {liveRequestedModel ? `Requested ${liveRequestedModel}` : "No explicit request recorded"}
-                        {liveEffort ? ` · ${liveEffort} effort` : ""}
-                      </div>
-                    </div>
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-3">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Handoff</div>
-                      <div className="mt-2 text-sm font-medium text-white">{liveNextHandoffLabel ?? "No next handoff yet"}</div>
-                      <div className="mt-1 text-xs text-slate-400">
-                        {latestTimelineSignal ? `Last event ${formatEventTimestamp(latestTimelineSignal.ts)}` : "Waiting for the first runtime signal"}
-                      </div>
-                    </div>
+              {/* Right: baton owner + primary CTA */}
+              <div className="flex items-center gap-3">
+                <div className="text-right hidden sm:block">
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Baton</div>
+                  <div className="text-sm font-medium text-white">
+                    {liveLeadWorkstream?.runtime?.ownerAgentName ?? liveLeadLane?.ownerName ?? "Operator"}
+                    <span className="text-slate-500"> · </span>
+                    <span className="text-slate-300">{liveLeadLane?.label ?? liveLeadWorkstream?.workstream.laneLabel ?? "Idle"}</span>
                   </div>
                 </div>
 
-                <div className="grid gap-3 lg:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">{livePromptHeading}</div>
-                    <div className="mt-3 text-sm leading-6 text-white">{livePromptSummary}</div>
-                    {livePromptMoment ? (
-                      <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
-                        {livePromptMoment.providerModel ? <span>{livePromptMoment.providerModel}</span> : null}
-                        {livePromptMoment.workstreamTitle ? <span>{livePromptMoment.workstreamTitle}</span> : null}
-                        {livePromptMoment.ownerAgentName ? <span>{livePromptMoment.ownerAgentName}</span> : null}
-                      </div>
-                    ) : null}
-                  </div>
+                {reviewReady ? (
+                  <button
+                    onClick={() => void submitReviewDecision("approve")}
+                    disabled={reviewSubmitting || review.gate === "approved"}
+                    className="rounded-xl border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Approve
+                  </button>
+                ) : !hasActiveExecution(workItem) && workItem.reviewStatus !== "approved" ? (
+                  <button
+                    onClick={() => void launchExecution()}
+                    disabled={launchingExecution}
+                    className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {launchingExecution ? "Launching…" : launchActionLabel(workItem)}
+                  </button>
+                ) : canApproveChange ? (
+                  <button
+                    onClick={() => void approvePausedRun()}
+                    disabled={liveApprovalSubmitting}
+                    className="rounded-xl border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {liveApprovalSubmitting ? "Approving…" : "Approve change"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </section>
 
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Commands run</div>
-                    {liveCommandPreview.length > 0 ? (
-                      <div className="mt-3 space-y-2">
-                        {liveCommandPreview.map((command) => (
-                          <div key={command} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 font-mono text-xs text-slate-200 break-all">
-                            {command}
-                          </div>
-                        ))}
+          {/* ═══ LANE ORCHESTRA ═══ The visual heartbeat: each lane as a station in the flow */}
+          {laneFlowCards.length > 0 ? (
+            <section className="relative rounded-2xl border border-slate-800/70 bg-slate-950/40 p-4 md:p-5">
+              {/* Animated connector line behind cards */}
+              <div className="absolute left-8 right-8 top-[52px] hidden h-px xl:block live-connector-flow" />
+
+              <div className="live-baton-rail flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
+                {laneFlowCards.map((lane, index) => (
+                  <div
+                    key={lane.id}
+                    className={`live-lane-enter relative min-w-[200px] max-w-[260px] flex-shrink-0 snap-start rounded-2xl border px-4 py-4 transition-all duration-300 ${laneOrchestraCardClassName(lane.status, lane.isCurrent)} ${lane.isCurrent ? "live-spotlight-glow" : "motion-safe:hover:-translate-y-1"}`}
+                    style={{ animationDelay: `${index * 60}ms` }}
+                  >
+                    {/* Top: index + status */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold ${lane.isCurrent ? "bg-cyan-400/20 text-cyan-200 border border-cyan-400/30" : "bg-slate-800 text-slate-400 border border-slate-700"}`}>
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <span className="text-sm font-semibold text-white">{lane.label}</span>
                       </div>
-                    ) : (
-                      <div className="mt-3 text-sm leading-6 text-slate-400">
-                        No explicit shell command list was recorded for the selected step yet.
-                      </div>
-                    )}
-                    <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
-                      <span>{liveRunLeadStep?.stepId ?? "No active step"}</span>
-                      {liveRunLeadStep?.provider ? <span>{liveRunLeadStep.provider}</span> : null}
-                      {liveRunLeadStep?.model ? <span>{liveRunLeadStep.model}</span> : null}
+                      <span className={`h-2.5 w-2.5 rounded-full ${lane.isCurrent ? "bg-cyan-400 live-stage-dot" : laneOrchestraDotClassName(lane.status, false)}`} />
+                    </div>
+
+                    {/* Owner */}
+                    <div className="mt-2 text-[11px] text-slate-400">{lane.ownerName}</div>
+
+                    {/* Status badge */}
+                    <div className="mt-3">
+                      <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-[10px] uppercase tracking-[0.14em] ${laneRuntimeClassName(lane.status)} live-status-pop`}>
+                        {lane.isCurrent ? "Baton live" : laneRuntimeLabel(lane.status)}
+                      </span>
+                    </div>
+
+                    {/* Active task or summary */}
+                    <div className="mt-3 text-xs leading-5 text-slate-300 line-clamp-2">
+                      {lane.activeTask?.title
+                        ? lane.activeTask.title
+                        : lane.runtime?.summary
+                          ?? lane.description
+                          ?? "Waiting"}
+                    </div>
+
+                    {/* Meta */}
+                    <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] text-slate-500">
+                      {lane.tasks.length > 0 ? <span>{lane.tasks.length} tasks</span> : null}
+                      {lane.status === "paused" ? <span className="text-amber-300/70">review</span> : null}
+                      {lane.nextHandoff?.toWorkstreamId ? <span>→ next</span> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {/* ═══ STAGE: Spotlight + Operator Cue ═══ Two clear halves: what's happening & what to do */}
+          <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
+            {/* Spotlight: the baton lane in detail */}
+            <section className={`relative overflow-hidden rounded-2xl border p-5 backdrop-blur ${liveSpotlightLane ? laneOrchestraCardClassName(liveSpotlightLane.status, liveSpotlightLane.isCurrent) : "border-slate-800 bg-slate-950/70"} ${liveSpotlightLane?.isCurrent ? "live-spotlight-glow" : ""}`}>
+              <div className="absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-white/15 to-transparent" />
+
+              {liveSpotlightLane ? (
+                <div className="space-y-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Baton spotlight</div>
+                      <h3 className="mt-2 text-2xl font-semibold text-white">{liveSpotlightLane.label}</h3>
+                      <div className="mt-1 text-sm text-slate-300">{liveSpotlightLane.ownerName}</div>
+                    </div>
+                    <div className="flex gap-2 text-[10px] uppercase tracking-[0.16em]">
+                      <span className={`rounded-full border px-2.5 py-1 ${laneRuntimeClassName(liveSpotlightLane.status)}`}>
+                        {laneRuntimeLabel(liveSpotlightLane.status)}
+                      </span>
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Change and validation</div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Diff</div>
-                        <div className="mt-2 text-sm font-medium text-white">{liveChangeLabel}</div>
-                        <div className="mt-2 text-xs leading-5 text-slate-400">{liveChangeSummary}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Validation</div>
-                        <div className="mt-2 text-sm font-medium text-white">{liveValidationLabel}</div>
-                        <div className="mt-2 text-xs leading-5 text-slate-400">{liveValidationSummary}</div>
-                      </div>
-                    </div>
-                  </div>
+                  <div className="text-sm leading-7 text-slate-200">{liveSpotlightSummary}</div>
 
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4 min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Findings and handoff</div>
-                    <div className="mt-3 space-y-2 text-sm text-slate-200">
-                      {liveFindingItems.length > 0 ? liveFindingItems.map((item) => (
-                        <div key={item} className="rounded-xl border border-fuchsia-400/20 bg-fuchsia-400/10 px-3 py-3 leading-6 text-fuchsia-50">
-                          {item}
+                  {/* Quick stats: prompt, commands, change, validation - compact row */}
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-xl border border-white/8 bg-slate-950/60 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">{livePromptHeading}</div>
+                      <div className="mt-2 text-xs leading-5 text-white line-clamp-2">{livePromptSummary}</div>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-slate-950/60 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Commands</div>
+                      {liveCommandPreview.length > 0 ? (
+                        <div className="mt-2 space-y-1">
+                          {liveCommandPreview.slice(0, 2).map((cmd) => (
+                            <div key={cmd} className="truncate font-mono text-[11px] text-slate-200">{cmd}</div>
+                          ))}
                         </div>
-                      )) : (
-                        <div className="rounded-xl border border-dashed border-slate-700 px-3 py-4 text-sm text-slate-500">
-                          No blocking finding is currently flagged by the session truth.
-                        </div>
+                      ) : (
+                        <div className="mt-2 text-xs text-slate-500">No commands</div>
                       )}
                     </div>
-                    <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 text-xs leading-5 text-slate-300">
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Last baton move</div>
-                      <div className="mt-2">
-                        {liveLastHandoff
-                          ? `${liveLastHandoff.fromWorkstreamTitle ?? liveLastHandoff.fromWorkstreamId ?? "Unassigned"} -> ${liveLastHandoff.toWorkstreamTitle ?? liveLastHandoff.toWorkstreamId ?? "Operator"}`
-                          : "No handoff has been recorded yet."}
-                      </div>
-                      {liveLastHandoff?.summary ? <div className="mt-2 text-slate-400">{liveLastHandoff.summary}</div> : null}
+                    <div className="rounded-xl border border-white/8 bg-slate-950/60 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Change</div>
+                      <div className="mt-2 text-xs font-medium text-white">{liveChangeLabel}</div>
+                    </div>
+                    <div className="rounded-xl border border-white/8 bg-slate-950/60 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Validation</div>
+                      <div className={`mt-2 text-xs font-medium ${liveValidationLabel === "passed" ? "text-emerald-300" : liveValidationLabel === "failed" ? "text-rose-300" : "text-white"}`}>{liveValidationLabel}</div>
                     </div>
                   </div>
-                </div>
-              </div>
 
-              <div className="space-y-4 min-w-0">
-                {reviewReady && (
-                  <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div>
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Review snapshot</div>
-                        <div className="mt-2 text-sm font-medium text-white">{review.headline}</div>
-                        {review.reviewedAt ? (
-                          <div className="mt-1 text-xs text-slate-500">Last decision at {new Date(review.reviewedAt).toLocaleString()}</div>
-                        ) : null}
-                      </div>
-                      <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${reviewGateClassName(review.gate)}`}>
-                        {reviewGateLabel(review.gate)}
-                      </span>
+                  {/* Findings row (only if present) */}
+                  {liveFindingItems.length > 0 ? (
+                    <div className="space-y-2">
+                      {liveFindingItems.map((item) => (
+                        <div key={item} className="rounded-xl border border-fuchsia-400/20 bg-fuchsia-400/10 px-3 py-3 text-sm leading-6 text-fuchsia-50">{item}</div>
+                      ))}
                     </div>
-                    <div className="mt-3 grid grid-cols-2 gap-3">
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Succeeded</div>
-                        <div className="mt-1 text-sm font-medium text-white">{review.totals.succeeded}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Blocked</div>
-                        <div className="mt-1 text-sm font-medium text-white">{review.totals.blocked}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Failed</div>
-                        <div className="mt-1 text-sm font-medium text-white">{review.totals.failed}</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Open risks</div>
-                        <div className="mt-1 text-sm font-medium text-white">{review.openRisks.length}</div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-                <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Next operator action</div>
-                  <div className="mt-2 text-sm font-medium text-white">{nextAction.title}</div>
-                  <div className="mt-3 text-sm leading-6 text-slate-300">{nextAction.body}</div>
+                  ) : null}
 
-                  {reviewReady ? (
-                    <div className="mt-4 space-y-3">
-                      <textarea
-                        value={reviewNote}
-                        onChange={(event) => {
-                          setReviewNote(event.target.value);
-                          setReviewNoteDirty(true);
-                        }}
-                        placeholder="Capture approval notes, follow-up requests, or known risks."
-                        className="h-28 w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3 text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-400/40 focus:outline-none"
-                      />
-                      <div className="flex flex-wrap gap-2">
+                  {/* Handoff info */}
+                  {liveLastHandoff ? (
+                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                      <span className="text-slate-500">Last handoff:</span>
+                      <span>{liveLastHandoff.fromWorkstreamTitle ?? liveLastHandoff.fromWorkstreamId ?? "—"}</span>
+                      <span className="text-slate-600">→</span>
+                      <span>{liveLastHandoff.toWorkstreamTitle ?? liveLastHandoff.toWorkstreamId ?? "Operator"}</span>
+                    </div>
+                  ) : null}
+
+                  {/* Child run selector (when multi-run) */}
+                  {liveChildRuns.length > 1 ? (
+                    <div className="flex gap-2 overflow-x-auto pb-1">
+                      {liveChildRuns.slice(0, 6).map((run) => (
                         <button
-                          onClick={() => void submitReviewDecision("approve")}
-                          disabled={reviewSubmitting || review.gate === "not_ready" || review.gate === "approved"}
-                          className="rounded-xl border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-emerald-200 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-900/60 disabled:text-slate-500"
+                          key={run.runId}
+                          type="button"
+                          onClick={() => {
+                            setLiveSelectedRunId(run.runId);
+                            setLiveSelectionPinned(run.runId !== preferredLiveRunId);
+                          }}
+                          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] transition-colors ${
+                            run.runId === liveFocusedRunId
+                              ? "border-cyan-300/40 bg-cyan-400/10 text-cyan-100"
+                              : "border-slate-700 bg-slate-950/70 text-slate-300 hover:border-slate-600"
+                          }`}
                         >
-                          Approve & close
+                          <span className={`h-1.5 w-1.5 rounded-full ${run.status === "running" || run.status === "active" ? "bg-amber-300" : run.status === "paused" ? "bg-cyan-300" : run.status === "completed" || run.status === "succeeded" ? "bg-emerald-300" : run.status === "failed" ? "bg-rose-300" : "bg-slate-400"}`} />
+                          {run.laneLabel}
                         </button>
-                        <button
-                          onClick={() => void submitReviewDecision("send_back")}
-                          disabled={reviewSubmitting || review.gate === "approved"}
-                          className="rounded-xl border border-fuchsia-400/40 bg-fuchsia-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-fuchsia-200 transition-colors hover:bg-fuchsia-400/20 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-900/60 disabled:text-slate-500"
-                        >
-                          Send back
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {!hasActiveExecution(workItem) && workItem.reviewStatus !== "approved" ? (
-                        <button
-                          onClick={() => void launchExecution()}
-                          disabled={launchingExecution}
-                          className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {launchingExecution ? "Launching..." : launchActionLabel(workItem)}
-                        </button>
-                      ) : null}
-                      {liveFocusedRunId ? (
-                        <Link
-                          href={`/runs/${liveFocusedRunId}?workspace=${encodeURIComponent(workItem.workspaceId)}`}
-                          className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                        >
-                          Open selected run
-                        </Link>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => setDetailView("inspect")}
-                        className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
-                      >
-                        Open Inspect
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
-                  <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Current truth</div>
-                  <div className="mt-3 space-y-3 text-sm text-slate-200">
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">Job</span>
-                      <span className="text-right">{workItem.brief.title}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">Who owns it now</span>
-                      <span className="text-right">{liveLeadWorkstream?.runtime?.ownerAgentName ?? "Operator"}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">Child execution</span>
-                      <span className="text-right">{liveChildExecutionSummary}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">Selected run</span>
-                      <span className="text-right">{liveFocusedRunId ?? "No child run"}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">What changed</span>
-                      <span className="text-right">{liveChangeLabel}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">Validation</span>
-                      <span className="text-right">{liveValidationLabel}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
-                      <span className="text-slate-500">Open findings</span>
-                      <span className="text-right">{liveFindingItems.length}</span>
-                    </div>
-                    <div className="flex items-start justify-between gap-3">
-                      <span className="text-slate-500">Session activity</span>
-                      <span className="text-right">{liveSignalCount} events · {completedSessionTasks.length} completed task{completedSessionTasks.length === 1 ? "" : "s"}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </SurfacePanel>
-
-          <SurfacePanel
-            title="Lane flow"
-            description="Watch the PM, implementation, validation, QA, and audit baton move across the current cycle."
-          >
-            <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
-              {laneFlowCards.length > 0 ? laneFlowCards.map((lane) => (
-                <div
-                  key={lane.id}
-                  className={`rounded-2xl border px-4 py-4 ${
-                    lane.isCurrent ? "border-cyan-400/40 bg-cyan-400/10" : "border-slate-800 bg-slate-900/35"
-                  }`}
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <div className="text-sm font-medium text-white">{lane.label}</div>
-                      <div className="mt-1 text-xs text-slate-500">{lane.ownerName}</div>
-                    </div>
-                    <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] ${laneRuntimeClassName(lane.status)}`}>
-                      {laneRuntimeLabel(lane.status)}
-                    </span>
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
-                    <span>{lane.tasks.length} task{lane.tasks.length === 1 ? "" : "s"}</span>
-                    <span>{lane.tasks.filter((task) => ACTIVE_TASK_STATUSES.has(task.status)).length} active</span>
-                    <span>{lane.tasks.filter((task) => task.status === "succeeded" || task.status === "completed").length} done</span>
-                    {lane.runtime?.providerModel ? <span>{lane.runtime.providerModel}</span> : null}
-                  </div>
-
-                  <div className="mt-3 text-xs leading-5 text-slate-400">
-                    {lane.activeTask?.title
-                      ? `${lane.activeTask.title}${lane.activeTask.resultSummary ? ` · ${lane.activeTask.resultSummary}` : ""}`
-                      : lane.runtime?.summary
-                        ?? lane.selection?.selectionReason
-                        ?? lane.description
-                        ?? "No lane activity recorded yet."}
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
-                    {lane.selection?.decision === "standby" ? <span>Standby specialist</span> : null}
-                    {lane.selection?.decision === "omitted" ? <span>Not opened for this work</span> : null}
-                    {lane.selection?.decision === "missing" ? <span>Coverage missing</span> : null}
-                    {lane.nextHandoff?.toWorkstreamId ? <span>Next {lane.nextHandoff.toWorkstreamId}</span> : null}
-                    {lane.runtime?.lastResponseAt ? <span>Last response {formatEventTimestamp(lane.runtime.lastResponseAt)}</span> : null}
-                  </div>
-
-                  {lane.tasks.length > 0 ? (
-                    <div className="mt-4 space-y-2">
-                      {lane.tasks.slice(0, 3).map((task) => (
-                        <div key={task.id} className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-3">
-                          <div className="flex flex-wrap items-start justify-between gap-2">
-                            <div>
-                              <div className="text-xs font-medium text-white">{task.title}</div>
-                              <div className="mt-1 text-[10px] text-slate-500">
-                                {task.ownerAgentName ?? agentNames.get(task.assignedToAgentId) ?? task.assignedToAgentId}
-                              </div>
-                            </div>
-                            <span className={`rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${taskStatusClassName(task.status)}`}>
-                              {statusLabel(task.status)}
-                            </span>
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">
-                            {task.waitingOnTaskIds && task.waitingOnTaskIds.length > 0 ? <span>Waiting on {task.waitingOnTaskIds.join(", ")}</span> : null}
-                            {task.blockedByTaskIds && task.blockedByTaskIds.length > 0 ? <span>Blocked by {task.blockedByTaskIds.join(", ")}</span> : null}
-                            {task.linkedRunId ? <span>Run attached</span> : null}
-                          </div>
-                        </div>
                       ))}
                     </div>
                   ) : null}
                 </div>
-              )) : (
-                <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
-                  No lane flow is visible yet for this cycle.
+              ) : (
+                <div className="py-8 text-center text-sm text-slate-500">No active lane to spotlight yet.</div>
+              )}
+            </section>
+
+            {/* Operator Cue: the action panel */}
+            <section className="rounded-2xl border border-slate-800/80 bg-slate-950/50 p-5 space-y-5">
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Operator cue</div>
+                  <span className={`rounded-full border px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] ${missionControlToneClassName(nextAction.tone)}`}>
+                    {nextAction.tone}
+                  </span>
+                </div>
+                <div className="mt-2 text-base font-semibold text-white">{nextAction.title}</div>
+                <div className="mt-2 text-sm leading-6 text-slate-400">{nextAction.body}</div>
+              </div>
+
+              {/* Review form when ready */}
+              {reviewReady ? (
+                <div className="space-y-3">
+                  {review.headline ? (
+                    <div className="rounded-xl border border-white/10 bg-slate-900/50 px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Review snapshot</div>
+                      <div className="mt-1.5 text-sm font-medium text-white">{review.headline}</div>
+                    </div>
+                  ) : null}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-xl border border-white/10 bg-slate-950/50 px-3 py-2 text-center">
+                      <div className="text-[10px] text-slate-500">Succeeded</div>
+                      <div className="mt-1 text-sm font-semibold text-white">{review.totals.succeeded}</div>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-slate-950/50 px-3 py-2 text-center">
+                      <div className="text-[10px] text-slate-500">Open risks</div>
+                      <div className="mt-1 text-sm font-semibold text-white">{review.openRisks.length}</div>
+                    </div>
+                  </div>
+                  <textarea
+                    value={reviewNote}
+                    onChange={(e) => { setReviewNote(e.target.value); setReviewNoteDirty(true); }}
+                    placeholder="Approval notes or follow-ups…"
+                    className="h-20 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2.5 text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-400/40 focus:outline-none"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => void submitReviewDecision("approve")}
+                      disabled={reviewSubmitting || review.gate === "not_ready" || review.gate === "approved"}
+                      className="flex-1 rounded-xl border border-emerald-400/40 bg-emerald-400/10 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Approve & close
+                    </button>
+                    <button
+                      onClick={() => void submitReviewDecision("send_back")}
+                      disabled={reviewSubmitting || review.gate === "approved"}
+                      className="flex-1 rounded-xl border border-fuchsia-400/40 bg-fuchsia-400/10 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-200 transition-colors hover:bg-fuchsia-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Send back
+                    </button>
+                  </div>
+                </div>
+              ) : canApproveChange ? (
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-3 text-sm text-amber-100">
+                    A change is waiting for approval before the run can continue.
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => void approvePausedRun()}
+                      disabled={liveApprovalSubmitting}
+                      className="flex-1 rounded-xl border border-emerald-400/40 bg-emerald-400/10 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200 transition-colors hover:bg-emerald-400/20 disabled:opacity-50"
+                    >
+                      {liveApprovalSubmitting ? "Approving…" : "Approve change"}
+                    </button>
+                    <button
+                      onClick={() => void sendBackFromLive()}
+                      disabled={liveSendBackSubmitting}
+                      className="flex-1 rounded-xl border border-fuchsia-400/40 bg-fuchsia-400/10 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-200 transition-colors hover:bg-fuchsia-400/20 disabled:opacity-50"
+                    >
+                      Send back
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {!hasActiveExecution(workItem) && workItem.reviewStatus !== "approved" ? (
+                    <button
+                      onClick={() => void launchExecution()}
+                      disabled={launchingExecution}
+                      className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-amber-200 transition-colors hover:bg-amber-400/20 disabled:opacity-50"
+                    >
+                      {launchingExecution ? "Launching…" : launchActionLabel(workItem)}
+                    </button>
+                  ) : null}
+                  {canResumeRun ? (
+                    <button
+                      onClick={() => void resumePausedRun()}
+                      disabled={liveResumeSubmitting}
+                      className="rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200 transition-colors hover:bg-cyan-400/20 disabled:opacity-50"
+                    >
+                      {liveResumeSubmitting ? "Resuming…" : "Resume run"}
+                    </button>
+                  ) : null}
+                  {liveFocusedRunId ? (
+                    <Link
+                      href={`/runs/${liveFocusedRunId}?workspace=${encodeURIComponent(workItem.workspaceId)}`}
+                      className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600"
+                    >
+                      Open run
+                    </Link>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => setDetailView("inspect")}
+                    className="rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-200 transition-colors hover:border-slate-600"
+                  >
+                    Inspect
+                  </button>
                 </div>
               )}
+
+              {/* Session truth table */}
+              <div className="rounded-xl border border-white/8 bg-slate-950/50 px-4 py-3 space-y-2.5 text-sm">
+                {liveTruthBriefRows.map((row, index) => (
+                  <div key={row.label} className={`flex items-start justify-between gap-3 ${index < liveTruthBriefRows.length - 1 ? "border-b border-slate-800/60 pb-2.5" : ""}`}>
+                    <span className="text-slate-500 text-xs">{row.label}</span>
+                    <span className="text-right text-xs text-slate-200">{row.value}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+
+          {/* ═══ STORY FEED ═══ Compact live ticker: the team's recent moves */}
+          <section className="rounded-2xl border border-slate-800/70 bg-slate-950/40 p-4">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-2">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Story feed</div>
+                <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-0.5 text-[10px] text-slate-400">
+                  {liveSignalCount} events
+                </span>
+              </div>
+              {latestTimelineSignal ? (
+                <span className="text-[10px] text-slate-500">{formatEventTimestamp(latestTimelineSignal.ts)}</span>
+              ) : null}
             </div>
-          </SurfacePanel>
 
-          <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-            <div className="space-y-6">
-              <SurfacePanel
-                title="Story so far"
-                description="A readable version of what the team actually did: assignment, prompt, answer, diff, validation, and handoff."
-              >
-                <div className="space-y-3">
-                  {liveStoryBeats.length > 0 ? liveStoryBeats.map((beat) => (
-                    <div key={beat.id} className={`rounded-2xl border px-4 py-4 ${liveStoryToneClassName(beat.tone)}`}>
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="text-sm font-medium text-white">{beat.label}</div>
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                          {formatEventTimestamp(new Date(beat.ts).toISOString())}
-                        </div>
+            {liveStageMoves.length > 0 ? (
+              <div className="space-y-2">
+                {liveStageMoves.map((move, index) => (
+                  <div
+                    key={move.id}
+                    className={`live-ticker-slide flex items-start gap-3 rounded-xl border px-3 py-2.5 ${liveStoryToneClassName(move.tone)}`}
+                    style={{ animationDelay: `${index * 50}ms` }}
+                  >
+                    <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${move.tone === "danger" ? "bg-rose-300" : move.tone === "warning" ? "bg-amber-300" : move.tone === "success" ? "bg-emerald-300" : "bg-cyan-300"} ${index === 0 ? "live-stage-dot" : ""}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-white">{move.label}</span>
+                        <span className="flex-shrink-0 text-[10px] text-slate-500">{move.timeLabel}</span>
                       </div>
-                      <div className="mt-3 text-sm leading-6 text-slate-200">{beat.summary}</div>
-                      {beat.meta.length > 0 ? (
-                        <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-slate-500">
-                          {beat.meta.map((entry) => (
-                            <span key={`${beat.id}:${entry}`}>{entry}</span>
-                          ))}
-                        </div>
-                      ) : null}
+                      <div className="mt-0.5 text-[11px] leading-5 text-slate-300 line-clamp-1">{move.summary}</div>
                     </div>
-                  )) : (
-                    <div className="rounded-2xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">
-                      The live story has not filled in yet. Once the PM assigns work and the first specialist responds, the readable session history will appear here.
-                    </div>
-                  )}
-                </div>
-              </SurfacePanel>
+                    {move.meta.length > 0 ? (
+                      <div className="hidden flex-shrink-0 gap-1.5 text-[10px] text-slate-500 xl:flex">
+                        {move.meta.slice(0, 2).map((entry) => (
+                          <span key={`${move.id}:${entry}`} className="rounded-full border border-slate-800 px-2 py-0.5">{entry}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-slate-700 px-4 py-6 text-center text-sm text-slate-500">
+                Story feed populates as prompts, responses, validations, and handoffs flow through.
+              </div>
+            )}
+          </section>
 
-              <SurfacePanel
-                title="Focused activity"
-                description="Select the child execution that currently matters. When a lane fans out into parallel missions, the detail below stays anchored to the selected run."
-              >
+          <section className="grid gap-6 xl:grid-cols-[1fr]">
+            <SurfacePanel
+              title="Run control and evidence"
+              description="Approve, resume, pin, and inspect the child execution that currently matters without leaving Live Session."
+            >
                 {liveChildRuns.length > 1 ? (
                   <div className="mb-4 rounded-2xl border border-slate-800 bg-slate-900/35 px-4 py-4">
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2817,9 +3127,41 @@ export default function WorkItemDetailPage() {
                             : "This work item is using more than one child run. Select the execution you want the session detail to follow."}
                         </div>
                       </div>
-                      <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">
-                        {liveSelectedRunCard ? `Selected ${liveSelectedRunCard.runId}` : "No run selected"}
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.16em]">
+                        <span className={`rounded-full border px-2.5 py-1 ${liveFocusFollowsBaton ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-100" : "border-fuchsia-400/40 bg-fuchsia-400/10 text-fuchsia-100"}`}>
+                          {liveFocusLabel}
+                        </span>
+                        {liveSelectedRunCard ? <span className="text-slate-500">{liveSelectedRunCard.runId}</span> : null}
+                        {!liveFocusFollowsBaton ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setLiveSelectionPinned(false);
+                              setLiveSelectedRunId(preferredLiveRunId ?? "");
+                            }}
+                            className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+                          >
+                            Follow current baton
+                          </button>
+                        ) : (
+                          liveFocusedRunId ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setLiveSelectionPinned(true);
+                                setLiveSelectedRunId(liveFocusedRunId);
+                              }}
+                              className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-slate-200 transition-colors hover:border-slate-600 hover:bg-slate-900"
+                            >
+                              Pin this run
+                            </button>
+                          ) : null
+                        )}
                       </div>
+                    </div>
+
+                    <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm leading-6 text-slate-300">
+                      {liveFocusSummary}
                     </div>
 
                     <div className="mt-4 grid gap-3 xl:grid-cols-2">
@@ -2829,8 +3171,11 @@ export default function WorkItemDetailPage() {
                           <button
                             key={run.runId}
                             type="button"
-                            onClick={() => setLiveSelectedRunId(run.runId)}
-                            className={`rounded-2xl border px-4 py-4 text-left transition-colors ${selected ? "border-cyan-400/40 bg-cyan-400/10" : "border-slate-800 bg-slate-950/70 hover:border-slate-700 hover:bg-slate-900"}`}
+                            onClick={() => {
+                              setLiveSelectedRunId(run.runId);
+                              setLiveSelectionPinned(run.runId !== preferredLiveRunId);
+                            }}
+                            className={`relative overflow-hidden rounded-[24px] border px-4 py-4 text-left transition-all duration-300 motion-safe:hover:-translate-y-1 ${selected ? "border-cyan-300/40 bg-cyan-400/10 shadow-[0_20px_60px_rgba(8,145,178,0.16)]" : "border-slate-800 bg-slate-950/70 hover:border-slate-700 hover:bg-slate-900"}`}
                           >
                             <div className="flex flex-wrap items-start justify-between gap-2">
                               <div>
@@ -3182,8 +3527,7 @@ export default function WorkItemDetailPage() {
                     No child run is attached to the current baton yet. Once a specialist starts a mission-backed task, the live run will appear here.
                   </div>
                 )}
-              </SurfacePanel>
-            </div>
+            </SurfacePanel>
           </section>
         </>
       ) : (
@@ -4635,6 +4979,189 @@ export default function WorkItemDetailPage() {
         </div>
       </section>
       )}
+      <style jsx>{`
+        @keyframes liveStageFloat {
+          0%, 100% {
+            transform: translate3d(0, 0, 0);
+            opacity: 0.3;
+          }
+          50% {
+            transform: translate3d(0, 14px, 0);
+            opacity: 0.5;
+          }
+        }
+
+        @keyframes liveBatonPulse {
+          0%, 100% {
+            opacity: 0.72;
+            box-shadow: 0 0 0 0 rgba(34, 211, 238, 0);
+            transform: scale(1);
+          }
+          50% {
+            opacity: 1;
+            box-shadow: 0 0 0 10px rgba(34, 211, 238, 0);
+            transform: scale(1.05);
+          }
+        }
+
+        @keyframes liveSignalSweep {
+          0% {
+            transform: translateY(-50%) translateX(-10%);
+            opacity: 0;
+          }
+          18% {
+            opacity: 0.72;
+          }
+          55% {
+            opacity: 0.4;
+          }
+          100% {
+            transform: translateY(-50%) translateX(260%);
+            opacity: 0;
+          }
+        }
+
+        @keyframes liveCorePulse {
+          0%, 100% {
+            transform: scale(0.88);
+            opacity: 0.55;
+          }
+          50% {
+        @keyframes liveRailFlow {
+          0% {
+            transform: translateX(-14%);
+            opacity: 0;
+          }
+          18% {
+            opacity: 0.74;
+          }
+          62% {
+            opacity: 0.38;
+          }
+          100% {
+            transform: translateX(118%);
+            opacity: 0;
+          }
+        }
+            transform: scale(1.02);
+            opacity: 0.95;
+          }
+        .live-baton-rail {
+          position: relative;
+          scrollbar-width: none;
+        }
+        .live-baton-rail::-webkit-scrollbar {
+          display: none;
+        }
+        .live-baton-rail::before {
+          content: "";
+          position: absolute;
+          left: 1.5rem;
+          right: 1.5rem;
+          top: 2.7rem;
+          height: 1px;
+          background: linear-gradient(90deg, rgba(51, 65, 85, 0.22), rgba(125, 211, 252, 0.28), rgba(51, 65, 85, 0.22));
+          pointer-events: none;
+        }
+        .live-baton-rail::after {
+          content: "";
+          position: absolute;
+          left: 1.5rem;
+          top: 2.7rem;
+          height: 1px;
+          width: min(18%, 180px);
+          min-width: 110px;
+          background: linear-gradient(90deg, transparent, rgba(103, 232, 249, 0.82), transparent);
+          animation: liveRailFlow 5.4s ease-in-out infinite;
+          pointer-events: none;
+        }
+        .live-baton-node {
+          isolation: isolate;
+        }
+        .live-baton-node::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 48%);
+          opacity: 0.85;
+          pointer-events: none;
+        }
+        }
+
+        .live-stage-float {
+          animation: liveStageFloat 10s ease-in-out infinite;
+        }
+
+        .live-stage-glow {
+          animation: liveStageFloat 8s ease-in-out infinite;
+        }
+
+        .live-stage-dot {
+          animation: liveBatonPulse 2.6s ease-in-out infinite;
+        }
+
+        .live-baton-core {
+          animation: liveCorePulse 2.8s ease-in-out infinite;
+        }
+
+        .live-stage-track::before {
+          content: "";
+          position: absolute;
+          left: 6%;
+          right: 6%;
+          top: 50%;
+          height: 1px;
+          background: linear-gradient(90deg, rgba(51, 65, 85, 0.2), rgba(125, 211, 252, 0.25), rgba(51, 65, 85, 0.2));
+          transform: translateY(-50%);
+        }
+
+        .live-stage-track::after {
+          content: "";
+          position: absolute;
+          left: 6%;
+          width: 28%;
+          top: 50%;
+          height: 1px;
+          background: linear-gradient(90deg, transparent, rgba(103, 232, 249, 0.78), transparent);
+          transform: translateY(-50%);
+          animation: liveSignalSweep 4.6s ease-in-out infinite;
+        }
+
+        .live-stage-current::after {
+          content: "";
+          position: absolute;
+          inset: -1px;
+          border-radius: 24px;
+          border: 1px solid rgba(125, 211, 252, 0.25);
+          box-shadow: 0 0 0 0 rgba(34, 211, 238, 0);
+          animation: liveBatonPulse 2.9s ease-in-out infinite;
+          pointer-events: none;
+        }
+
+        @media (max-width: 1535px) {
+          .live-stage-track::before,
+          .live-stage-track::after {
+            display: none;
+          }
+        }
+        @media (max-width: 767px) {
+          .live-baton-rail::before,
+          .live-baton-rail::after {
+            display: none;
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .live-stage-float,
+          .live-stage-glow,
+          .live-stage-dot,
+          .live-baton-core,
+          .live-stage-current::after,
+          .live-stage-track::after,
+          .live-baton-rail::after {
+            animation: none;
+          }
+        }
+      `}</style>
     </main>
   );
 }

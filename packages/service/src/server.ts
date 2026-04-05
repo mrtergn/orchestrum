@@ -136,6 +136,8 @@ export async function startService(options: ServiceOptions = {}) {
   });
 
   const useKeychain = process.env.ORCHESTRUM_USE_KEYCHAIN === "1";
+  const host = process.env.ORCHESTRUM_SERVICE_HOST?.trim() || undefined;
+  const bootToken = process.env.ORCHESTRUM_BOOT_TOKEN?.trim() || undefined;
   const stateIndex = new StateIndex({
     rootDir,
     runsDir,
@@ -146,7 +148,8 @@ export async function startService(options: ServiceOptions = {}) {
 
   registerMetaOpsRoutes(app, {
     rootDir,
-    runsDir
+    runsDir,
+    bootToken
   });
   registerInsightsOpsRoutes(app, {
     stateIndex,
@@ -215,10 +218,11 @@ export async function startService(options: ServiceOptions = {}) {
     res.status(500).json({ error: err.message });
   });
 
-  const server = app.listen(port, () => {
-    console.log(`[orchestrum] service listening on http://localhost:${port}`);
-    void logger.info("service.started", { port, runsDir });
-  });
+  const onListen = () => {
+    console.log(`[orchestrum] service listening on http://${host ?? "localhost"}:${port}`);
+    void logger.info("service.started", { port, host: host ?? "localhost", runsDir });
+  };
+  const server = host ? app.listen(port, host, onListen) : app.listen(port, onListen);
 
   const shutdown = () => {
     agentPlatform.shutdown();

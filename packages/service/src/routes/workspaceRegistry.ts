@@ -6,11 +6,13 @@ import {
   loadWorkspaces,
   removeWorkspace,
   updateWorkspace,
-  validateWorkspacePath
+  validateWorkspacePath,
+  normalizeTaskStatus
 } from "@orchestrum/core";
 
 type RunIndexLike = {
   list(filter?: { workspaceId?: string; status?: string; tag?: string; search?: string }): any[];
+  sync(filter?: { workspaceId?: string; runId?: string }): Promise<void>;
 };
 
 export function registerWorkspaceRegistryRoutes(
@@ -33,6 +35,14 @@ export function registerWorkspaceRegistryRoutes(
       });
       for (const workspace of workspaces) {
         await options.rememberWorkspacePath(workspace.path);
+      }
+      // Ensure run index is fresh so workspace.status reflects latest runs.
+      // This allows UI indicators (e.g., sidebar dots) to react to status changes
+      // as soon as SSE invalidates the cached query.
+      try {
+        await options.runIndex.sync();
+      } catch {
+        // Best-effort sync; fall back to current index snapshot on failure.
       }
       const enriched = await Promise.all(workspaces.map((workspace) => buildWorkspaceSummary(workspace, options.runIndex)));
       res.json({ workspaces: enriched });
@@ -128,10 +138,24 @@ async function buildWorkspaceSummary(
   const status = !validation.exists || !validation.readable || !validation.isDirectory
     ? "invalid"
     : (lastRun?.status ?? "idle");
+  // Map runtime status to a compact color indicator for sidebar dots.
+  // Colors: green=idle/succeeded, amber=running/active, red=failed/blocked (and invalid).
+  const statusColor: "green" | "amber" | "red" = (() => {
+    const raw = String(status ?? "").trim().toLowerCase();
+    if (raw === "invalid") return "red" as const;
+    if (raw === "idle") return "green" as const;
+    const normalized = normalizeTaskStatus(raw);
+    if (normalized === "running") return "amber" as const;
+    if (normalized === "failed" || normalized === "blocked") return "red" as const;
+    if (normalized === "succeeded") return "green" as const;
+    // Default: treat unknown/queued/cancelled as healthy to avoid sidebar noise.
+    return "green" as const;
+  })();
   return {
     ...workspace,
     validation,
     status,
+    statusColor,
     lastRun
   };
 }

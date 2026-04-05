@@ -89,6 +89,48 @@ html {
   50% { opacity: 0.6; }
 }
 
+/* ── Live Stage: baton & orchestra motion ── */
+@keyframes baton-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0.0), 0 0 24px rgba(34,211,238,0.0); }
+  50% { box-shadow: 0 0 0 6px rgba(34,211,238,0.12), 0 0 32px rgba(34,211,238,0.18); }
+}
+
+@keyframes baton-ring {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.12); opacity: 0; }
+}
+
+@keyframes lane-enter {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes ticker-slide {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes status-pop {
+  0% { transform: scale(0.8); opacity: 0; }
+  60% { transform: scale(1.06); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes connector-flow {
+  0% { background-position: 0% 0%; }
+  100% { background-position: 200% 0%; }
+}
+
+@keyframes spotlight-glow {
+  0%, 100% { box-shadow: inset 0 1px 0 rgba(125,211,252,0.08), 0 0 60px rgba(34,211,238,0.0); }
+  50% { box-shadow: inset 0 1px 0 rgba(125,211,252,0.15), 0 0 80px rgba(34,211,238,0.12); }
+}
+
+@keyframes command-strip-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
 .animate-in {
   animation: fade-in-scale 0.2s ease-out;
 }
@@ -99,6 +141,44 @@ html {
 
 .animate-slide-down {
   animation: slide-down 0.25s ease-out both;
+}
+
+/* Live stage utilities */
+.live-baton-breathe {
+  animation: baton-breathe 2.8s ease-in-out infinite;
+}
+
+.live-lane-enter {
+  animation: lane-enter 0.4s ease-out both;
+}
+
+.live-ticker-slide {
+  animation: ticker-slide 0.3s ease-out both;
+}
+
+.live-status-pop {
+  animation: status-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.live-spotlight-glow {
+  animation: spotlight-glow 3.6s ease-in-out infinite;
+}
+
+.live-connector-flow {
+  background: linear-gradient(90deg, transparent 0%, rgba(125,211,252,0.3) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: connector-flow 3s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-baton-breathe,
+  .live-lane-enter,
+  .live-ticker-slide,
+  .live-status-pop,
+  .live-spotlight-glow,
+  .live-connector-flow {
+    animation: none;
+  }
 }
 
 /* Stagger children for page load feel */

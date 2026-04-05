@@ -1365,6 +1365,99 @@ export function registerWorkIntakeRoutes(
   for (const route of ["/work-items/pbi-preview", "/api/work-items/pbi-preview"] as const) {
     app.get(route, previewPbiHandler);
   }
+  // Create a convenience endpoint for creating a "feature task" work item
+  // from a higher-level payload commonly produced by planners. This maps
+  // the external fields to the canonical WorkItemCreateRequest accepted
+  // by POST /api/work-items.
+  const createFeatureTaskHandler = async (req: express.Request, res: express.Response) => {
+    const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+    const payload = body.payload && typeof body.payload === "object" ? (body.payload as Record<string, unknown>) : body;
+
+    const workspaceId = typeof body.workspaceId === "string" && body.workspaceId.trim()
+      ? body.workspaceId.trim()
+      : typeof payload.workspaceId === "string" && payload.workspaceId.trim()
+        ? (payload.workspaceId as string).trim()
+        : "";
+    if (!workspaceId) return res.status(400).json({ error: "workspaceId is required" });
+    const workspacePath = await options.resolveWorkspacePath(workspaceId);
+    if (!workspacePath) return res.status(404).json({ error: "Workspace not found" });
+
+    const sourceTypeRaw = typeof payload.sourceType === "string" ? payload.sourceType.trim().toLowerCase() : "feature";
+    const sourceType = normalizeSourceType(sourceTypeRaw);
+    if (!sourceType) return res.status(400).json({ error: "sourceType is required" });
+
+    const title = typeof payload.workItemTitle === "string" && payload.workItemTitle.trim()
+      ? (payload.workItemTitle as string).trim()
+      : typeof payload.title === "string" && payload.title.trim()
+        ? (payload.title as string).trim()
+        : "";
+    if (!title) return res.status(400).json({ error: "workItemTitle (or title) is required" });
+
+    const request = typeof payload.request === "string" && payload.request.trim()
+      ? (payload.request as string).trim()
+      : typeof payload.planningSummary === "string" && payload.planningSummary.trim()
+        ? (payload.planningSummary as string).trim()
+        : "";
+    if (!request) return res.status(400).json({ error: "request (or planningSummary) is required" });
+
+    const recommendedTemplateId = templateForSourceType(sourceType);
+    const workItems = await loadWorkItemsForWorkspacePath(workspacePath);
+    const now = new Date().toISOString();
+
+    const workItem: WorkItemRecord = {
+      id: crypto.randomUUID(),
+      workspaceId,
+      brief: {
+        workspaceId,
+        sourceType,
+        title,
+        request,
+        sourceRef: null,
+        acceptanceCriteria: [],
+        constraints: []
+      },
+      status: "draft",
+      recommendedTemplateId,
+      executionMode: null,
+      linkedRunId: null,
+      linkedRunStatus: null,
+      linkedRunVerdict: null,
+      linkedTaskIds: [],
+      linkedTaskStatus: null,
+      reviewStatus: "pending",
+      reviewNote: null,
+      reviewedAt: null,
+      currentCycleId: null,
+      cycles: [],
+      remediationPlan: null,
+      optimization: null,
+      createdAt: now,
+      updatedAt: now,
+      lastStartedAt: null
+    };
+
+    workItems.unshift(workItem);
+    await saveWorkItemsForWorkspacePath(workspacePath, workItems);
+    await appendWorkspaceSignal(workspacePath, {
+      workspaceId,
+      source: "work",
+      type: "work-item.created",
+      entityId: workItem.id,
+      status: workItem.status,
+      summary: `Work item created: ${title}`,
+      payload: {
+        sourceType,
+        title,
+        workItemId: workItem.id
+      }
+    }).catch(() => undefined);
+
+    return res.status(201).json({ workItem });
+  };
+
+  for (const route of ["/work-items/feature-task", "/api/work-items/feature-task"] as const) {
+    app.post(route, createFeatureTaskHandler);
+  }
   for (const route of ["/work-items/sprint-preview", "/api/work-items/sprint-preview"] as const) {
     app.get(route, previewSprintHandler);
   }

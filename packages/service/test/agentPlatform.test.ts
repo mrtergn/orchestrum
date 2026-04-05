@@ -56,6 +56,70 @@ test("mission-backed implement task fails explicitly when mission execution fail
   assert.equal(fsSync.existsSync(path.join(task.artifactsPath, "manual-task.md")), false);
 });
 
+test("mission-blocked missions map to task failed (no scheduler stall)", async () => {
+  assert.ok(fixture);
+  const now = new Date().toISOString();
+  runMissionDetailedMock.mockResolvedValueOnce({
+    ok: true,
+    runId: "run-blocked",
+    runDir: path.join(fixture.rootDir, "runs", "demo", "run-blocked"),
+    run: {
+      runId: "run-blocked",
+      kind: "mission",
+      status: "blocked",
+      start: now,
+      end: now,
+      workspaceId: "demo",
+      repoPath: fixture!.repoPath,
+      missionTemplateId: "implement-only",
+      goal: "Implement but encounter blocking findings.",
+      totalSteps: 2,
+      completedSteps: 2,
+      totalTokens: 0,
+      totalCost: 0,
+      graph: {
+        templateId: "implement-only",
+        name: "Implement Only",
+        description: "Implement only",
+        category: "implementation",
+        nodes: []
+      },
+      pauseReason: null,
+      change: { status: "none" },
+      validation: { status: "not_requested", commands: [], results: [] },
+      recovery: { summary: "Blocking repo findings detected." },
+      verdict: "blocked"
+    }
+  });
+
+  const task = await createQueuedTask(fixture!, "implement");
+  await (fixture!.platform as any).schedulerTick();
+  await waitFor(() => task.status === "failed");
+
+  assert.equal(task.status, "failed");
+  assert.match(task.resultSummary ?? "", /Blocking repo findings detected\.|Mission finished with blocking findings\./);
+});
+
+test("reconcileDependencyStates recovers mission-blocked tasks to failed when deps are clear", async () => {
+  assert.ok(fixture);
+  const task = await createQueuedTask(fixture, "implement");
+  // Simulate a previously-run mission that ended as blocked (legacy behavior)
+  Object.assign(task, {
+    status: "blocked",
+    linkedRunId: "legacy-blocked-run",
+    resultSummary: "Mission finished with blocking findings.",
+    dependsOnTaskIds: [],
+    waitingOnTaskIds: [],
+    blockedByTaskIds: []
+  });
+
+  await (fixture.platform as any).reconcileDependencyStates();
+
+  assert.equal(task.status, "failed");
+  assert.equal((task as any).blockedByTaskIds.length, 0);
+  assert.match(task.resultSummary ?? "", /blocking findings/i);
+});
+
 test("repo-changing tasks are mission-backed and mirror mission truth", async () => {
   assert.ok(fixture);
   const now = new Date().toISOString();
@@ -187,6 +251,39 @@ test("resumed mission runs sync linked task truth when the resumed run settles i
   assert.equal(task.validation?.status, "not_requested");
   assert.equal(task.verdict, "ready_for_review");
   assert.match(task.resultSummary ?? "", /Mission completed with change=applied and validation=not_requested\./);
+});
+
+test("listTasks backfills linked run metadata from task artifacts", async () => {
+  assert.ok(fixture);
+
+  const task = await createQueuedTask(fixture, "implement");
+  const rawTask = task as typeof task & {
+    workspaceId?: string;
+    linkedWorkItemId?: string;
+    linkedTemplateId?: string;
+  };
+  rawTask.workspaceId = "demo";
+  rawTask.linkedWorkItemId = "work-item-1";
+  rawTask.status = "running";
+  rawTask.linkedRunId = undefined;
+  rawTask.linkedTemplateId = undefined;
+
+  await fs.writeFile(
+    path.join(task.artifactsPath, "linked-run.json"),
+    JSON.stringify({
+      taskId: "task-artifact",
+      workspaceId: "demo",
+      templateId: "implement-only",
+      runId: "task-artifact-run-1"
+    }, null, 2),
+    "utf8"
+  );
+
+  const listed = fixture.platform.listTasks({ workspaceId: "demo", workItemId: "work-item-1" });
+
+  assert.equal(listed[0]?.linkedRunId, "task-artifact-run-1");
+  assert.equal(listed[0]?.linkedTemplateId, "implement-only");
+  assert.equal(rawTask.linkedRunId, "task-artifact-run-1");
 });
 
 test("mission-backed task goals omit orchestration-only payload fields", async () => {
@@ -437,8 +534,8 @@ test("mission launch auto-bootstraps a minimal workspace roster when none exists
 
   const call = runMissionDetailedMock.mock.calls.at(-1)?.[0] as { agents?: Array<{ role?: string; name?: string }> } | undefined;
   assert.deepEqual(
-    (call?.agents ?? []).map((agent) => agent.role).sort(),
-    ["audit", "dev", "pm"]
+    (call?.agents ?? []).map((agent) => agent.name).sort(),
+    ["Audit Agent", "Backend Agent", "Developer Agent", "Frontend Agent", "PM Agent", "QA Agent", "Tester Agent"]
   );
 
   const savedAgents = JSON.parse(
@@ -446,10 +543,116 @@ test("mission launch auto-bootstraps a minimal workspace roster when none exists
   ) as Array<{ name: string; role: string; profile?: { specialization?: string }; provider?: { vendor?: string; profileId?: string } }>;
   assert.deepEqual(
     savedAgents.map((agent) => `${agent.role}:${agent.profile?.specialization ?? ""}`).sort(),
-    ["audit:audit", "dev:fullstack", "pm:pm"]
+    ["audit:audit", "dev:backend", "dev:frontend", "dev:fullstack", "dev:qa", "dev:tester", "pm:pm"]
   );
-  assert.equal(savedAgents.find((agent) => agent.role === "dev")?.provider?.vendor, "codex");
-  assert.equal(savedAgents.find((agent) => agent.role === "dev")?.provider?.profileId, "codex-cli-balanced");
+  for (const agent of savedAgents.filter((entry) => entry.role === "dev")) {
+    assert.equal(agent.provider?.vendor, "codex");
+    assert.equal(agent.provider?.profileId, "codex-cli-balanced");
+  }
+
+  bootstrapFixture.platform.shutdown();
+});
+
+test("feature bootstrap upgrades the legacy Delivery Agent and fills missing specialists", async () => {
+  const bootstrapFixture = await createFixture({ seedAgents: false });
+  const agentsPath = path.join(bootstrapFixture.repoPath, ".orchestrum", "control", "agents.json");
+  const createdAt = new Date().toISOString();
+  await fs.writeFile(
+    agentsPath,
+    JSON.stringify([
+      {
+        id: "pm-agent",
+        workspaceId: "demo",
+        name: "PM Agent",
+        role: "pm",
+        tags: ["preset", "auto-bootstrap"],
+        profile: { specialization: "pm", seniority: "lead", maxParallelWork: 1 },
+        provider: { vendor: "codex", transport: "cli", profileId: "codex-cli-balanced" },
+        capabilities: { shell: false, fs: true, network: true },
+        status: { state: "idle", currentTaskIds: [], lastHeartbeatAt: createdAt },
+        createdAt,
+        updatedAt: createdAt
+      },
+      {
+        id: "delivery-agent",
+        workspaceId: "demo",
+        name: "Delivery Agent",
+        role: "dev",
+        tags: ["preset", "auto-bootstrap"],
+        profile: { specialization: "fullstack", seniority: "senior", maxParallelWork: 2 },
+        provider: { vendor: "codex", transport: "cli", profileId: "codex-cli-balanced" },
+        capabilities: { shell: false, fs: true, network: true },
+        status: { state: "idle", currentTaskIds: [], lastHeartbeatAt: createdAt },
+        createdAt,
+        updatedAt: createdAt
+      },
+      {
+        id: "audit-agent",
+        workspaceId: "demo",
+        name: "Audit Agent",
+        role: "audit",
+        tags: ["preset", "auto-bootstrap"],
+        profile: { specialization: "audit", seniority: "senior", maxParallelWork: 1 },
+        provider: { vendor: "codex", transport: "cli", profileId: "codex-cli-balanced" },
+        capabilities: { shell: false, fs: true, network: true },
+        status: { state: "idle", currentTaskIds: [], lastHeartbeatAt: createdAt },
+        createdAt,
+        updatedAt: createdAt
+      }
+    ], null, 2),
+    "utf8"
+  );
+
+  discoverMissionProvidersMock.mockResolvedValue([]);
+  const now = new Date().toISOString();
+  runMissionDetailedMock.mockResolvedValueOnce({
+    ok: true,
+    runId: "run-legacy-upgrade",
+    runDir: path.join(bootstrapFixture.rootDir, "runs", "demo", "run-legacy-upgrade"),
+    run: {
+      runId: "run-legacy-upgrade",
+      kind: "mission",
+      status: "completed",
+      start: now,
+      end: now,
+      workspaceId: "demo",
+      repoPath: bootstrapFixture.repoPath,
+      missionTemplateId: "feature-dev",
+      goal: "Upgrade legacy bench.",
+      totalSteps: 1,
+      completedSteps: 1,
+      totalTokens: 0,
+      totalCost: 0,
+      graph: {
+        templateId: "feature-dev",
+        name: "Feature Dev Loop",
+        description: "Feature dev",
+        category: "implementation",
+        nodes: []
+      },
+      pauseReason: null,
+      change: null,
+      validation: null,
+      verdict: "ready_to_merge"
+    }
+  });
+
+  const started = await bootstrapFixture.platform.startMission({
+    runsDir: path.join(bootstrapFixture.rootDir, "runs"),
+    workspaceId: "demo",
+    repoPath: bootstrapFixture.repoPath,
+    templateId: "feature-dev",
+    goal: "Upgrade legacy bench."
+  });
+
+  assert.equal(started.ok, true);
+  const savedAgents = JSON.parse(await fs.readFile(agentsPath, "utf8")) as Array<{ name: string; role: string; profile?: { specialization?: string } }>;
+  assert.equal(savedAgents.some((agent) => agent.name === "Delivery Agent"), false);
+  assert.equal(savedAgents.some((agent) => agent.name === "Developer Agent" && agent.profile?.specialization === "fullstack"), true);
+  assert.deepEqual(
+    savedAgents.map((agent) => `${agent.role}:${agent.profile?.specialization ?? ""}`).sort(),
+    ["audit:audit", "dev:backend", "dev:frontend", "dev:fullstack", "dev:qa", "dev:tester", "pm:pm"]
+  );
 
   bootstrapFixture.platform.shutdown();
 });
@@ -597,10 +800,13 @@ test("bootstrap keeps a detected provider but marks it as needing setup", async 
     "demo",
     bootstrapFixture.repoPath
   );
-  const devAgent = enriched.find((agent: { role?: string }) => agent.role === "dev");
-  assert.equal(devAgent?.provider?.vendor, "copilot");
-  assert.equal(devAgent?.runtime?.providerReadiness, "detected_needs_setup");
-  assert.match(devAgent?.runtime?.providerReadinessReason ?? "", /needs sign-in or setup/i);
+  const devAgents = enriched.filter((agent: { role?: string }) => agent.role === "dev");
+  assert.equal(devAgents.length >= 4, true);
+  for (const agent of devAgents) {
+    assert.equal(agent?.provider?.vendor, "copilot");
+    assert.equal(agent?.runtime?.providerReadiness, "detected_needs_setup");
+    assert.match(agent?.runtime?.providerReadinessReason ?? "", /needs sign-in or setup/i);
+  }
 
   bootstrapFixture.platform.shutdown();
 });

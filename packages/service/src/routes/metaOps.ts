@@ -12,10 +12,11 @@ export function registerMetaOpsRoutes(
   options: {
     rootDir: string;
     runsDir: string;
+    bootToken?: string;
   }
 ): void {
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, runsDir: options.runsDir });
+    res.json({ ok: true, runsDir: options.runsDir, bootToken: options.bootToken ?? null, pid: process.pid });
   });
 
   app.get("/meta/version", async (_req, res) => {

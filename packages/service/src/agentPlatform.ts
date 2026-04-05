@@ -791,6 +791,7 @@ export class AgentPlatform {
     const workspaceId = options?.workspaceId?.trim();
     const workItemId = options?.workItemId?.trim();
     return this.tasks
+      .map((task) => this.backfillLinkedRunMetadata(task))
       .filter((task) => {
         if (workspaceId && task.workspaceId !== workspaceId) return false;
         if (workItemId && task.linkedWorkItemId !== workItemId) return false;
@@ -798,6 +799,30 @@ export class AgentPlatform {
       })
       .slice()
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  private backfillLinkedRunMetadata(task: TaskRecord): TaskRecord {
+    if (typeof task.linkedRunId === "string" && task.linkedRunId.trim()) {
+      return task;
+    }
+    const artifactPath = path.join(task.artifactsPath, "linked-run.json");
+    if (!fsSync.existsSync(artifactPath)) {
+      return task;
+    }
+    try {
+      const raw = JSON.parse(fsSync.readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+      const linkedRunId = typeof raw.runId === "string" && raw.runId.trim() ? raw.runId.trim() : "";
+      if (!linkedRunId) {
+        return task;
+      }
+      task.linkedRunId = linkedRunId;
+      if (!(typeof task.linkedTemplateId === "string" && task.linkedTemplateId.trim())) {
+        task.linkedTemplateId = typeof raw.templateId === "string" && raw.templateId.trim() ? raw.templateId.trim() : undefined;
+      }
+    } catch {
+      return task;
+    }
+    return task;
   }
 
   async queueWorkItemExecution(options: {
@@ -1509,9 +1534,13 @@ export class AgentPlatform {
   }
 
   private mapRunStatusToTaskStatus(status: MissionRun["status"]): TaskStatus {
+    // Intentional mapping: a mission run that ends as "blocked" indicates
+    // unrecoverable findings (e.g., gating/validation blocks) rather than a
+    // dependency wait in the task graph. Mapping to "failed" prevents the
+    // scheduler from treating downstream tasks as perpetually dependency-blocked.
     if (status === "completed") return "succeeded";
     if (status === "paused") return "paused";
-    if (status === "blocked") return "blocked";
+    if (status === "blocked") return "failed";
     if (status === "cancelled") return "cancelled";
     if (status === "failed" || status === "interrupted") return "failed";
     return "running";
@@ -2009,6 +2038,36 @@ export class AgentPlatform {
     const changedTasks: TaskRecord[] = [];
 
     for (const task of this.tasks) {
+      // Recovery: tasks that already ran (linkedRunId present) but ended with mission-blocked
+      // status are in a bad state regardless of dependency count. Map to "failed" immediately.
+      if (task.status === "blocked" && task.linkedRunId) {
+        task.status = "failed";
+        task.resultSummary = task.resultSummary ?? "Mission finished with blocking findings.";
+        task.waitingOnTaskIds = [];
+        task.blockedByTaskIds = [];
+        changedTasks.push(task);
+        await this.appendLog(task, "Mission ended 'blocked'; marking task as failed to avoid dependency deadlock.");
+        continue;
+      }
+
+      // Recovery: tasks stuck in "running" after service restart. If a task has been running
+      // with a linkedRunId but the run has completed on disk, sync the final state.
+      if (task.status === "running" && task.linkedRunId) {
+        const runDir = path.join(this.runsDir(), task.workspaceId ?? "unknown", task.linkedRunId);
+        const runJsonPath = path.join(runDir, "run.json");
+        if (fsSync.existsSync(runJsonPath)) {
+          try {
+            const diskRun = JSON.parse(fsSync.readFileSync(runJsonPath, "utf8")) as MissionRun;
+            if (diskRun.status !== "running" && diskRun.status !== "paused") {
+              await this.syncTaskFromMissionRun(task, diskRun);
+              changedTasks.push(task);
+              await this.appendLog(task, `Recovered orphaned running task from disk run (status=${diskRun.status}).`);
+            }
+          } catch { /* disk read failure - skip recovery */ }
+        }
+        continue;
+      }
+
       if (task.dependsOnTaskIds.length === 0) continue;
       if (task.status === "running" || task.status === "succeeded" || task.status === "failed" || task.status === "cancelled" || task.status === "paused") {
         continue;
@@ -2016,11 +2075,10 @@ export class AgentPlatform {
 
       const evaluation = this.evaluateTaskDependencies(task);
       const dependencyManaged = task.blockedByTaskIds.length > 0 || task.waitingOnTaskIds.length > 0;
-      let nextStatus = task.status;
+      let nextStatus: TaskStatus = task.status;
       let nextSummary = task.resultSummary;
       let nextWaiting = task.waitingOnTaskIds;
       let nextBlocked = task.blockedByTaskIds;
-
       if (evaluation.state === "blocked") {
         nextStatus = "blocked";
         nextSummary = evaluation.reason;
@@ -2380,11 +2438,16 @@ export class AgentPlatform {
     }).catch(() => null);
 
     const existing = await this.loadAgentsForWorkspacePath(workspacePath);
+    const normalizedExisting = this.normalizeLegacyBootstrapAgents(existing);
+    if (normalizedExisting.changed) {
+      await this.saveAgentsForWorkspacePath(workspacePath, normalizedExisting.agents);
+      await this.refreshWorkspaceState();
+    }
     const requirements = this.bootstrapRequirementsForTemplate(options.templateId);
     const missing = requirements.filter((requirement) =>
-      !existing.some((agent) => this.agentSatisfiesBootstrapRequirement(agent, requirement))
+      !normalizedExisting.agents.some((agent) => this.agentSatisfiesBootstrapRequirement(agent, requirement))
     );
-    if (missing.length === 0) return existing;
+    if (missing.length === 0) return normalizedExisting.agents;
 
     const now = new Date().toISOString();
     const created = await Promise.all(missing.map((requirement) => this.createBootstrapAgent({
@@ -2396,7 +2459,7 @@ export class AgentPlatform {
       maxParallelWork: requirement.maxParallelWork,
       createdAt: now
     })));
-    const next = [...existing, ...created];
+    const next = [...normalizedExisting.agents, ...created];
     await this.saveAgentsForWorkspacePath(workspacePath, next);
     await this.refreshWorkspaceState();
     for (const agent of created) {
@@ -2440,12 +2503,38 @@ export class AgentPlatform {
       });
     }
     if (recommendedRoles.has("dev")) {
-      requirements.push({
-        role: "dev",
-        specialization: "fullstack",
-        name: "Delivery Agent",
-        maxParallelWork: 2
-      });
+      requirements.push(
+        {
+          role: "dev",
+          specialization: "frontend",
+          name: "Frontend Agent",
+          maxParallelWork: 1
+        },
+        {
+          role: "dev",
+          specialization: "backend",
+          name: "Backend Agent",
+          maxParallelWork: 1
+        },
+        {
+          role: "dev",
+          specialization: "fullstack",
+          name: "Developer Agent",
+          maxParallelWork: 2
+        },
+        {
+          role: "dev",
+          specialization: "tester",
+          name: "Tester Agent",
+          maxParallelWork: 1
+        },
+        {
+          role: "dev",
+          specialization: "qa",
+          name: "QA Agent",
+          maxParallelWork: 1
+        }
+      );
     }
     if (recommendedRoles.has("audit") || recommendedRoles.has("security")) {
       requirements.push({
@@ -2459,7 +2548,7 @@ export class AgentPlatform {
       requirements.push({
         role: "dev",
         specialization: "fullstack",
-        name: "Delivery Agent",
+        name: "Developer Agent",
         maxParallelWork: 2
       });
     }
@@ -2476,9 +2565,26 @@ export class AgentPlatform {
     if (!this.roleMatches(agent.role, requirement.role)) return false;
     const specialization = agent.profile.specialization.trim().toLowerCase();
     const required = requirement.specialization.trim().toLowerCase();
-    if (specialization === required) return true;
-    if (required === "pm" || required === "audit") return false;
-    return specialization === "fullstack";
+    return specialization === required;
+  }
+
+  private normalizeLegacyBootstrapAgents(agents: AgentRecord[]): { changed: boolean; agents: AgentRecord[] } {
+    let changed = false;
+    const normalized = agents.map((agent) => {
+      const specialization = agent.profile.specialization.trim().toLowerCase();
+      const isAutoBootstrap = agent.tags.includes("auto-bootstrap") || agent.tags.includes("preset");
+      if (!isAutoBootstrap) return agent;
+      if (specialization === "fullstack" && agent.name === "Delivery Agent") {
+        changed = true;
+        return {
+          ...agent,
+          name: "Developer Agent",
+          updatedAt: new Date().toISOString()
+        };
+      }
+      return agent;
+    });
+    return { changed, agents: normalized };
   }
 
   private createBootstrapAgent(options: {
